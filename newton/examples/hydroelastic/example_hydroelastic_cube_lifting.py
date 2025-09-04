@@ -91,7 +91,7 @@ class Example:
 
         # Setup solver
         # self.solver = newton.solvers.SolverSemiImplicit(self.model, joint_attach_ke=20000, joint_attach_kd=1.0e2)
-        self.solver = newton.solvers.SolverFeatherstone(self.model, angular_damping=0.100)
+        self.solver = newton.solvers.SolverFeatherstone(self.model, angular_damping=0.100, update_mass_matrix_interval=self.sim_substeps)
         # self.solver = newton.solvers.SolverMuJoCo(self.model, disable_contacts=True)
 
         # Get id for twist convention. (TODO: Change to enum instead of int)
