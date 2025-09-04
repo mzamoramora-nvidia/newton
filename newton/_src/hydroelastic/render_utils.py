@@ -88,22 +88,21 @@ def render_isosurfaces(viewer, state_0, contacts, editable_vars):
     if not editable_vars.render_isosurfaces_flag:
         return
 
-    # # TODO: Fix drawing of normals.
-    # # TODO: Draw normals with colors indicating the pressure.
-    # with wp.ScopedTimer("draw_polygon_normals", print=False):
-    #     for i in range(len(contacts.isosurface)):
-    #         max_normals_found = contacts.isosurface[i].geom_pairs.shape[0]
-    #         pressure_values = None
-    #         draw_polygon_normals(
-    #             viewer,
-    #             f"/{contacts.isosurface[i].label}",
-    #             max_normals_found,
-    #             contacts.isosurface[i].contact_polygon.vertex_counts.numpy(),
-    #             contacts.isosurface[i].contact_polygon.centroids.numpy(),
-    #             contacts.isosurface[i].contact_polygon.normals.numpy(),
-    #             pressure_values,
-    #             np_vertex_offset=editable_vars.np_vertex_offset,
-    #         )
+    # TODO: Draw normals with colors indicating the pressure.
+    with wp.ScopedTimer("draw_polygon_normals", print=False):
+        for i in range(len(contacts.isosurface)):
+            max_normals_found = contacts.isosurface[i].geom_pairs.shape[0]
+            pressure_values = None
+            draw_polygon_normals(
+                viewer,
+                f"/{contacts.isosurface[i].label}",
+                max_normals_found,
+                contacts.isosurface[i].contact_polygon.vertex_counts.numpy(),
+                contacts.isosurface[i].contact_polygon.centroids.numpy(),
+                contacts.isosurface[i].contact_polygon.normals.numpy(),
+                pressure_values,
+                np_vertex_offset=editable_vars.np_vertex_offset,
+            )
 
 
 def draw_polygon_normals(
@@ -116,25 +115,17 @@ def draw_polygon_normals(
     pressure_values,
     np_vertex_offset,
 ):
-    final_points = np.zeros((2 * max_tet_pairs_found, 3))
-    final_edges = np.zeros((max_tet_pairs_found, 2), dtype=np.int32)
-    colors = np.zeros((max_tet_pairs_found, 3))
+    valid_centers = np.zeros((max_tet_pairs_found, 3))
+    valid_tips = np.zeros((max_tet_pairs_found, 3))
+    tips_color_wp = wp.full(shape=(max_tet_pairs_found,), value=wp.vec3(0.35, 0.55, 0.9))
+    tips_radii_wp = wp.full(shape=(max_tet_pairs_found,), value=0.00125)
 
     num_points = 0
     mask = vertex_counts > 0
     if np.any(mask):
-        valid_centers = polygon_centers[mask]
-        valid_normals = polygon_normals[mask]
-        num_points = min(len(valid_centers), max_tet_pairs_found)
-
-        final_points[0:num_points] = valid_centers[0:num_points] + np_vertex_offset
-        final_points[max_tet_pairs_found : max_tet_pairs_found + num_points] = (
-            final_points[0:num_points] + 0.01 * valid_normals[0:num_points]
-        )
-
-        # [0, num_points, 1, num_points+1, 2, num_points+2, 3, num_points+3, ...]
-        final_edges[0:num_points, 0] = np.arange(0, num_points)
-        final_edges[0:num_points, 1] = final_edges[0:num_points, 0] + max_tet_pairs_found
+        num_points = min(sum(mask), max_tet_pairs_found)
+        valid_centers[0:num_points, :] = polygon_centers[mask][0:num_points] + np_vertex_offset
+        valid_tips[0:num_points, :] = valid_centers[0:num_points, :] + 0.01 * polygon_normals[mask][0:num_points]
 
         # valid_pressure_values = pressure_values[mask]
         # max_pressure = np.max(valid_pressure_values)
@@ -143,20 +134,20 @@ def draw_polygon_normals(
         #     new_color = np.array(wp.render.bourke_color_map(min_pressure, max_pressure, valid_pressure_values[i]))
         #     colors[i, :] = new_color
 
+    valid_centers_wp = wp.array(valid_centers, dtype=wp.vec3)
+    valid_tips_wp = wp.array(valid_tips, dtype=wp.vec3)
+
     viewer.log_lines(
         name=isosurface_id + "_polygon_normals",
-        vertices=final_points,
-        indices=final_edges.flatten(),
-        color=(0.35, 0.55, 0.9),
-        radius=0.0005,
-        visible=True,
+        starts=valid_centers_wp,
+        ends=valid_tips_wp,
+        colors=(0.35, 0.55, 0.9),
+        width=0.0005,
     )
 
     viewer.log_points(
         name=isosurface_id + "_normal_tips",
-        points=final_points[max_tet_pairs_found : 2 * max_tet_pairs_found],
-        radius=0.00125,
-        colors=colors,
-        visible=True,
-        as_spheres=False,
+        points=valid_tips_wp,
+        radii=tips_radii_wp,
+        colors=tips_color_wp,
     )
