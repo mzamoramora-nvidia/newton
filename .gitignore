@@ -37,3 +37,9 @@ docs/_build/
 asv/env
 asv/results
 asv/html
+
+# ImGui
+imgui.ini
+
+# Output files
+out/

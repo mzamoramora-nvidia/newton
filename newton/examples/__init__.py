@@ -219,6 +219,11 @@ def main():
         "diffsim_drone": "newton.examples.diffsim.example_diffsim_drone",
         "diffsim_spring_cage": "newton.examples.diffsim.example_diffsim_spring_cage",
         "diffsim_soft_body": "newton.examples.diffsim.example_diffsim_soft_body",
+        "hydroelastic_basic_ball_vs_floor": "newton.examples.hydroelastic.example_hydroelastic_basic_ball_vs_floor",
+        "hydroelastic_basic_cube_sliding": "newton.examples.hydroelastic.example_hydroelastic_basic_cube_sliding",
+        "hydroelastic_basic_soft_vs_hard": "newton.examples.hydroelastic.example_hydroelastic_basic_soft_vs_hard",
+        "hydroelastic_cube_lifting": "newton.examples.hydroelastic.example_hydroelastic_cube_lifting",
+        "hydroelastic_pick_up_wheel": "newton.examples.hydroelastic.example_hydroelastic_pick_up_wheel",
     }
 
     if len(sys.argv) < 2:

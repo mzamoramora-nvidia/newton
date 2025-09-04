@@ -1,0 +1,3 @@
+[submodule "newton/examples/assets/experimental-hydroelastic-assets"]
+	path = newton/examples/assets/experimental-hydroelastic-assets
+	url = git@github.com:mzamoramora-nvidia/experimental-hydroelastic-assets.git

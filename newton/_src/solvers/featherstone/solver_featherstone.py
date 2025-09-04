@@ -16,6 +16,10 @@
 import warp as wp
 
 from ...core.types import override
+from ...hydroelastic.wrenches import (
+    compute_isosurface_wrenches,
+    launch_add_wrench_to_body_f,
+)
 from ...sim import Contacts, Control, Model, State, eval_fk
 from ..euler.kernels import (
     eval_bending_forces,
@@ -417,6 +421,28 @@ class SolverFeatherstone(SolverBase):
                         outputs=[body_f],
                         device=model.device,
                     )
+
+                if contacts is not None and contacts.use_hydroelastic_inside_solver:
+                    # Integrate over isosurface to compute forces and torques.
+                    for i in range(contacts.num_isosurfaces):
+                        compute_isosurface_wrenches(
+                            contacts.isosurface[i],
+                            state_in.body_q,
+                            state_aug.body_v_s,
+                            model.hydro_mesh[contacts.isosurface[i].body_a],
+                            model.hydro_mesh[contacts.isosurface[i].body_b],
+                            1,
+                        )
+
+                        launch_add_wrench_to_body_f(
+                            body_a=contacts.isosurface[i].body_a,
+                            body_b=contacts.isosurface[i].body_b,
+                            force=contacts.isosurface[i].force,
+                            torque_a=contacts.isosurface[i].torque_a,
+                            torque_b=contacts.isosurface[i].torque_b,
+                            twist_convention=1,
+                            body_f=body_f,
+                        )
 
                 if model.articulation_count:
                     # evaluate joint torques
