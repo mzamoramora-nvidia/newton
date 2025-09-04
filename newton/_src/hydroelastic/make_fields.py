@@ -116,8 +116,8 @@ def compute_field_gradient(
 
     # Compute gradients of shape functions
     # For a tetrahedron, the gradient of the field is:
-    # ∇f = (f1-f0) * ∇N1 + (f2-f0) * ∇N2 + (f3-f0) * ∇N3
-    # where ∇Ni are the gradients of the shape functions
+    # Grad f = (f1-f0) * Grad N1 + (f2-f0) * Grad N2 + (f3-f0) * Grad N3
+    # where Grad Ni are the gradients of the shape functions
 
     # Shape function gradients for tetrahedron
     grad_N1 = wp.cross(e2, e3) / (six_volume)
