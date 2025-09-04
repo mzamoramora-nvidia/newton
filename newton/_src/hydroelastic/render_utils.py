@@ -92,7 +92,6 @@ def render_isosurfaces(viewer, state_0, contacts, editable_vars):
     with wp.ScopedTimer("draw_polygon_normals", print=False):
         for i in range(len(contacts.isosurface)):
             max_normals_found = contacts.isosurface[i].geom_pairs.shape[0]
-            pressure_values = None
             draw_polygon_normals(
                 viewer,
                 f"/{contacts.isosurface[i].label}",
@@ -100,7 +99,7 @@ def render_isosurfaces(viewer, state_0, contacts, editable_vars):
                 contacts.isosurface[i].contact_polygon.vertex_counts.numpy(),
                 contacts.isosurface[i].contact_polygon.centroids.numpy(),
                 contacts.isosurface[i].contact_polygon.normals.numpy(),
-                pressure_values,
+                contacts.isosurface[i].contact_polygon.centroid_pressure.numpy(),
                 np_vertex_offset=editable_vars.np_vertex_offset,
             )
 
@@ -117,8 +116,7 @@ def draw_polygon_normals(
 ):
     valid_centers = np.zeros((max_tet_pairs_found, 3))
     valid_tips = np.zeros((max_tet_pairs_found, 3))
-    tips_color_wp = wp.full(shape=(max_tet_pairs_found,), value=wp.vec3(0.35, 0.55, 0.9))
-    tips_radii_wp = wp.full(shape=(max_tet_pairs_found,), value=0.00125)
+    colors = np.zeros((max_tet_pairs_found, 3))
 
     num_points = 0
     mask = vertex_counts > 0
@@ -127,21 +125,23 @@ def draw_polygon_normals(
         valid_centers[0:num_points, :] = polygon_centers[mask][0:num_points] + np_vertex_offset
         valid_tips[0:num_points, :] = valid_centers[0:num_points, :] + 0.01 * polygon_normals[mask][0:num_points]
 
-        # valid_pressure_values = pressure_values[mask]
-        # max_pressure = np.max(valid_pressure_values)
-        # min_pressure = np.min(valid_pressure_values)
-        # for i in range(num_points):
-        #     new_color = np.array(wp.render.bourke_color_map(min_pressure, max_pressure, valid_pressure_values[i]))
-        #     colors[i, :] = new_color
+        valid_pressure_values = pressure_values[mask]
+        max_pressure = np.max(valid_pressure_values)
+        min_pressure = np.min(valid_pressure_values)
+        for i in range(num_points):
+            new_color = np.array(wp.render.bourke_color_map(min_pressure, max_pressure, valid_pressure_values[i]))
+            colors[i, :] = new_color
 
     valid_centers_wp = wp.array(valid_centers, dtype=wp.vec3)
     valid_tips_wp = wp.array(valid_tips, dtype=wp.vec3)
+    colors_wp = wp.array(colors, dtype=wp.vec3)
+    tips_radii_wp = wp.full(shape=(max_tet_pairs_found,), value=0.00125)
 
     viewer.log_lines(
         name=isosurface_id + "_polygon_normals",
         starts=valid_centers_wp,
         ends=valid_tips_wp,
-        colors=(0.35, 0.55, 0.9),
+        colors=colors_wp,
         width=0.0005,
     )
 
@@ -149,5 +149,5 @@ def draw_polygon_normals(
         name=isosurface_id + "_normal_tips",
         points=valid_tips_wp,
         radii=tips_radii_wp,
-        colors=tips_color_wp,
+        colors=colors_wp,
     )

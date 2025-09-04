@@ -800,8 +800,12 @@ class Example:
         # hydroelastic_render_utils.render_visuals(self.viewer, self.state_0, self.visuals,)
 
     def render_isosurface(self):
-        pass
-        # hydroelastic_render_utils.render_isosurfaces(self.viewer, self.state_0, self.contacts, self.editable_vars,)
+        hydroelastic_render_utils.render_isosurfaces(
+            self.viewer,
+            self.state_0,
+            self.contacts,
+            self.editable_vars,
+        )
 
     def setup_imgui(self):
         # Initialize ImGui manager
