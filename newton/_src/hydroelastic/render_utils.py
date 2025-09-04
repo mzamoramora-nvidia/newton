@@ -88,15 +88,36 @@ def render_isosurfaces(viewer, state_0, contacts, editable_vars):
     if not editable_vars.render_isosurfaces_flag:
         return
 
-    # TODO: Draw normals with colors indicating the pressure.
-    with wp.ScopedTimer("draw_polygon_normals", print=False):
+    # TODO: Add different flags to gui to enable/disable rendering of
+    # - normals
+    # - edges
+    # - etc.
+
+    # with wp.ScopedTimer("draw_polygon_normals", print=False):
+    #     for i in range(len(contacts.isosurface)):
+    #         # max_normals_found = contacts.isosurface[i].geom_pairs.shape[0]
+    #         max_normals_found = 512
+    #         draw_polygon_normals(
+    #             viewer,
+    #             f"/{contacts.isosurface[i].label}",
+    #             max_normals_found,
+    #             contacts.isosurface[i].contact_polygon.vertex_counts.numpy(),
+    #             contacts.isosurface[i].contact_polygon.centroids.numpy(),
+    #             contacts.isosurface[i].contact_polygon.normals.numpy(),
+    #             contacts.isosurface[i].contact_polygon.centroid_pressure.numpy(),
+    #             np_vertex_offset=editable_vars.np_vertex_offset,
+    #         )
+
+    with wp.ScopedTimer("draw_polygon_edges", print=False):
         for i in range(len(contacts.isosurface)):
-            max_normals_found = contacts.isosurface[i].geom_pairs.shape[0]
-            draw_polygon_normals(
+            # max_normals_found = contacts.isosurface[i].geom_pairs.shape[0]
+            max_normals_found = 512
+            draw_polygon_edges(
                 viewer,
                 f"/{contacts.isosurface[i].label}",
                 max_normals_found,
                 contacts.isosurface[i].contact_polygon.vertex_counts.numpy(),
+                contacts.isosurface[i].contact_polygon.vertices.numpy(),
                 contacts.isosurface[i].contact_polygon.centroids.numpy(),
                 contacts.isosurface[i].contact_polygon.normals.numpy(),
                 contacts.isosurface[i].contact_polygon.centroid_pressure.numpy(),
@@ -150,4 +171,71 @@ def draw_polygon_normals(
         points=valid_tips_wp,
         radii=tips_radii_wp,
         colors=colors_wp,
+    )
+
+
+def draw_polygon_edges(
+    viewer,
+    isosurface_id,
+    max_tet_pairs_found,
+    vertex_counts,
+    polygon_vertices,
+    polygon_centers,
+    polygon_normals,
+    pressure_values,
+    np_vertex_offset,
+):
+    valid_centers = np.zeros((max_tet_pairs_found, 3))
+
+    valid_edge_starts = np.zeros(((8 + 7) * max_tet_pairs_found, 3))
+    valid_edge_ends = np.zeros(((8 + 7) * max_tet_pairs_found, 3))
+    colors = np.zeros(((8 + 7) * max_tet_pairs_found, 3))
+
+    num_points = 0
+    mask = vertex_counts > 0
+
+    if np.any(mask):
+        num_points = min(sum(mask), max_tet_pairs_found)
+        # TODO: Print warning if sum(mask) > max_tet_pairs_found.
+        if sum(mask) > max_tet_pairs_found:
+            print(
+                f"Warning: sum(mask) > max_tet_pairs_found in draw_polygon_edges. {sum(mask)} > {max_tet_pairs_found}"
+            )
+        valid_centers[0:num_points, :] = polygon_centers[mask][0:num_points] + np_vertex_offset
+
+        valid_pressure_values = pressure_values[mask]
+        max_pressure = np.max(valid_pressure_values)
+        min_pressure = np.min(valid_pressure_values)
+
+        valid_indices = np.nonzero(vertex_counts)[0]
+
+        # Compute edges
+        for i in range(num_points):
+            # Get the polygon index.
+            polygon_index = valid_indices[i]
+            vertex_count = vertex_counts[polygon_index]
+            # Block of vertices for the polygon.
+            block_start = 8 * polygon_index
+            block_end = block_start + vertex_count
+            valid_polygon_vertices = polygon_vertices[block_start:block_end] + np_vertex_offset
+            # Add edges for the polygon.
+            for j in range(vertex_count):
+                # Edge from center to vertex of polygon.
+                valid_edge_starts[i * 15 + j, :] = valid_centers[i, :]
+                valid_edge_ends[i * 15 + j, :] = valid_polygon_vertices[j, :]
+
+                # Edge from vertex to vertex of polygon.
+                valid_edge_starts[i * 15 + 8 + j, :] = valid_polygon_vertices[j, :]
+                valid_edge_ends[i * 15 + 8 + j, :] = valid_polygon_vertices[(j + 1) % vertex_count, :]
+
+            # Set same color for all edges in the block.
+            new_color = wp.render.bourke_color_map(min_pressure, max_pressure, pressure_values[polygon_index])
+            colors[i * 15 : (i + 1) * 15, :] = np.array(new_color)
+
+    viewer.log_lines(
+        name=isosurface_id + "_polygon_edges",
+        starts=wp.array(valid_edge_starts, dtype=wp.vec3),
+        ends=wp.array(valid_edge_ends, dtype=wp.vec3),
+        colors=wp.array(colors, dtype=wp.vec3),
+        width=0.0005,
     )
