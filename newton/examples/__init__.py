@@ -224,6 +224,7 @@ def main():
         "hydroelastic_basic_soft_vs_hard": "newton.examples.hydroelastic.example_hydroelastic_basic_soft_vs_hard",
         "hydroelastic_cube_lifting": "newton.examples.hydroelastic.example_hydroelastic_cube_lifting",
         "hydroelastic_pick_up_wheel": "newton.examples.hydroelastic.example_hydroelastic_pick_up_wheel",
+        "hydroelastic_cube_stacking": "newton.examples.hydroelastic.example_hydroelastic_cube_stacking",
     }
 
     if len(sys.argv) < 2:
