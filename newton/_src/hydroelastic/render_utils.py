@@ -93,29 +93,29 @@ def render_isosurfaces(viewer, state_0, contacts, editable_vars):
     # - edges
     # - etc.
 
-    # with wp.ScopedTimer("draw_polygon_normals", print=False):
-    #     for i in range(len(contacts.isosurface)):
-    #         # max_normals_found = contacts.isosurface[i].geom_pairs.shape[0]
-    #         max_normals_found = 512
-    #         draw_polygon_normals(
-    #             viewer,
-    #             f"/{contacts.isosurface[i].label}",
-    #             max_normals_found,
-    #             contacts.isosurface[i].contact_polygon.vertex_counts.numpy(),
-    #             contacts.isosurface[i].contact_polygon.centroids.numpy(),
-    #             contacts.isosurface[i].contact_polygon.normals.numpy(),
-    #             contacts.isosurface[i].contact_polygon.centroid_pressure.numpy(),
-    #             np_vertex_offset=editable_vars.np_vertex_offset,
-    #         )
+    with wp.ScopedTimer("draw_polygon_normals", print=False):
+        for i in range(len(contacts.isosurface)):
+            # max_polygons_for_rendering = contacts.isosurface[i].geom_pairs.shape[0]
+            max_polygons_for_rendering = 512
+            draw_polygon_normals(
+                viewer,
+                f"/{contacts.isosurface[i].label}",
+                max_polygons_for_rendering,
+                contacts.isosurface[i].contact_polygon.vertex_counts.numpy(),
+                contacts.isosurface[i].contact_polygon.centroids.numpy(),
+                contacts.isosurface[i].contact_polygon.normals.numpy(),
+                contacts.isosurface[i].contact_polygon.centroid_pressure.numpy(),
+                np_vertex_offset=editable_vars.np_vertex_offset,
+            )
 
     with wp.ScopedTimer("draw_polygon_edges", print=False):
         for i in range(len(contacts.isosurface)):
-            # max_normals_found = contacts.isosurface[i].geom_pairs.shape[0]
-            max_normals_found = 512
+            # max_polygons_for_rendering = contacts.isosurface[i].geom_pairs.shape[0]
+            max_polygons_for_rendering = 512
             draw_polygon_edges(
                 viewer,
                 f"/{contacts.isosurface[i].label}",
-                max_normals_found,
+                max_polygons_for_rendering,
                 contacts.isosurface[i].contact_polygon.vertex_counts.numpy(),
                 contacts.isosurface[i].contact_polygon.vertices.numpy(),
                 contacts.isosurface[i].contact_polygon.centroids.numpy(),
@@ -128,21 +128,21 @@ def render_isosurfaces(viewer, state_0, contacts, editable_vars):
 def draw_polygon_normals(
     viewer,
     isosurface_id,
-    max_tet_pairs_found,
+    max_polygons_for_rendering,
     vertex_counts,
     polygon_centers,
     polygon_normals,
     pressure_values,
     np_vertex_offset,
 ):
-    valid_centers = np.zeros((max_tet_pairs_found, 3))
-    valid_tips = np.zeros((max_tet_pairs_found, 3))
-    colors = np.zeros((max_tet_pairs_found, 3))
+    valid_centers = np.zeros((max_polygons_for_rendering, 3))
+    valid_tips = np.zeros((max_polygons_for_rendering, 3))
+    colors = np.zeros((max_polygons_for_rendering, 3))
 
     num_points = 0
     mask = vertex_counts > 0
     if np.any(mask):
-        num_points = min(sum(mask), max_tet_pairs_found)
+        num_points = min(sum(mask), max_polygons_for_rendering)
         valid_centers[0:num_points, :] = polygon_centers[mask][0:num_points] + np_vertex_offset
         valid_tips[0:num_points, :] = valid_centers[0:num_points, :] + 0.01 * polygon_normals[mask][0:num_points]
 
@@ -156,7 +156,7 @@ def draw_polygon_normals(
     valid_centers_wp = wp.array(valid_centers, dtype=wp.vec3)
     valid_tips_wp = wp.array(valid_tips, dtype=wp.vec3)
     colors_wp = wp.array(colors, dtype=wp.vec3)
-    tips_radii_wp = wp.full(shape=(max_tet_pairs_found,), value=0.00125)
+    tips_radii_wp = wp.full(shape=(max_polygons_for_rendering,), value=0.00125)
 
     viewer.log_lines(
         name=isosurface_id + "_polygon_normals",
@@ -177,7 +177,7 @@ def draw_polygon_normals(
 def draw_polygon_edges(
     viewer,
     isosurface_id,
-    max_tet_pairs_found,
+    max_polygons_for_rendering,
     vertex_counts,
     polygon_vertices,
     polygon_centers,
@@ -185,21 +185,21 @@ def draw_polygon_edges(
     pressure_values,
     np_vertex_offset,
 ):
-    valid_centers = np.zeros((max_tet_pairs_found, 3))
+    valid_centers = np.zeros((max_polygons_for_rendering, 3))
 
-    valid_edge_starts = np.zeros(((8 + 7) * max_tet_pairs_found, 3))
-    valid_edge_ends = np.zeros(((8 + 7) * max_tet_pairs_found, 3))
-    colors = np.zeros(((8 + 7) * max_tet_pairs_found, 3))
+    valid_edge_starts = np.zeros(((8 + 7) * max_polygons_for_rendering, 3))
+    valid_edge_ends = np.zeros(((8 + 7) * max_polygons_for_rendering, 3))
+    colors = np.zeros(((8 + 7) * max_polygons_for_rendering, 3))
 
     num_points = 0
     mask = vertex_counts > 0
 
     if np.any(mask):
-        num_points = min(sum(mask), max_tet_pairs_found)
+        num_points = min(sum(mask), max_polygons_for_rendering)
         # TODO: Print warning if sum(mask) > max_tet_pairs_found.
-        if sum(mask) > max_tet_pairs_found:
+        if sum(mask) > max_polygons_for_rendering:
             print(
-                f"Warning: sum(mask) > max_tet_pairs_found in draw_polygon_edges. {sum(mask)} > {max_tet_pairs_found}"
+                f"Warning: sum(mask) > max_polygons_for_rendering in draw_polygon_edges. {sum(mask)} > {max_polygons_for_rendering}. Consider increasing max_polygons_for_rendering."
             )
         valid_centers[0:num_points, :] = polygon_centers[mask][0:num_points] + np_vertex_offset
 
