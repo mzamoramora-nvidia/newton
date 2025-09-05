@@ -107,11 +107,20 @@ class HydroelasticImGuiManager:
         if changed:
             editable_vars.proxy_of_max_tet_pairs = value
 
-        _, editable_vars.render_isosurfaces_flag = imgui.checkbox(
-            "render_isosurfaces_flag", editable_vars.render_isosurfaces_flag
-        )
+        imgui.set_next_item_open(True, imgui.Cond_.appearing)
+        if imgui.collapsing_header("render_isosurfaces"):
+            _, editable_vars.render_isosurfaces_edges = imgui.checkbox(
+                "render_isosurfaces_edges", editable_vars.render_isosurfaces_edges
+            )
 
-        _, editable_vars.render_forces_flag = imgui.checkbox("render_forces_flag", editable_vars.render_forces_flag)
+            _, editable_vars.render_isosurfaces_normals = imgui.checkbox(
+                "render_isosurfaces_normals", editable_vars.render_isosurfaces_normals
+            )
+
+            _, editable_vars.render_forces_flag = imgui.checkbox("render_forces_flag", editable_vars.render_forces_flag)
+
+        imgui.separator()
+
         _, editable_vars.plot_flag = imgui.checkbox("plot_flag", editable_vars.plot_flag)
 
         changed, value = imgui.input_float("force_scale", editable_vars.force_scale)

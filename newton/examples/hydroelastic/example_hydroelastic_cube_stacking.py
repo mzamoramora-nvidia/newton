@@ -55,7 +55,8 @@ class EditableVars:
         self.np_vertex_offset = wp.vec3(0.0, 0.2, 0.0)  # [0.0, 0.2, 0.0]
         self.proxy_of_max_tet_pairs = 80  # 150  # len(self.tet_pairs)
 
-        self.render_isosurfaces_flag = False
+        self.render_isosurfaces_edges = False
+        self.render_isosurfaces_normals = False
         self.render_forces_flag = True
         # With a scale of 0.01, an object of 1kg that results in a force of 9.8N, will have an arrow of approx 0.01m = 1cm.
         # The maximum gripping force of Robotiq 2F-140 is 125N. With a scale of 0.001, the arrow will be 0.125m = 12.5cm.

@@ -1,6 +1,7 @@
 import numpy as np
 import warp as wp
-import warp.render
+
+import newton.viewer
 
 
 def draw_force_arrows(viewer, id, pos, tips, arrow_width, color_arrow, tips_radii, tips_colors):
@@ -85,14 +86,6 @@ def render_visuals(viewer, state_0, visuals):
 
 
 def render_isosurfaces(viewer, state_0, contacts, editable_vars):
-    if not editable_vars.render_isosurfaces_flag:
-        return
-
-    # TODO: Add different flags to gui to enable/disable rendering of
-    # - normals
-    # - edges
-    # - etc.
-
     with wp.ScopedTimer("draw_polygon_normals", print=False):
         for i in range(len(contacts.isosurface)):
             # max_polygons_for_rendering = contacts.isosurface[i].geom_pairs.shape[0]
@@ -106,6 +99,7 @@ def render_isosurfaces(viewer, state_0, contacts, editable_vars):
                 contacts.isosurface[i].contact_polygon.normals.numpy(),
                 contacts.isosurface[i].contact_polygon.centroid_pressure.numpy(),
                 np_vertex_offset=editable_vars.np_vertex_offset,
+                render_normals=editable_vars.render_isosurfaces_normals,
             )
 
     with wp.ScopedTimer("draw_polygon_edges", print=False):
@@ -122,6 +116,7 @@ def render_isosurfaces(viewer, state_0, contacts, editable_vars):
                 contacts.isosurface[i].contact_polygon.normals.numpy(),
                 contacts.isosurface[i].contact_polygon.centroid_pressure.numpy(),
                 np_vertex_offset=editable_vars.np_vertex_offset,
+                render_edges=editable_vars.render_isosurfaces_edges,
             )
 
 
@@ -134,14 +129,25 @@ def draw_polygon_normals(
     polygon_normals,
     pressure_values,
     np_vertex_offset,
+    render_normals,
 ):
+    lines_name = isosurface_id + "_polygon_normals"
+    points_name = isosurface_id + "_normal_tips"
+
+    normals_exists = False
+    if isinstance(viewer, newton.viewer.ViewerGL):
+        normals_exists = lines_name in viewer.lines
+
+    if not normals_exists and not render_normals:
+        return
+
     valid_centers = np.zeros((max_polygons_for_rendering, 3))
     valid_tips = np.zeros((max_polygons_for_rendering, 3))
     colors = np.zeros((max_polygons_for_rendering, 3))
 
     num_points = 0
     mask = vertex_counts > 0
-    if np.any(mask):
+    if np.any(mask) and render_normals:
         num_points = min(sum(mask), max_polygons_for_rendering)
         valid_centers[0:num_points, :] = polygon_centers[mask][0:num_points] + np_vertex_offset
         valid_tips[0:num_points, :] = valid_centers[0:num_points, :] + 0.01 * polygon_normals[mask][0:num_points]
@@ -159,7 +165,7 @@ def draw_polygon_normals(
     tips_radii_wp = wp.full(shape=(max_polygons_for_rendering,), value=0.00125)
 
     viewer.log_lines(
-        name=isosurface_id + "_polygon_normals",
+        name=lines_name,
         starts=valid_centers_wp,
         ends=valid_tips_wp,
         colors=colors_wp,
@@ -167,7 +173,7 @@ def draw_polygon_normals(
     )
 
     viewer.log_points(
-        name=isosurface_id + "_normal_tips",
+        name=points_name,
         points=valid_tips_wp,
         radii=tips_radii_wp,
         colors=colors_wp,
@@ -184,7 +190,17 @@ def draw_polygon_edges(
     polygon_normals,
     pressure_values,
     np_vertex_offset,
+    render_edges,
 ):
+    edges_name = isosurface_id + "_polygon_edges"
+
+    edges_exists = False
+    if isinstance(viewer, newton.viewer.ViewerGL):
+        edges_exists = edges_name in viewer.lines
+
+    if not edges_exists and not render_edges:
+        return
+
     valid_centers = np.zeros((max_polygons_for_rendering, 3))
 
     valid_edge_starts = np.zeros(((8 + 7) * max_polygons_for_rendering, 3))
@@ -194,7 +210,7 @@ def draw_polygon_edges(
     num_points = 0
     mask = vertex_counts > 0
 
-    if np.any(mask):
+    if np.any(mask) and render_edges:
         num_points = min(sum(mask), max_polygons_for_rendering)
         # TODO: Print warning if sum(mask) > max_tet_pairs_found.
         if sum(mask) > max_polygons_for_rendering:
@@ -233,7 +249,7 @@ def draw_polygon_edges(
             colors[i * 15 : (i + 1) * 15, :] = np.array(new_color)
 
     viewer.log_lines(
-        name=isosurface_id + "_polygon_edges",
+        name=edges_name,
         starts=wp.array(valid_edge_starts, dtype=wp.vec3),
         ends=wp.array(valid_edge_ends, dtype=wp.vec3),
         colors=wp.array(colors, dtype=wp.vec3),
