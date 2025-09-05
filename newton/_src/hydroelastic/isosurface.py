@@ -31,6 +31,7 @@ Key components:
 import warp as wp
 
 from newton._src.hydroelastic.types import mat43h, vec4i
+from newton._src.hydroelastic.utils import compute_body_q_inv_mat
 
 MAX_POLYGON_VERTICES = 8
 
@@ -1131,3 +1132,24 @@ def compute_contact_polygons(
         launch_compute_soft_vs_soft_contact_surface(body_q, body_q_inv_mat, mesh_a, mesh_b, isosurface)
     else:
         launch_compute_soft_vs_hard_contact_surface(body_q, body_q_inv_mat, mesh_a, mesh_b, isosurface)
+
+
+def compute_contact_surfaces(model, state_0, contacts, body_q_inv_mat):
+    with wp.ScopedTimer("Computation of contact surfaces", print=False):
+        # Compute inverse transform of body_q
+        wp.launch(
+            compute_body_q_inv_mat,
+            dim=model.body_count,
+            inputs=[state_0.body_q],
+            outputs=[body_q_inv_mat],
+        )
+
+        # Compute hydroelastic contact isosurface.
+        for i in range(contacts.num_isosurfaces):
+            compute_contact_polygons(
+                state_0.body_q,
+                body_q_inv_mat,
+                model.hydro_mesh[contacts.isosurface[i].body_a],
+                model.hydro_mesh[contacts.isosurface[i].body_b],
+                contacts.isosurface[i],
+            )
