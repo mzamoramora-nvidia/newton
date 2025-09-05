@@ -22,7 +22,15 @@ def draw_force_arrows(viewer, id, pos, tips, arrow_width, color_arrow, tips_radi
 
 
 def render_forces(viewer, state_0, contacts, editable_vars):
-    if not editable_vars.render_forces_flag:
+    force_normal_id = "/isosurface_force_n"
+    force_tangential_id = "/isosurface_force_t"
+    torque_id = "/isosurface_torque"
+
+    force_normal_exists = False
+    if isinstance(viewer, newton.viewer.ViewerGL):
+        force_normal_exists = force_normal_id in viewer.lines
+
+    if not force_normal_exists and not editable_vars.render_forces_flag:
         return
 
     body_q = state_0.body_q.numpy()
@@ -32,13 +40,14 @@ def render_forces(viewer, state_0, contacts, editable_vars):
     twist_force_n = np.zeros((contacts.num_isosurfaces, 3))
     twist_force_t = np.zeros((contacts.num_isosurfaces, 3))
 
-    for i in range(contacts.num_isosurfaces):
-        body_a = contacts.isosurface[i].body_a
-        twist_pos[i, :] = body_q[body_a, 0:3] + editable_vars.np_vertex_offset
-        # force = self.contacts.isosurface[i].force.numpy()[0, :]
-        twist_torque[i, :] = contacts.isosurface[i].torque_a_body.numpy()[0, :]
-        twist_force_n[i, :] = contacts.isosurface[i].force_n.numpy()[0, :]
-        twist_force_t[i, :] = contacts.isosurface[i].force_t.numpy()[0, :]
+    if editable_vars.render_forces_flag:
+        for i in range(contacts.num_isosurfaces):
+            body_a = contacts.isosurface[i].body_a
+            twist_pos[i, :] = body_q[body_a, 0:3] + editable_vars.np_vertex_offset
+            # force = self.contacts.isosurface[i].force.numpy()[0, :]
+            twist_torque[i, :] = contacts.isosurface[i].torque_a_body.numpy()[0, :]
+            twist_force_n[i, :] = contacts.isosurface[i].force_n.numpy()[0, :]
+            twist_force_t[i, :] = contacts.isosurface[i].force_t.numpy()[0, :]
 
     twist_pos_wp = wp.array(twist_pos, dtype=wp.vec3)
     force_n_tip_wp = wp.array(twist_pos + twist_force_n * editable_vars.force_scale, dtype=wp.vec3)
@@ -51,7 +60,7 @@ def render_forces(viewer, state_0, contacts, editable_vars):
 
     draw_force_arrows(
         viewer,
-        f"/isosurface_force_n_{i}",
+        force_normal_id,
         twist_pos_wp,
         force_n_tip_wp,
         arrow_width,
@@ -61,7 +70,7 @@ def render_forces(viewer, state_0, contacts, editable_vars):
     )
     draw_force_arrows(
         viewer,
-        f"/isosurface_force_t_{i}",
+        force_tangential_id,
         twist_pos_wp,
         force_t_tip_wp,
         arrow_width,
@@ -71,7 +80,7 @@ def render_forces(viewer, state_0, contacts, editable_vars):
     )
     draw_force_arrows(
         viewer,
-        f"/isosurface_torque_{i}",
+        torque_id,
         twist_pos_wp,
         torque_tip_wp,
         arrow_width,
