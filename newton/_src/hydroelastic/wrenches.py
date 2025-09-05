@@ -416,3 +416,71 @@ def launch_add_wrench_to_body_f(
         inputs=[body_a, body_b, force, torque_a, torque_b, twist_convention],
         outputs=[body_f],
     )
+
+
+def compute_contact_forces(solver, state, contacts, twist_convention=0):
+    if contacts.use_hydroelastic_inside_solver:
+        return
+    with wp.ScopedTimer("Computation of contact forces", print=False):
+        # Integrate over isosurface to compute forces and torques.
+        twist_convention_wp = wp.int32(twist_convention)
+        if twist_convention == 0:  # newton convention
+            for i in range(contacts.num_isosurfaces):
+                compute_isosurface_wrenches(
+                    contacts.isosurface[i],
+                    state.body_q,
+                    state.body_qd,
+                    solver.model.hydro_mesh[contacts.isosurface[i].body_a],
+                    solver.model.hydro_mesh[contacts.isosurface[i].body_b],
+                    twist_convention_wp,
+                )
+
+                launch_add_wrench_to_body_f(
+                    body_a=contacts.isosurface[i].body_a,
+                    body_b=contacts.isosurface[i].body_b,
+                    force=contacts.isosurface[i].force,
+                    torque_a=contacts.isosurface[i].torque_a_body,
+                    torque_b=contacts.isosurface[i].torque_b_body,
+                    twist_convention=twist_convention_wp,
+                    body_f=state.body_f,
+                )
+        elif twist_convention == 1:  # featherstone convention
+            for i in range(contacts.num_isosurfaces):
+                compute_isosurface_wrenches(
+                    contacts.isosurface[i],
+                    state.body_q,
+                    solver.body_v_s,
+                    solver.model.hydro_mesh[contacts.isosurface[i].body_a],
+                    solver.model.hydro_mesh[contacts.isosurface[i].body_b],
+                    twist_convention_wp,
+                )
+
+                launch_add_wrench_to_body_f(
+                    body_a=contacts.isosurface[i].body_a,
+                    body_b=contacts.isosurface[i].body_b,
+                    force=contacts.isosurface[i].force,
+                    torque_a=contacts.isosurface[i].torque_a,
+                    torque_b=contacts.isosurface[i].torque_b,
+                    twist_convention=twist_convention_wp,
+                    body_f=state.body_f,
+                )
+        elif twist_convention == 2:  # mujoco convention
+            for i in range(contacts.num_isosurfaces):
+                compute_isosurface_wrenches(
+                    contacts.isosurface[i],
+                    state.body_q,
+                    state.body_qd,
+                    solver.model.hydro_mesh[contacts.isosurface[i].body_a],
+                    solver.model.hydro_mesh[contacts.isosurface[i].body_b],
+                    twist_convention_wp,
+                )
+
+                launch_add_wrench_to_body_f(
+                    body_a=contacts.isosurface[i].body_a,
+                    body_b=contacts.isosurface[i].body_b,
+                    force=contacts.isosurface[i].force,
+                    torque_a=contacts.isosurface[i].torque_a_body,
+                    torque_b=contacts.isosurface[i].torque_b_body,
+                    twist_convention=twist_convention_wp,
+                    body_f=state.body_f,
+                )
