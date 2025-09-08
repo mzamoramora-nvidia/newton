@@ -36,6 +36,9 @@ class LumpedProperties:
 class HydroelasticMesh:
     def __init__(self):
         self.volume_mesh = VolumeMesh()
+        self.aabb_low = None
+        self.aabb_high = None
+        self.bvh = None
         self.surface_mesh = None
         self.is_soft = True
         self.hydroelastic_modulus = wp.float32(1.0e3)
@@ -48,6 +51,7 @@ class HydroelasticMesh:
         self.compute_mesh_density = False
         self.mass = 0.0
         self.density = 1000.0
+        self.body_id = -1
 
 
 @wp.struct
@@ -94,11 +98,14 @@ class Isosurface:
         self.soft_vs_soft = mesh_b_is_soft
         self.sotf_vs_soft_wp = wp.array([1], dtype=wp.int32) if mesh_b_is_soft else wp.array([0], dtype=wp.int32)
         self.geom_pairs = wp.array(geom_pairs, dtype=wp.vec2i, device=compute_device)
-        num_geom_pairs = self.geom_pairs.shape[0]
+        # num_geom_pairs = self.geom_pairs.shape[0]
+        self.max_geom_pairs = self.geom_pairs.shape[0]
+        self.geom_pairs_found = wp.zeros(self.max_geom_pairs, dtype=wp.vec2i, device=compute_device)
         self.intermediate_contact_polygon = ContactPolygon()
         self.contact_polygon = ContactPolygon()
-        initialize_contact_polygon(num_geom_pairs, self.intermediate_contact_polygon, compute_device)
-        initialize_contact_polygon(num_geom_pairs, self.contact_polygon, compute_device)
+        initialize_contact_polygon(self.max_geom_pairs, self.intermediate_contact_polygon, compute_device)
+        initialize_contact_polygon(self.max_geom_pairs, self.contact_polygon, compute_device)
+        # TODO: num_nonzero_polygons is not used anywhere. Remove it.
         self.num_nonzero_polygons = wp.zeros(1, dtype=wp.int32, device=compute_device)
         # Quadrature points and weights.
         self.quadrature_weights = wp.array([1.0], dtype=wp.float32, device=compute_device)

@@ -163,6 +163,34 @@ def compute_face_normals(
     face_normals[tid] = compute_triangle_normal(v0, v1, v2, tid)
 
 
+# TODO: Simplify or remove this function. It is very similar to compute_tet_bounding_box in isosurface.py.
+@wp.kernel
+def compute_aabb(
+    body_q: wp.array(dtype=wp.transform),
+    body_a: wp.int32,
+    points: wp.array(dtype=wp.vec3),
+    indices: wp.array(dtype=wp.vec4i),  # shape [num_tets, 4]
+    lowers: wp.array(dtype=wp.vec3),
+    uppers: wp.array(dtype=wp.vec3),
+):
+    T = body_q[body_a]
+    tid = wp.tid()
+    i_0 = indices[tid][0]
+    i_1 = indices[tid][1]
+    i_2 = indices[tid][2]
+    i_3 = indices[tid][3]
+    v_0 = wp.transform_point(T, points[i_0])
+    v_1 = wp.transform_point(T, points[i_1])
+    v_2 = wp.transform_point(T, points[i_2])
+    v_3 = wp.transform_point(T, points[i_3])
+    lo = wp.min(wp.min(v_0, v_1), wp.min(v_2, v_3))
+    hi = wp.max(wp.max(v_0, v_1), wp.max(v_2, v_3))
+    # tiny inflation to catch "touching" pairs
+    eps = 0.0  # 1.0e-6
+    lowers[tid] = lo - wp.vec3(eps, eps, eps)
+    uppers[tid] = hi + wp.vec3(eps, eps, eps)
+
+
 def get_dirs(axis: Axis):
     dirs = Dirs()
     if axis == Axis.Y:

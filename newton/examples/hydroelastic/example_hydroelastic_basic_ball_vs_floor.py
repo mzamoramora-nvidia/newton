@@ -158,29 +158,6 @@ class Example:
 
     def load_model(self):
         # ==============================================================================================================
-        # Loading of the meshes should be moved somewhere else (e.g the model builder).
-        # Load table.
-        meshes = []
-        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), wp.quat_identity())
-        table_path = "./newton/examples/assets/experimental-hydroelastic-assets/drake_table.json"
-        params = {
-            "hydroelastic_modulus": 3e3,
-            "is_visible": True,
-        }
-        meshes.append(hydroelastic_loaders.load_drake_mesh(table_path, Tf, params, self.device))
-        meshes[-1].hunt_crossley_dissipation = wp.float32(0.0001)
-
-        # Load sphere.
-        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), wp.quat_identity())
-        sphere_path = "./newton/examples/assets/experimental-hydroelastic-assets/drake_sphere.json"
-        params = {
-            "hydroelastic_modulus": 3e2,
-            "is_visible": True,
-        }
-        meshes.append(hydroelastic_loaders.load_drake_mesh(sphere_path, Tf, params, self.device))
-        meshes[-1].hunt_crossley_dissipation = wp.float32(0.0001)
-
-        # ==============================================================================================================
         # Define initial poses.
         q = np.array([0, 0, 0, 1], dtype=np.float32)
         poses = np.zeros((2, 7), dtype=np.float32)
@@ -197,6 +174,30 @@ class Example:
         poses[body_idx, 3:] = q
 
         self.init_poses = poses
+        # ==============================================================================================================
+        # Loading of the meshes should be moved somewhere else (e.g the model builder).
+        # Load table.
+        meshes = []
+        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), wp.quat_identity())
+        table_path = "./newton/examples/assets/experimental-hydroelastic-assets/drake_table.json"
+        params = {
+            "hydroelastic_modulus": 3e3,
+            "is_visible": True,
+        }
+        meshes.append(hydroelastic_loaders.load_drake_mesh(table_path, Tf, params, self.device))
+        meshes[-1].hunt_crossley_dissipation = wp.float32(0.0001)
+        meshes[-1].body_id = table
+
+        # Load sphere.
+        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), wp.quat_identity())
+        sphere_path = "./newton/examples/assets/experimental-hydroelastic-assets/drake_sphere.json"
+        params = {
+            "hydroelastic_modulus": 3e2,
+            "is_visible": True,
+        }
+        meshes.append(hydroelastic_loaders.load_drake_mesh(sphere_path, Tf, params, self.device))
+        meshes[-1].hunt_crossley_dissipation = wp.float32(0.0001)
+        meshes[-1].body_id = ball
 
         # ==============================================================================================================
         # Setup scene

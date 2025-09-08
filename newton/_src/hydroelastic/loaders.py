@@ -11,7 +11,12 @@ from newton._src.hydroelastic.make_fields import (
 )
 from newton._src.hydroelastic.tetrahedralizer import tetrahedralize
 from newton._src.hydroelastic.types import HydroelasticMesh, Isosurface
-from newton._src.hydroelastic.utils import compute_default_tet_transform_inv, compute_face_normals, transform_array
+from newton._src.hydroelastic.utils import (
+    compute_aabb,
+    compute_default_tet_transform_inv,
+    compute_face_normals,
+    transform_array,
+)
 
 
 def extract_surface_mesh(vertices, tetrahedrons):
@@ -151,6 +156,29 @@ def load_drake_mesh(path: str, Tf, params, compute_device=None):
     initialize_default_tet_transform_inv(hydroelastic.volume_mesh, compute_device)
     hydroelastic.volume_mesh.edges = wp.array(edges, dtype=wp.vec2i, device=compute_device)
 
+    # Compute AABB.
+    num_tets = hydroelastic.volume_mesh.indices.shape[0]
+    hydroelastic.aabb_low = wp.zeros(num_tets, dtype=wp.vec3f, device=compute_device)
+    hydroelastic.aabb_high = wp.zeros(num_tets, dtype=wp.vec3f, device=compute_device)
+    temp_body_q = wp.array(wp.transform_identity(), dtype=wp.transform, device=compute_device)
+    body_idx = wp.int32(0)
+    wp.launch(
+        compute_aabb,
+        dim=num_tets,
+        inputs=[
+            temp_body_q,
+            body_idx,
+            hydroelastic.volume_mesh.default_points,
+            hydroelastic.volume_mesh.indices,
+        ],
+        outputs=[
+            hydroelastic.aabb_low,
+            hydroelastic.aabb_high,
+        ],
+    )
+    # Initialize BVH.
+    hydroelastic.bvh = wp.Bvh(hydroelastic.aabb_low, hydroelastic.aabb_high, constructor="median")
+
     # Initialize is_on_surface array.
     # This initiaization ensures that the field value is computed for every vertex.
     # This might generate small field values for the vertices on the surface.
@@ -279,6 +307,29 @@ def generate_mesh(V, F, params, compute_device=None):
     ) = tetrahedralize(points, indices, compute_device)
 
     initialize_default_tet_transform_inv(hydroelastic.volume_mesh, compute_device)
+
+    # Compute AABB.
+    num_tets = hydroelastic.volume_mesh.indices.shape[0]
+    hydroelastic.aabb_low = wp.zeros(num_tets, dtype=wp.vec3f, device=compute_device)
+    hydroelastic.aabb_high = wp.zeros(num_tets, dtype=wp.vec3f, device=compute_device)
+    temp_body_q = wp.array(wp.transform_identity(), dtype=wp.transform, device=compute_device)
+    body_idx = wp.int32(0)
+    wp.launch(
+        compute_aabb,
+        dim=num_tets,
+        inputs=[
+            temp_body_q,
+            body_idx,
+            hydroelastic.volume_mesh.default_points,
+            hydroelastic.volume_mesh.indices,
+        ],
+        outputs=[
+            hydroelastic.aabb_low,
+            hydroelastic.aabb_high,
+        ],
+    )
+    # Initialize BVH.
+    hydroelastic.bvh = wp.Bvh(hydroelastic.aabb_low, hydroelastic.aabb_high, constructor="median")
 
     # Check that the tetrahedron orientation is correct.
     # For now, we only print warnings.
@@ -642,7 +693,12 @@ def init_isosurfaces(collision_pairs, isosurfaces, meshes, device):
         l = [(x, y) for x in range(num_elements_a) for y in range(num_elements_b)]
         isosurfaces.append(Isosurface(body_a, body_b, l, meshes[body_b].is_soft, device))
         geom_pairs_count += len(l)
-        print(f"{isosurfaces[-1].label} -> list of geom pairs N: {len(l)}")
+        print(
+            f"{isosurfaces[-1].label} -> list of geom pairs N: {len(l)}. num_elements_a: {num_elements_a}, num_elements_b: {num_elements_b}"
+        )
+        print(
+            f"meshes[body_a].aabb_low.shape: {meshes[body_a].aabb_low.shape}, meshes[body_b].aabb_low.shape: {meshes[body_b].aabb_low.shape}"
+        )
 
     return len(isosurfaces)
 

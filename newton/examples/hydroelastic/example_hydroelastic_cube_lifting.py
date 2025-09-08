@@ -159,73 +159,7 @@ class Example:
         print("Done init")
 
     def load_model(self):
-        # ==============================================================================================================
-        # Loading of the meshes should be moved somewhere else (e.g the model builder).
-        import trimesh  # noqa: PLC0415
-
         dirs = self.dirs
-        meshes = []
-
-        # Load table
-        object = trimesh.creation.box(extents=1.0 * dirs.right + 0.05 * dirs.up + 1.0 * dirs.front)
-        params = {
-            "hydroelastic_modulus": 1e3,
-        }
-        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
-        meshes[-1].mu_static = wp.float32(1.0)
-        meshes[-1].mu_dynamic = wp.float32(0.8)
-        meshes[-1].mass = 1.0
-        meshes[-1].compute_mesh_density = True
-
-        # ------------------------------------------------------------------------------------------------------------
-        # Load cube
-        object = trimesh.creation.box(extents=[0.1, 0.1, 0.1])
-        object = object.subdivide_to_size(0.02)
-        params = {
-            "hydroelastic_modulus": 5e3,
-        }
-        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
-        meshes[-1].mu_static = wp.float32(0.6)  # wp.float32(5.0)
-        meshes[-1].mu_dynamic = wp.float32(0.575)  # wp.float32(4.9)
-        meshes[-1].mass = 0.1
-        meshes[-1].compute_mesh_density = True
-
-        # ------------------------------------------------------------------------------------------------------------
-        # Load gripper base
-        object = trimesh.creation.box(extents=0.1 * dirs.right + 0.02 * dirs.up + 0.02 * dirs.front)
-        params = {
-            "hydroelastic_modulus": 5e3,
-        }
-        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
-        meshes[-1].mu_static = wp.float32(0.6)  # wp.float32(5.0)
-        meshes[-1].mu_dynamic = wp.float32(0.575)  # wp.float32(4.9)
-        meshes[-1].mass = 0.05
-        meshes[-1].compute_mesh_density = True
-
-        # ------------------------------------------------------------------------------------------------------------
-        # Robotique 140 finger dims = (0.0078, 0.0655, 0.027)
-        # Load robotiq finger 1
-        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), wp.quat_identity())
-        object = trimesh.creation.box(extents=0.0078 * dirs.right + 0.0655 * dirs.up + 0.027 * dirs.front)
-        # object = object.subdivide_to_size(0.002)
-        params = {
-            "hydroelastic_modulus": 5e3,
-            "is_visible": True,
-            "Tf": Tf,
-        }
-        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
-        meshes[-1].mu_static = wp.float32(0.8)
-        meshes[-1].mu_dynamic = wp.float32(0.7)
-        meshes[-1].mass = 0.025
-        meshes[-1].compute_mesh_density = True
-
-        # Load robotiq finger 2
-        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
-        meshes[-1].mu_static = wp.float32(0.8)
-        meshes[-1].mu_dynamic = wp.float32(0.7)
-        meshes[-1].mass = 0.025
-        meshes[-1].compute_mesh_density = True
-
         # ==============================================================================================================
         # Define initial poses.
         angle = 0.0 * np.pi / 180.0
@@ -272,6 +206,76 @@ class Example:
         poses[body_idx, 3:] = unit_q
 
         self.init_poses = poses
+        # ==============================================================================================================
+        # Loading of the meshes should be moved somewhere else (e.g the model builder).
+        import trimesh  # noqa: PLC0415
+
+        meshes = []
+
+        # Load table
+        object = trimesh.creation.box(extents=1.0 * dirs.right + 0.05 * dirs.up + 1.0 * dirs.front)
+        params = {
+            "hydroelastic_modulus": 1e3,
+        }
+        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
+        meshes[-1].mu_static = wp.float32(1.0)
+        meshes[-1].mu_dynamic = wp.float32(0.8)
+        meshes[-1].mass = 1.0
+        meshes[-1].compute_mesh_density = True
+        meshes[-1].body_id = table
+
+        # ------------------------------------------------------------------------------------------------------------
+        # Load cube
+        object = trimesh.creation.box(extents=[0.1, 0.1, 0.1])
+        object = object.subdivide_to_size(0.02)
+        params = {
+            "hydroelastic_modulus": 5e3,
+        }
+        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
+        meshes[-1].mu_static = wp.float32(0.6)  # wp.float32(5.0)
+        meshes[-1].mu_dynamic = wp.float32(0.575)  # wp.float32(4.9)
+        meshes[-1].mass = 0.1
+        meshes[-1].compute_mesh_density = True
+        meshes[-1].body_id = cube
+
+        # ------------------------------------------------------------------------------------------------------------
+        # Load gripper base
+        object = trimesh.creation.box(extents=0.1 * dirs.right + 0.02 * dirs.up + 0.02 * dirs.front)
+        params = {
+            "hydroelastic_modulus": 5e3,
+        }
+        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
+        meshes[-1].mu_static = wp.float32(0.6)  # wp.float32(5.0)
+        meshes[-1].mu_dynamic = wp.float32(0.575)  # wp.float32(4.9)
+        meshes[-1].mass = 0.05
+        meshes[-1].compute_mesh_density = True
+        meshes[-1].body_id = gripper_base
+
+        # ------------------------------------------------------------------------------------------------------------
+        # Robotique 140 finger dims = (0.0078, 0.0655, 0.027)
+        # Load robotiq finger 0
+        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), wp.quat_identity())
+        object = trimesh.creation.box(extents=0.0078 * dirs.right + 0.0655 * dirs.up + 0.027 * dirs.front)
+        # object = object.subdivide_to_size(0.002)
+        params = {
+            "hydroelastic_modulus": 5e3,
+            "is_visible": True,
+            "Tf": Tf,
+        }
+        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
+        meshes[-1].mu_static = wp.float32(0.8)
+        meshes[-1].mu_dynamic = wp.float32(0.7)
+        meshes[-1].mass = 0.025
+        meshes[-1].compute_mesh_density = True
+        meshes[-1].body_id = finger_0
+
+        # Load robotiq finger 1
+        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
+        meshes[-1].mu_static = wp.float32(0.8)
+        meshes[-1].mu_dynamic = wp.float32(0.7)
+        meshes[-1].mass = 0.025
+        meshes[-1].compute_mesh_density = True
+        meshes[-1].body_id = finger_1
 
         # ==============================================================================================================
         # Setup scene

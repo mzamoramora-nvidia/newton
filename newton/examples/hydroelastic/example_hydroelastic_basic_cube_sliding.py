@@ -158,50 +158,7 @@ class Example:
         print("Done init")
 
     def load_model(self):
-        # ==============================================================================================================
-        # Loading of the meshes should be moved somewhere else (e.g the model builder).
-        import trimesh  # noqa: PLC0415
-
-        meshes = []
         dirs = self.dirs
-
-        # Increase (0.3, 0.25) to (0.35, 0.30) to avoid slippage.
-        default_mu_static = wp.float32(0.30)
-        default_mu_dynamic = wp.float32(0.25)
-
-        # Load table
-        quat = wp.quat_identity()
-        if dirs.up[1] == 1.0:  # Y-up
-            quat = wp.quat_from_axis_angle(wp.vec3f(1.0, 0.0, 0.0), 0.5 * wp.pi)
-        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), quat)
-        table_path = "./newton/examples/assets/experimental-hydroelastic-assets/drake_table_bigger.json"
-        params = {
-            "hydroelastic_modulus": 1e4,
-            "is_visible": True,
-        }
-        meshes.append(hydroelastic_loaders.load_drake_mesh(table_path, Tf, params))
-        # Realistic values
-        meshes[-1].mu_static = default_mu_static  # wp.float32(0.6)
-        meshes[-1].mu_dynamic = default_mu_dynamic  # wp.float32(0.5)
-        meshes[-1].mass = 1
-        meshes[-1].compute_mesh_density = True
-
-        # ========================================================================
-        # With a density of 1000, this cube weights 1kg.
-        # It results in normal force of 9.8N with fps = 120 and 10 substeps.
-        # With a density of 100, this cube weights 0.1kg.
-        # It results in normal force of 0.98N with fps = 120 and 100 substeps.
-        object = trimesh.creation.box(extents=[0.1, 0.1, 0.1])
-        object = object.subdivide_to_size(0.02)
-        params = {
-            "hydroelastic_modulus": 1e3,
-        }
-        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
-        meshes[-1].mu_static = default_mu_static  # wp.float32(0.6)
-        meshes[-1].mu_dynamic = default_mu_dynamic  # wp.float32(0.5)
-        meshes[-1].mass = 1
-        meshes[-1].compute_mesh_density = True
-
         # ==============================================================================================================
         # Define initial poses.
         angle = 15.0 * np.pi / 180.0
@@ -223,7 +180,49 @@ class Example:
         poses[body_idx, 3:] = q
 
         self.init_poses = poses
+        # ==============================================================================================================
+        # Loading of the meshes should be moved somewhere else (e.g the model builder).
+        import trimesh  # noqa: PLC0415
 
+        meshes = []
+
+        # Increase (0.3, 0.25) to (0.35, 0.30) to avoid slippage.
+        default_mu_static = wp.float32(0.30)
+        default_mu_dynamic = wp.float32(0.25)
+
+        # Load table
+        quat = wp.quat_identity()
+        if dirs.up[1] == 1.0:  # Y-up
+            quat = wp.quat_from_axis_angle(wp.vec3f(1.0, 0.0, 0.0), 0.5 * wp.pi)
+        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), quat)
+        table_path = "./newton/examples/assets/experimental-hydroelastic-assets/drake_table_bigger.json"
+        params = {
+            "hydroelastic_modulus": 1e4,
+            "is_visible": True,
+        }
+        meshes.append(hydroelastic_loaders.load_drake_mesh(table_path, Tf, params))
+        # Realistic values
+        meshes[-1].mu_static = default_mu_static  # wp.float32(0.6)
+        meshes[-1].mu_dynamic = default_mu_dynamic  # wp.float32(0.5)
+        meshes[-1].mass = 1
+        meshes[-1].compute_mesh_density = True
+        meshes[-1].body_id = table
+        # ========================================================================
+        # With a density of 1000, this cube weights 1kg.
+        # It results in normal force of 9.8N with fps = 120 and 10 substeps.
+        # With a density of 100, this cube weights 0.1kg.
+        # It results in normal force of 0.98N with fps = 120 and 100 substeps.
+        object = trimesh.creation.box(extents=[0.1, 0.1, 0.1])
+        object = object.subdivide_to_size(0.02)
+        params = {
+            "hydroelastic_modulus": 1e3,
+        }
+        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
+        meshes[-1].mu_static = default_mu_static  # wp.float32(0.6)
+        meshes[-1].mu_dynamic = default_mu_dynamic  # wp.float32(0.5)
+        meshes[-1].mass = 1
+        meshes[-1].compute_mesh_density = True
+        meshes[-1].body_id = cube
         # ==============================================================================================================
         # Setup scene
         scene = newton.ModelBuilder(up_axis=self.up_axis)
@@ -284,7 +283,9 @@ class Example:
         self.sim_time += self.frame_dt
 
         # Computing contact surface again before rendering.
-        hydroelastic_isosurface.compute_contact_surfaces(self.model, self.state_0, self.contacts, self.body_q_inv_mat)
+        hydroelastic_isosurface.compute_contact_surfaces(
+            self.model, self.state_0, self.contacts, self.body_q_inv_mat, update_bvh=True
+        )
 
         self.append_to_data_history()
 
