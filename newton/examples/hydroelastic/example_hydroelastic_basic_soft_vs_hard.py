@@ -57,6 +57,7 @@ class EditableVars:
 
         self.render_isosurfaces_edges = False
         self.render_isosurfaces_normals = False
+        self.render_tet_mesh_edges = False
         self.render_forces_flag = True
         # With a scale of 0.01, an object of 1kg that results in a force of 9.8N, will have an arrow of approx 0.01m = 1cm.
         # The maximum gripping force of Robotiq 2F-140 is 125N. With a scale of 0.001, the arrow will be 0.125m = 12.5cm.
@@ -439,7 +440,7 @@ class Example:
         )
 
     def render_visuals(self):
-        pass
+        hydroelastic_render_utils.render_tet_meshes(self.viewer, self.model, self.state_0, self.editable_vars)
         # hydroelastic_render_utils.render_visuals(self.viewer, self.state_0, self.visuals,)
 
     def render_isosurface(self):
