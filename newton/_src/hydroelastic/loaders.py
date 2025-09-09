@@ -678,9 +678,11 @@ def add_robot(builder, up_axis):
     builder.add_builder(articulation_builder, xform, separate_collision_group=False)
 
 
-def init_isosurfaces(collision_pairs, isosurfaces, meshes, device):
+def init_isosurfaces(collision_pairs, isosurfaces, meshes, max_geom_pairs=-1, device=None):
     geom_pairs_count = 0
-    for c in collision_pairs:
+    if isinstance(max_geom_pairs, int):
+        max_geom_pairs = [max_geom_pairs] * len(collision_pairs)
+    for i, c in enumerate(collision_pairs):
         body_a = c[0]
         body_b = c[1]
         num_elements_a = meshes[body_a].volume_mesh.indices.shape[0]
@@ -691,7 +693,7 @@ def init_isosurfaces(collision_pairs, isosurfaces, meshes, device):
             # Surface mesh is a wp.Mesh, where the indices are a flat array of integers.
             num_elements_b = meshes[body_b].surface_mesh.indices.shape[0] // 3
         l = [(x, y) for x in range(num_elements_a) for y in range(num_elements_b)]
-        isosurfaces.append(Isosurface(body_a, body_b, l, meshes[body_b].is_soft, device))
+        isosurfaces.append(Isosurface(body_a, body_b, l, meshes[body_b].is_soft, max_geom_pairs[i], device))
         geom_pairs_count += len(l)
         print(
             f"{isosurfaces[-1].label} -> list of geom pairs N: {len(l)}. num_elements_a: {num_elements_a}, num_elements_b: {num_elements_b}"

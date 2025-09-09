@@ -748,7 +748,7 @@ def find_tet_pairs_bvh_basic(
         idx = tid * block + counter
         if idx >= (tid + 1) * block:
             wp.printf(
-                "Query is overflowing: tid, tet_idx_b, idx, block, conter: %d, %d, %d, %d, %d\n",
+                "Query is overflowing: tid, tet_idx_b, idx, block, counter: %d, %d, %d, %d, %d\n",
                 tid,
                 tet_idx_b,
                 idx,
@@ -816,19 +816,22 @@ def find_tet_pairs_bvh(
 
         idx = tid * block + counter
         if idx >= (tid + 1) * block:
-            wp.printf(
-                "Query is overflowing: tid, tet_idx_b, idx, block, conter: %d, %d, %d, %d, %d\n",
-                tid,
-                tet_idx_b,
-                idx,
-                block,
-                counter,
-            )
+            # wp.printf(
+            #     "Query is overflowing: tid, tet_idx_b, idx, block, conter: %d, %d, %d, %d, %d\n",
+            #     tid,
+            #     tet_idx_b,
+            #     idx,
+            #     block,
+            #     counter,
+            # )
             idx = (tid + 1) * block - 1
 
         tet_pairs_found[idx] = wp.vec2i(tet_idx_a, tet_idx_b)
         counter += 1
-    wp.printf("tid, counter, counter_missed: %d, %d, %d\n", tid, counter, counter_missed)
+
+    # Can happend if box falls indefinitely.
+    # if counter_missed > 0:
+    #    wp.printf("tid, counter, counter_missed: %d, %d, %d\n", tid, counter, counter_missed)
 
 
 @wp.kernel
@@ -1280,7 +1283,9 @@ def compute_soft_hard_contact_surface_elements(
     centroid_pressure[tid] = pressure_a
 
 
-def launch_compute_soft_vs_soft_contact_surface(body_q, body_q_inv_mat, mesh_a, mesh_b, isosurface):
+def launch_compute_soft_vs_soft_contact_surface(
+    body_q, body_q_inv_mat, mesh_a, mesh_b, isosurface, update_contact_pairs=True
+):
     # wp.launch(
     #     compute_hydroelastic_contact_surface_elements,
     #     dim=isosurface.geom_pairs.shape[0],
@@ -1316,11 +1321,48 @@ def launch_compute_soft_vs_soft_contact_surface(body_q, body_q_inv_mat, mesh_a, 
     #     ],
     # )
 
+    if update_contact_pairs:
+        if mesh_a.aabb_low.shape[0] > mesh_b.aabb_low.shape[0]:
+            wp.launch(
+                find_tet_pairs_bvh_basic,
+                dim=mesh_a.volume_mesh.indices.shape[0],
+                inputs=[
+                    mesh_b.bvh.id,
+                    mesh_a.aabb_low,
+                    mesh_a.aabb_high,
+                    True,
+                ],
+                outputs=[
+                    isosurface.geom_pairs_found,
+                ],
+            )
+        else:
+            wp.launch(
+                find_tet_pairs_bvh_basic,
+                dim=mesh_b.volume_mesh.indices.shape[0],
+                inputs=[
+                    mesh_a.bvh.id,
+                    mesh_b.aabb_low,
+                    mesh_b.aabb_high,
+                    False,
+                ],
+                outputs=[
+                    isosurface.geom_pairs_found,
+                ],
+            )
+
     # if mesh_a.aabb_low.shape[0] > mesh_b.aabb_low.shape[0]:
     #     wp.launch(
-    #         find_tet_pairs_bvh_basic,
+    #         find_tet_pairs_bvh,
     #         dim=mesh_a.volume_mesh.indices.shape[0],
     #         inputs=[
+    #             body_q,
+    #             isosurface.body_a_wp,
+    #             isosurface.body_b_wp,
+    #             mesh_a.volume_mesh.default_points,
+    #             mesh_b.volume_mesh.default_points,
+    #             mesh_a.volume_mesh.indices,
+    #             mesh_b.volume_mesh.indices,
     #             mesh_b.bvh.id,
     #             mesh_a.aabb_low,
     #             mesh_a.aabb_high,
@@ -1332,9 +1374,16 @@ def launch_compute_soft_vs_soft_contact_surface(body_q, body_q_inv_mat, mesh_a, 
     #     )
     # else:
     #     wp.launch(
-    #         find_tet_pairs_bvh_basic,
+    #         find_tet_pairs_bvh,
     #         dim=mesh_b.volume_mesh.indices.shape[0],
     #         inputs=[
+    #             body_q,
+    #             isosurface.body_a_wp,
+    #             isosurface.body_b_wp,
+    #             mesh_a.volume_mesh.default_points,
+    #             mesh_b.volume_mesh.default_points,
+    #             mesh_a.volume_mesh.indices,
+    #             mesh_b.volume_mesh.indices,
     #             mesh_a.bvh.id,
     #             mesh_b.aabb_low,
     #             mesh_b.aabb_high,
@@ -1344,49 +1393,6 @@ def launch_compute_soft_vs_soft_contact_surface(body_q, body_q_inv_mat, mesh_a, 
     #             isosurface.geom_pairs_found,
     #         ],
     #     )
-
-    if mesh_a.aabb_low.shape[0] > mesh_b.aabb_low.shape[0]:
-        wp.launch(
-            find_tet_pairs_bvh,
-            dim=mesh_a.volume_mesh.indices.shape[0],
-            inputs=[
-                body_q,
-                isosurface.body_a_wp,
-                isosurface.body_b_wp,
-                mesh_a.volume_mesh.default_points,
-                mesh_b.volume_mesh.default_points,
-                mesh_a.volume_mesh.indices,
-                mesh_b.volume_mesh.indices,
-                mesh_b.bvh.id,
-                mesh_a.aabb_low,
-                mesh_a.aabb_high,
-                True,
-            ],
-            outputs=[
-                isosurface.geom_pairs_found,
-            ],
-        )
-    else:
-        wp.launch(
-            find_tet_pairs_bvh,
-            dim=mesh_b.volume_mesh.indices.shape[0],
-            inputs=[
-                body_q,
-                isosurface.body_a_wp,
-                isosurface.body_b_wp,
-                mesh_a.volume_mesh.default_points,
-                mesh_b.volume_mesh.default_points,
-                mesh_a.volume_mesh.indices,
-                mesh_b.volume_mesh.indices,
-                mesh_a.bvh.id,
-                mesh_b.aabb_low,
-                mesh_b.aabb_high,
-                False,
-            ],
-            outputs=[
-                isosurface.geom_pairs_found,
-            ],
-        )
 
     wp.launch(
         compute_contact_surface_elements_bvh,
@@ -1463,6 +1469,7 @@ def compute_contact_polygons(
     mesh_a,
     mesh_b,
     isosurface,
+    update_contact_pairs=True,
 ):
     """
     Extract isosurface (equal pressure surface) between two tetrahedral meshes.
@@ -1496,11 +1503,14 @@ def compute_contact_polygons(
     # reset_contact_polygon(isosurface.contact_polygon)
     isosurface.contact_polygon.vertex_counts.zero_()
     isosurface.intermediate_contact_polygon.vertex_counts.zero_()
-    isosurface.geom_pairs_found.fill_(-1)
+    if update_contact_pairs:
+        isosurface.geom_pairs_found.fill_(-1)
 
     # Compute contact surface elements
     if isosurface.soft_vs_soft:
-        launch_compute_soft_vs_soft_contact_surface(body_q, body_q_inv_mat, mesh_a, mesh_b, isosurface)
+        launch_compute_soft_vs_soft_contact_surface(
+            body_q, body_q_inv_mat, mesh_a, mesh_b, isosurface, update_contact_pairs
+        )
     else:
         launch_compute_soft_vs_hard_contact_surface(body_q, body_q_inv_mat, mesh_a, mesh_b, isosurface)
 
@@ -1558,4 +1568,5 @@ def compute_contact_surfaces(model, state_0, contacts, body_q_inv_mat, update_bv
                 model.hydro_mesh[contacts.isosurface[i].body_a],
                 model.hydro_mesh[contacts.isosurface[i].body_b],
                 contacts.isosurface[i],
+                update_contact_pairs=update_bvh,
             )

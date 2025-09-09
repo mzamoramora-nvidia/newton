@@ -90,7 +90,9 @@ def reset_contact_polygon(contact_polygon):
 
 
 class Isosurface:
-    def __init__(self, body_a, body_b, geom_pairs, mesh_b_is_soft, compute_device):
+    def __init__(self, body_a, body_b, geom_pairs, mesh_b_is_soft, max_geom_pairs=-1, compute_device=None):
+        if compute_device is None:
+            compute_device = wp.get_device()
         self.body_a = body_a
         self.body_b = body_b
         self.body_a_wp = wp.int32(body_a)
@@ -100,7 +102,9 @@ class Isosurface:
         self.sotf_vs_soft_wp = wp.array([1], dtype=wp.int32) if mesh_b_is_soft else wp.array([0], dtype=wp.int32)
         self.geom_pairs = wp.array(geom_pairs, dtype=wp.vec2i, device=compute_device)
         # num_geom_pairs = self.geom_pairs.shape[0]
-        self.max_geom_pairs = self.geom_pairs.shape[0]
+        if max_geom_pairs == -1:
+            max_geom_pairs = self.geom_pairs.shape[0]
+        self.max_geom_pairs = max_geom_pairs
         self.geom_pairs_found = wp.zeros(self.max_geom_pairs, dtype=wp.vec2i, device=compute_device)
         self.intermediate_contact_polygon = ContactPolygon()
         self.contact_polygon = ContactPolygon()
