@@ -120,7 +120,7 @@ class Example:
         # Setup hydroelastic contacts
         self.contacts.use_hydroelastic_inside_solver = False
         self.contacts.isosurface = []
-        max_geom_pairs = -1
+        max_geom_pairs = 512 * 10
         self.contacts.num_isosurfaces = hydroelastic_loaders.init_isosurfaces(
             self.model.collision_pairs, self.contacts.isosurface, self.model.hydro_mesh, max_geom_pairs, self.device
         )

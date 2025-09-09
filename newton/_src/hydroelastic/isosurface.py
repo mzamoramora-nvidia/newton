@@ -1561,12 +1561,20 @@ def compute_contact_surfaces(model, state_0, contacts, body_q_inv_mat, update_bv
                 model.hydro_mesh[i].bvh.refit()
 
         # Compute hydroelastic contact isosurface.
-        for i in range(contacts.num_isosurfaces):
-            compute_contact_polygons(
-                state_0.body_q,
-                body_q_inv_mat,
-                model.hydro_mesh[contacts.isosurface[i].body_a],
-                model.hydro_mesh[contacts.isosurface[i].body_b],
-                contacts.isosurface[i],
-                update_contact_pairs=update_bvh,
-            )
+        main_stream = wp.get_stream()
+        init_event = main_stream.record_event()
+        for isosurface in contacts.isosurface:
+            isosurface.stream.wait_event(init_event)
+            with wp.ScopedStream(isosurface.stream):
+                compute_contact_polygons(
+                    state_0.body_q,
+                    body_q_inv_mat,
+                    model.hydro_mesh[isosurface.body_a],
+                    model.hydro_mesh[isosurface.body_b],
+                    isosurface,
+                    update_contact_pairs=update_bvh,
+                )
+            isosurface.stream.record_event(isosurface.sync_event)
+
+        for isosurface in contacts.isosurface:
+            main_stream.wait_event(isosurface.sync_event)

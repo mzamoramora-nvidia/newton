@@ -93,6 +93,8 @@ class Isosurface:
     def __init__(self, body_a, body_b, geom_pairs, mesh_b_is_soft, max_geom_pairs=-1, compute_device=None):
         if compute_device is None:
             compute_device = wp.get_device()
+        self.stream = wp.Stream(compute_device)
+        self.sync_event = wp.Event(compute_device)
         self.body_a = body_a
         self.body_b = body_b
         self.body_a_wp = wp.int32(body_a)

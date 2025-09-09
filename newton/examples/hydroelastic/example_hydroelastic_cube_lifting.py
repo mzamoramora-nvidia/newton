@@ -122,7 +122,7 @@ class Example:
         # Setup hydroelastic contacts
         self.contacts.use_hydroelastic_inside_solver = False
         self.contacts.isosurface = []
-        max_geom_pairs = -1
+        max_geom_pairs = 1920
         self.contacts.num_isosurfaces = hydroelastic_loaders.init_isosurfaces(
             self.model.collision_pairs, self.contacts.isosurface, self.model.hydro_mesh, max_geom_pairs, self.device
         )
@@ -231,7 +231,7 @@ class Example:
         # ------------------------------------------------------------------------------------------------------------
         # Load cube
         object = trimesh.creation.box(extents=[0.1, 0.1, 0.1])
-        object = object.subdivide_to_size(0.02)
+        object = object.subdivide_to_size(0.05)
         params = {
             "hydroelastic_modulus": 5e3,
         }
@@ -370,7 +370,7 @@ class Example:
                 self.state_0,
                 self.contacts,
                 self.body_q_inv_mat,
-                update_bvh=(i % 20 == 0 or i == self.sim_substeps - 1),
+                update_bvh=(i % 5 == 0 or i == self.sim_substeps - 1),
             )
             self.assign_control(self.control)
             hydroelastic_wrenches.compute_contact_forces(

@@ -434,7 +434,8 @@ class Example:
         # Computing contact surface again before rendering.
         hydroelastic_isosurface.compute_contact_surfaces(self.model, self.state_0, self.contacts, self.body_q_inv_mat)
 
-        self.append_to_data_history()
+        # self.append_to_data_history()
+        # print(self.sim_time)
 
     def assign_control(self, control):
         control.joint_target.assign(self.joint_target)

@@ -711,22 +711,33 @@ def compute_contact_forces(solver, state, contacts, twist_convention=0):
                     body_f=state.body_f,
                 )
         elif twist_convention == 1:  # featherstone convention
-            for i in range(contacts.num_isosurfaces):
-                compute_isosurface_wrenches(
-                    contacts.isosurface[i],
-                    state.body_q,
-                    solver.body_v_s,
-                    solver.model.hydro_mesh[contacts.isosurface[i].body_a],
-                    solver.model.hydro_mesh[contacts.isosurface[i].body_b],
-                    twist_convention_wp,
-                )
+            main_stream = wp.get_stream()
+            init_event = main_stream.record_event()
 
+            for isosurface in contacts.isosurface:
+                isosurface.stream.wait_event(init_event)
+                with wp.ScopedStream(isosurface.stream):
+                    compute_isosurface_wrenches(
+                        isosurface,
+                        state.body_q,
+                        solver.body_v_s,
+                        solver.model.hydro_mesh[isosurface.body_a],
+                        solver.model.hydro_mesh[isosurface.body_b],
+                        twist_convention_wp,
+                    )
+                isosurface.stream.record_event(isosurface.sync_event)
+
+            for isosurface in contacts.isosurface:
+                main_stream.wait_event(isosurface.sync_event)
+
+            # TODO: How can we make sure that things are synchronized correctly?
+            for isosurface in contacts.isosurface:
                 launch_add_wrench_to_body_f(
-                    body_a=contacts.isosurface[i].body_a,
-                    body_b=contacts.isosurface[i].body_b,
-                    force=contacts.isosurface[i].force,
-                    torque_a=contacts.isosurface[i].torque_a,
-                    torque_b=contacts.isosurface[i].torque_b,
+                    body_a=isosurface.body_a,
+                    body_b=isosurface.body_b,
+                    force=isosurface.force,
+                    torque_a=isosurface.torque_a,
+                    torque_b=isosurface.torque_b,
                     twist_convention=twist_convention_wp,
                     body_f=state.body_f,
                 )
