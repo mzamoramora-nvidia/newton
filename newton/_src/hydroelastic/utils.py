@@ -165,7 +165,7 @@ def compute_face_normals(
 
 # TODO: Simplify or remove this function. It is very similar to compute_tet_bounding_box in isosurface.py.
 @wp.kernel
-def compute_aabb(
+def compute_aabb_tets(
     body_q: wp.array(dtype=wp.transform),
     body_a: wp.int32,
     points: wp.array(dtype=wp.vec3),
@@ -185,6 +185,31 @@ def compute_aabb(
     v_3 = wp.transform_point(T, points[i_3])
     lo = wp.min(wp.min(v_0, v_1), wp.min(v_2, v_3))
     hi = wp.max(wp.max(v_0, v_1), wp.max(v_2, v_3))
+    # tiny inflation to catch "touching" pairs
+    eps = 0.0  # 1.0e-6
+    lowers[tid] = lo - wp.vec3(eps, eps, eps)
+    uppers[tid] = hi + wp.vec3(eps, eps, eps)
+
+
+@wp.kernel
+def compute_aabb_tris(
+    body_q: wp.array(dtype=wp.transform),
+    body_a: wp.int32,
+    points: wp.array(dtype=wp.vec3),
+    indices: wp.array(dtype=wp.int32),  # shape [num_tris*3]
+    lowers: wp.array(dtype=wp.vec3),
+    uppers: wp.array(dtype=wp.vec3),
+):
+    T = body_q[body_a]
+    tid = wp.tid()
+    i_0 = indices[tid * 3 + 0]
+    i_1 = indices[tid * 3 + 1]
+    i_2 = indices[tid * 3 + 2]
+    v_0 = wp.transform_point(T, points[i_0])
+    v_1 = wp.transform_point(T, points[i_1])
+    v_2 = wp.transform_point(T, points[i_2])
+    lo = wp.min(v_0, wp.min(v_1, v_2))
+    hi = wp.max(v_0, wp.max(v_1, v_2))
     # tiny inflation to catch "touching" pairs
     eps = 0.0  # 1.0e-6
     lowers[tid] = lo - wp.vec3(eps, eps, eps)

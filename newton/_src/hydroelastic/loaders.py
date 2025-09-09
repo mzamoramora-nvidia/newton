@@ -12,7 +12,8 @@ from newton._src.hydroelastic.make_fields import (
 from newton._src.hydroelastic.tetrahedralizer import tetrahedralize
 from newton._src.hydroelastic.types import HydroelasticMesh, Isosurface
 from newton._src.hydroelastic.utils import (
-    compute_aabb,
+    compute_aabb_tets,
+    compute_aabb_tris,
     compute_default_tet_transform_inv,
     compute_face_normals,
     transform_array,
@@ -163,7 +164,7 @@ def load_drake_mesh(path: str, Tf, params, compute_device=None):
     temp_body_q = wp.array(wp.transform_identity(), dtype=wp.transform, device=compute_device)
     body_idx = wp.int32(0)
     wp.launch(
-        compute_aabb,
+        compute_aabb_tets,
         dim=num_tets,
         inputs=[
             temp_body_q,
@@ -315,7 +316,7 @@ def generate_mesh(V, F, params, compute_device=None):
     temp_body_q = wp.array(wp.transform_identity(), dtype=wp.transform, device=compute_device)
     body_idx = wp.int32(0)
     wp.launch(
-        compute_aabb,
+        compute_aabb_tets,
         dim=num_tets,
         inputs=[
             temp_body_q,
@@ -377,6 +378,29 @@ def generate_hard_mesh(V, F, params, compute_device=None):
         outputs=[hydroelastic.surface_mesh.normals],
     )
     # TODO: Print warning if mesh is not watertight.
+
+    # Compute AABB.
+    num_tris = F.shape[0]
+    hydroelastic.aabb_low = wp.zeros(num_tris, dtype=wp.vec3f, device=compute_device)
+    hydroelastic.aabb_high = wp.zeros(num_tris, dtype=wp.vec3f, device=compute_device)
+    temp_body_q = wp.array(wp.transform_identity(), dtype=wp.transform, device=compute_device)
+    body_idx = wp.int32(0)
+    wp.launch(
+        compute_aabb_tris,
+        dim=num_tris,
+        inputs=[
+            temp_body_q,
+            body_idx,
+            hydroelastic.surface_mesh.points,
+            hydroelastic.surface_mesh.indices,
+        ],
+        outputs=[
+            hydroelastic.aabb_low,
+            hydroelastic.aabb_high,
+        ],
+    )
+    # Initialize BVH.
+    hydroelastic.bvh = wp.Bvh(hydroelastic.aabb_low, hydroelastic.aabb_high)
     return hydroelastic
 
 

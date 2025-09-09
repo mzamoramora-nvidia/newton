@@ -119,14 +119,16 @@ class Example:
         # Setup hydroelastic contacts
         self.contacts.use_hydroelastic_inside_solver = False
         self.contacts.isosurface = []
+        max_geom_pairs = -1
         self.contacts.num_isosurfaces = hydroelastic_loaders.init_isosurfaces(
-            self.model.collision_pairs, self.contacts.isosurface, self.model.hydro_mesh, self.device
+            self.model.collision_pairs, self.contacts.isosurface, self.model.hydro_mesh, max_geom_pairs, self.device
         )
 
         # ==============================================================================================================
         # Perform fake step to initialize the solver.
         # This is useful for the Featherstone solver in particular, to populate stuff like body_v_s.
         self.body_q_inv_mat = wp.array(shape=(self.model.body_count,), dtype=wp.mat44, device=self.device)
+        hydroelastic_isosurface.refit_bvh_for_all_meshes(self.model, self.state_0)
         hydroelastic_isosurface.compute_contact_surfaces(self.model, self.state_0, self.contacts, self.body_q_inv_mat)
         self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
@@ -158,41 +160,6 @@ class Example:
 
     def load_model(self):
         # ==============================================================================================================
-        # Loading of the meshes should be moved somewhere else (e.g the model builder).
-        import trimesh  # noqa: PLC0415
-
-        meshes = []
-
-        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), wp.quat_identity())
-        object = trimesh.creation.box(extents=[0.1, 0.1, 0.1])
-        params = {
-            "hydroelastic_modulus": 3e2,  # 1e3
-            "is_visible": True,
-            "Tf": Tf,
-        }
-        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
-        meshes[-1].mu_static = wp.float32(1.0)
-        meshes[-1].mu_dynamic = wp.float32(0.5)
-        meshes[-1].mass = 0.159
-        meshes[-1].compute_mesh_density = True
-        # Set hunt_crossley_dissipation of both meshes to 0.0001 to see some bouncing.
-        # meshes[-1].hunt_crossley_dissipation = wp.float32(0.0001)
-
-        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), wp.quat_identity())
-        object = trimesh.creation.box(extents=[0.1, 0.1, 0.1])
-        params = {
-            "hydroelastic_modulus": 1e3,
-            "is_visible": True,
-            "Tf": Tf,
-        }
-        meshes.append(hydroelastic_loaders.generate_hard_mesh(object.vertices, object.faces, params))
-        meshes[-1].mu_static = wp.float32(1.0)
-        meshes[-1].mu_dynamic = wp.float32(0.5)
-        meshes[-1].mass = 0.159
-        meshes[-1].compute_mesh_density = True
-        # meshes[-1].hunt_crossley_dissipation = wp.float32(0.0001)
-
-        # ==============================================================================================================
         # Define initial poses.
         poses = np.zeros((2, 7), dtype=np.float32)
         unit_q = np.array([0, 0, 0, 1], dtype=np.float32)
@@ -210,6 +177,44 @@ class Example:
         poses[body_idx, 3:] = unit_q
 
         self.init_poses = poses
+
+        # ==============================================================================================================
+        # Loading of the meshes should be moved somewhere else (e.g the model builder).
+        import trimesh  # noqa: PLC0415
+
+        meshes = []
+
+        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), wp.quat_identity())
+        object = trimesh.creation.box(extents=[0.1, 0.1, 0.1])
+        params = {
+            "hydroelastic_modulus": 3e2,  # 1e3
+            "is_visible": True,
+            "Tf": Tf,
+        }
+        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
+        meshes[-1].mu_static = wp.float32(1.0)
+        meshes[-1].mu_dynamic = wp.float32(0.5)
+        meshes[-1].mass = 0.159
+        meshes[-1].compute_mesh_density = True
+        meshes[-1].body_id = object_soft
+        meshes[-1].update_aabb = False
+        # Set hunt_crossley_dissipation of both meshes to 0.0001 to see some bouncing.
+        # meshes[-1].hunt_crossley_dissipation = wp.float32(0.0001)
+
+        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), wp.quat_identity())
+        object = trimesh.creation.box(extents=[0.1, 0.1, 0.1])
+        params = {
+            "hydroelastic_modulus": 1e3,
+            "is_visible": True,
+            "Tf": Tf,
+        }
+        meshes.append(hydroelastic_loaders.generate_hard_mesh(object.vertices, object.faces, params))
+        meshes[-1].mu_static = wp.float32(1.0)
+        meshes[-1].mu_dynamic = wp.float32(0.5)
+        meshes[-1].mass = 0.159
+        meshes[-1].compute_mesh_density = True
+        meshes[-1].body_id = object_hard
+        # meshes[-1].hunt_crossley_dissipation = wp.float32(0.0001)
 
         # ==============================================================================================================
         # Setup scene
@@ -247,12 +252,16 @@ class Example:
 
     def simulate(self):
         # self.contacts = self.model.collide(self.state_0, rigid_contact_margin=0.2)
-        for _ in range(self.sim_substeps):
+        for i in range(self.sim_substeps):
             ## Forces could also be cleared inside the compute_contact_forces function.
             ## So, that we can compare the forces generated by collide vs the ones generated by the hydroelastic contact.
             self.state_0.clear_forces()
             hydroelastic_isosurface.compute_contact_surfaces(
-                self.model, self.state_0, self.contacts, self.body_q_inv_mat
+                self.model,
+                self.state_0,
+                self.contacts,
+                self.body_q_inv_mat,
+                update_bvh=(i % 10 == 0 or i == self.sim_substeps - 1),
             )
             # self.assign_control(self.control)
             hydroelastic_wrenches.compute_contact_forces(
