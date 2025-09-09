@@ -128,6 +128,7 @@ class Example:
         # Perform fake step to initialize the solver.
         # This is useful for the Featherstone solver in particular, to populate stuff like body_v_s.
         self.body_q_inv_mat = wp.array(shape=(self.model.body_count,), dtype=wp.mat44, device=self.device)
+        hydroelastic_isosurface.refit_bvh_for_all_meshes(self.model, self.state_0)
         hydroelastic_isosurface.compute_contact_surfaces(self.model, self.state_0, self.contacts, self.body_q_inv_mat)
         self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
@@ -207,6 +208,7 @@ class Example:
         meshes[-1].mass = 1
         meshes[-1].compute_mesh_density = True
         meshes[-1].body_id = table
+        meshes[-1].update_aabb = False
         # ========================================================================
         # With a density of 1000, this cube weights 1kg.
         # It results in normal force of 9.8N with fps = 120 and 10 substeps.

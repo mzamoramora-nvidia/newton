@@ -52,6 +52,7 @@ class HydroelasticMesh:
         self.mass = 0.0
         self.density = 1000.0
         self.body_id = -1
+        self.update_aabb = True
 
 
 @wp.struct

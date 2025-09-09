@@ -724,6 +724,7 @@ def find_tet_pairs_bvh_basic(
     bvh_id_smaller_mesh: wp.uint64,
     lowers_larger_mesh: wp.array(dtype=wp.vec3f),
     uppers_larger_mesh: wp.array(dtype=wp.vec3f),
+    mesh_a_is_larger: bool,
     # outputs
     tet_pairs_found: wp.array(dtype=wp.vec2i),
 ):
@@ -737,8 +738,12 @@ def find_tet_pairs_bvh_basic(
     counter = wp.int32(0)
     while wp.bvh_query_next(query, query_idx):
         # append pair with an atomic
-        tet_idx_a = tid
-        tet_idx_b = query_idx
+        if mesh_a_is_larger:
+            tet_idx_a = tid
+            tet_idx_b = query_idx
+        else:
+            tet_idx_a = query_idx
+            tet_idx_b = tid
 
         idx = tid * block + counter
         if idx >= (tid + 1) * block:
@@ -769,6 +774,7 @@ def find_tet_pairs_bvh(
     bvh_id_smaller_mesh: wp.uint64,
     lowers_larger_mesh: wp.array(dtype=wp.vec3f),
     uppers_larger_mesh: wp.array(dtype=wp.vec3f),
+    mesh_a_is_larger: bool,
     # outputs
     tet_pairs_found: wp.array(dtype=wp.vec2i),
 ):
@@ -780,10 +786,15 @@ def find_tet_pairs_bvh(
     query = wp.bvh_query_aabb(bvh_id_smaller_mesh, lowers_larger_mesh[tid], uppers_larger_mesh[tid])
     query_idx = wp.int32(0)
     counter = wp.int32(0)
+    counter_missed = wp.int32(0)
     while wp.bvh_query_next(query, query_idx):
         # append pair with an atomic
-        tet_idx_a = tid
-        tet_idx_b = query_idx
+        if mesh_a_is_larger:
+            tet_idx_a = tid
+            tet_idx_b = query_idx
+        else:
+            tet_idx_a = query_idx
+            tet_idx_b = tid
 
         tet_vidx_a = tet_elements_a[tet_idx_a]  # tet vertex indices
         tet_vidx_b = tet_elements_b[tet_idx_b]
@@ -800,6 +811,7 @@ def find_tet_pairs_bvh(
         min_bounds_b, max_bounds_b = get_tet_bounding_box(tet_vpos_b_W)
 
         if not check_bounding_boxes_overlap(min_bounds_a, max_bounds_a, min_bounds_b, max_bounds_b):
+            counter_missed += 1
             continue
 
         idx = tid * block + counter
@@ -816,7 +828,7 @@ def find_tet_pairs_bvh(
 
         tet_pairs_found[idx] = wp.vec2i(tet_idx_a, tet_idx_b)
         counter += 1
-    # wp.printf("tid, counter: %d, %d\n", tid, counter)
+    wp.printf("tid, counter, counter_missed: %d, %d, %d\n", tid, counter, counter_missed)
 
 
 @wp.kernel
@@ -1304,38 +1316,77 @@ def launch_compute_soft_vs_soft_contact_surface(body_q, body_q_inv_mat, mesh_a, 
     #     ],
     # )
 
-    wp.launch(
-        find_tet_pairs_bvh_basic,
-        dim=mesh_a.volume_mesh.indices.shape[0],
-        inputs=[
-            mesh_b.bvh.id,
-            mesh_a.aabb_low,
-            mesh_a.aabb_high,
-        ],
-        outputs=[
-            isosurface.geom_pairs_found,
-        ],
-    )
+    # if mesh_a.aabb_low.shape[0] > mesh_b.aabb_low.shape[0]:
+    #     wp.launch(
+    #         find_tet_pairs_bvh_basic,
+    #         dim=mesh_a.volume_mesh.indices.shape[0],
+    #         inputs=[
+    #             mesh_b.bvh.id,
+    #             mesh_a.aabb_low,
+    #             mesh_a.aabb_high,
+    #             True,
+    #         ],
+    #         outputs=[
+    #             isosurface.geom_pairs_found,
+    #         ],
+    #     )
+    # else:
+    #     wp.launch(
+    #         find_tet_pairs_bvh_basic,
+    #         dim=mesh_b.volume_mesh.indices.shape[0],
+    #         inputs=[
+    #             mesh_a.bvh.id,
+    #             mesh_b.aabb_low,
+    #             mesh_b.aabb_high,
+    #             False,
+    #         ],
+    #         outputs=[
+    #             isosurface.geom_pairs_found,
+    #         ],
+    #     )
 
-    # wp.launch(
-    #     find_tet_pairs_bvh,
-    #     dim=mesh_a.volume_mesh.indices.shape[0],
-    #     inputs=[
-    #         body_q,
-    #         isosurface.body_a_wp,
-    #         isosurface.body_b_wp,
-    #         mesh_a.volume_mesh.default_points,
-    #         mesh_b.volume_mesh.default_points,
-    #         mesh_a.volume_mesh.indices,
-    #         mesh_b.volume_mesh.indices,
-    #         mesh_b.bvh.id,
-    #         mesh_a.aabb_low,
-    #         mesh_a.aabb_high,
-    #     ],
-    #     outputs=[
-    #         isosurface.geom_pairs_found,
-    #     ],
-    # )
+    if mesh_a.aabb_low.shape[0] > mesh_b.aabb_low.shape[0]:
+        wp.launch(
+            find_tet_pairs_bvh,
+            dim=mesh_a.volume_mesh.indices.shape[0],
+            inputs=[
+                body_q,
+                isosurface.body_a_wp,
+                isosurface.body_b_wp,
+                mesh_a.volume_mesh.default_points,
+                mesh_b.volume_mesh.default_points,
+                mesh_a.volume_mesh.indices,
+                mesh_b.volume_mesh.indices,
+                mesh_b.bvh.id,
+                mesh_a.aabb_low,
+                mesh_a.aabb_high,
+                True,
+            ],
+            outputs=[
+                isosurface.geom_pairs_found,
+            ],
+        )
+    else:
+        wp.launch(
+            find_tet_pairs_bvh,
+            dim=mesh_b.volume_mesh.indices.shape[0],
+            inputs=[
+                body_q,
+                isosurface.body_a_wp,
+                isosurface.body_b_wp,
+                mesh_a.volume_mesh.default_points,
+                mesh_b.volume_mesh.default_points,
+                mesh_a.volume_mesh.indices,
+                mesh_b.volume_mesh.indices,
+                mesh_a.bvh.id,
+                mesh_b.aabb_low,
+                mesh_b.aabb_high,
+                False,
+            ],
+            outputs=[
+                isosurface.geom_pairs_found,
+            ],
+        )
 
     wp.launch(
         compute_contact_surface_elements_bvh,
@@ -1472,6 +1523,14 @@ def update_aabb(body_q, body_id, mesh):
     )
 
 
+def refit_bvh_for_all_meshes(model, state_0):
+    for i in range(len(model.hydro_mesh)):
+        # Update AABB.
+        update_aabb(state_0.body_q, model.hydro_mesh[i].body_id, model.hydro_mesh[i])
+        # Update BVH.
+        model.hydro_mesh[i].bvh.refit()
+
+
 def compute_contact_surfaces(model, state_0, contacts, body_q_inv_mat, update_bvh=True):
     with wp.ScopedTimer("Computation of contact surfaces", print=False):
         # Compute inverse transform of body_q
@@ -1484,6 +1543,9 @@ def compute_contact_surfaces(model, state_0, contacts, body_q_inv_mat, update_bv
 
         if update_bvh:
             for i in range(len(model.hydro_mesh)):
+                if not model.hydro_mesh[i].update_aabb:
+                    continue
+
                 update_aabb(state_0.body_q, model.hydro_mesh[i].body_id, model.hydro_mesh[i])
                 # Update BVH.
                 model.hydro_mesh[i].bvh.refit()

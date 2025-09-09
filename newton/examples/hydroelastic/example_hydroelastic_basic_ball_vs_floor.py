@@ -127,6 +127,7 @@ class Example:
         # Perform fake step to initialize the solver.
         # This is useful for the Featherstone solver in particular, to populate stuff like body_v_s.
         self.body_q_inv_mat = wp.array(shape=(self.model.body_count,), dtype=wp.mat44, device=self.device)
+        hydroelastic_isosurface.refit_bvh_for_all_meshes(self.model, self.state_0)
         hydroelastic_isosurface.compute_contact_surfaces(self.model, self.state_0, self.contacts, self.body_q_inv_mat)
         self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
@@ -187,6 +188,7 @@ class Example:
         meshes.append(hydroelastic_loaders.load_drake_mesh(table_path, Tf, params, self.device))
         meshes[-1].hunt_crossley_dissipation = wp.float32(0.0001)
         meshes[-1].body_id = table
+        meshes[-1].update_aabb = False
 
         # Load sphere.
         Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), wp.quat_identity())

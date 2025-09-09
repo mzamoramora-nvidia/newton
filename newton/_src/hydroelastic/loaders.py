@@ -177,7 +177,7 @@ def load_drake_mesh(path: str, Tf, params, compute_device=None):
         ],
     )
     # Initialize BVH.
-    hydroelastic.bvh = wp.Bvh(hydroelastic.aabb_low, hydroelastic.aabb_high, constructor="median")
+    hydroelastic.bvh = wp.Bvh(hydroelastic.aabb_low, hydroelastic.aabb_high)
 
     # Initialize is_on_surface array.
     # This initiaization ensures that the field value is computed for every vertex.
@@ -329,7 +329,7 @@ def generate_mesh(V, F, params, compute_device=None):
         ],
     )
     # Initialize BVH.
-    hydroelastic.bvh = wp.Bvh(hydroelastic.aabb_low, hydroelastic.aabb_high, constructor="median")
+    hydroelastic.bvh = wp.Bvh(hydroelastic.aabb_low, hydroelastic.aabb_high)
 
     # Check that the tetrahedron orientation is correct.
     # For now, we only print warnings.
