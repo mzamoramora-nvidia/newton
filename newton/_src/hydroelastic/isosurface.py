@@ -577,22 +577,22 @@ def warn_degenerate_plane(plane_normal: wp.vec3, tid: wp.int32):
 @wp.kernel
 def find_geom_pairs_bvh_basic(
     bvh_id_smaller_mesh: wp.uint64,
-    lowers_larger_mesh: wp.array(dtype=wp.vec3f),
-    uppers_larger_mesh: wp.array(dtype=wp.vec3f),
-    mesh_a_is_larger: bool,
+    lowers: wp.array(dtype=wp.vec3f),
+    uppers: wp.array(dtype=wp.vec3f),
+    query_with_mesh_a: bool,
     # outputs
     geom_pairs_found: wp.array(dtype=wp.vec2i),
 ):
-    tid = wp.tid()  # Each thread should process one tet of the larger mesh (the mesh with the larger number of tets).
+    tid = wp.tid()  # Each thread should process one geom (tet or triangle) of the querying mesh.
 
-    block = wp.int32(geom_pairs_found.shape[0] / lowers_larger_mesh.shape[0])
+    block = wp.int32(geom_pairs_found.shape[0] / lowers.shape[0])
 
     # query Mesh-smaller BVH with larger mesh's AABB
-    query = wp.bvh_query_aabb(bvh_id_smaller_mesh, lowers_larger_mesh[tid], uppers_larger_mesh[tid])
+    query = wp.bvh_query_aabb(bvh_id_smaller_mesh, lowers[tid], uppers[tid])
     query_idx = wp.int32(0)
     counter = wp.int32(0)
     while wp.bvh_query_next(query, query_idx):
-        if mesh_a_is_larger:
+        if query_with_mesh_a:
             geom_idx_a = tid
             geom_idx_b = query_idx
         else:
@@ -602,8 +602,9 @@ def find_geom_pairs_bvh_basic(
         idx = tid * block + counter
         if idx >= (tid + 1) * block:
             wp.printf(
-                "Query is overflowing: tid, geom_idx_b, idx, block, counter: %d, %d, %d, %d, %d\n",
+                "Query is overflowing: tid, geom_idx_a, geom_idx_b, idx, block, counter: %d, %d, %d, %d, %d, %d\n",
                 tid,
+                geom_idx_a,
                 geom_idx_b,
                 idx,
                 block,
