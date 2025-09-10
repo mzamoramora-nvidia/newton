@@ -1240,9 +1240,9 @@ def find_geom_pairs(body_q, isosurface, mesh_a, mesh_b, update_contact_pairs):
                 dim=mesh_a.aabb_low.shape[0],
                 inputs=[
                     body_q,
-                    mesh_b.body_id,
+                    isosurface.body_b_wp,
                     mesh_b.bvh.id,
-                    mesh_a.body_id,
+                    isosurface.body_a_wp,
                     mesh_a.aabb_low,
                     mesh_a.aabb_high,
                     True,
@@ -1257,9 +1257,9 @@ def find_geom_pairs(body_q, isosurface, mesh_a, mesh_b, update_contact_pairs):
                 dim=mesh_b.aabb_low.shape[0],
                 inputs=[
                     body_q,
-                    mesh_a.body_id,
+                    isosurface.body_a_wp,
                     mesh_a.bvh.id,
-                    mesh_b.body_id,
+                    isosurface.body_b_wp,
                     mesh_b.aabb_low,
                     mesh_b.aabb_high,
                     False,
@@ -1383,7 +1383,7 @@ def compute_contact_surfaces(model, state_0, contacts, body_q_inv_mat, update_co
                     model.hydro_mesh[isosurface.body_a],
                     model.hydro_mesh[isosurface.body_b],
                     isosurface,
-                    update_contact_pairs=update_contact_pairs,
+                    update_contact_pairs,
                 )
             isosurface.stream.record_event(isosurface.sync_event)
 
