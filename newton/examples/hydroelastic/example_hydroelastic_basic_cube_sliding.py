@@ -134,7 +134,6 @@ class Example:
         # Perform fake step to initialize the solver.
         # This is useful for the Featherstone solver in particular, to populate stuff like body_v_s.
         self.body_q_inv_mat = wp.array(shape=(self.model.body_count,), dtype=wp.mat44, device=self.device)
-        hydroelastic_isosurface.refit_bvh_for_all_meshes(self.model, self.state_0)
         hydroelastic_isosurface.compute_contact_surfaces(self.model, self.state_0, self.contacts, self.body_q_inv_mat)
         self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
@@ -194,8 +193,8 @@ class Example:
         meshes = []
 
         # Increase (0.3, 0.25) to (0.35, 0.30) to avoid slippage.
-        default_mu_static = wp.float32(0.35)
-        default_mu_dynamic = wp.float32(0.30)
+        default_mu_static = wp.float32(0.30)
+        default_mu_dynamic = wp.float32(0.25)
 
         # Load table
         quat = wp.quat_identity()
@@ -294,11 +293,6 @@ class Example:
 
         self.sim_time += self.frame_dt
 
-        # Computing contact surface again before rendering.
-        hydroelastic_isosurface.compute_contact_surfaces(
-            self.model, self.state_0, self.contacts, self.body_q_inv_mat, update_bvh=True
-        )
-        # print(f"sim_time: {self.sim_time}")
         self.append_to_data_history()
 
     # def assign_control(self, control):

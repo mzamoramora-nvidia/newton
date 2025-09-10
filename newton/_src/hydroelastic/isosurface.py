@@ -31,7 +31,7 @@ Key components:
 import warp as wp
 
 from newton._src.hydroelastic.types import mat43h, vec4i
-from newton._src.hydroelastic.utils import compute_aabb_tets, compute_aabb_tris, compute_body_q_inv_mat
+from newton._src.hydroelastic.utils import compute_body_q_inv_mat
 
 MAX_POLYGON_VERTICES = 8
 
@@ -576,7 +576,10 @@ def warn_degenerate_plane(plane_normal: wp.vec3, tid: wp.int32):
 
 @wp.kernel
 def find_geom_pairs_bvh_basic(
-    bvh_id_smaller_mesh: wp.uint64,
+    body_q: wp.array(dtype=wp.transform),
+    body_id_bvh: wp.int32,
+    bvh_id: wp.uint64,
+    body_id_to_query: wp.int32,
     lowers: wp.array(dtype=wp.vec3f),
     uppers: wp.array(dtype=wp.vec3f),
     query_with_mesh_a: bool,
@@ -587,8 +590,13 @@ def find_geom_pairs_bvh_basic(
 
     block = wp.int32(geom_pairs_found.shape[0] / lowers.shape[0])
 
-    # query Mesh-smaller BVH with larger mesh's AABB
-    query = wp.bvh_query_aabb(bvh_id_smaller_mesh, lowers[tid], uppers[tid])
+    # Transform the query AABB to the BVH frame.
+    q_inv = wp.transform_inverse(body_q[body_id_bvh])
+    xform_aabb_to_bvh = wp.transform_multiply(q_inv, body_q[body_id_to_query])
+
+    lowers_body_frame = wp.transform_point(xform_aabb_to_bvh, lowers[tid])
+    uppers_body_frame = wp.transform_point(xform_aabb_to_bvh, uppers[tid])
+    query = wp.bvh_query_aabb(bvh_id, lowers_body_frame, uppers_body_frame)
     query_idx = wp.int32(0)
     counter = wp.int32(0)
     while wp.bvh_query_next(query, query_idx):
@@ -1185,7 +1193,7 @@ def launch_compute_soft_vs_soft_contact_surface(
     #         ],
     #     )
 
-    find_geom_pairs(isosurface, mesh_a, mesh_b, update_contact_pairs)
+    find_geom_pairs(body_q, isosurface, mesh_a, mesh_b, update_contact_pairs)
 
     wp.launch(
         compute_soft_soft_contact_surface_elements,
@@ -1223,7 +1231,7 @@ def launch_compute_soft_vs_soft_contact_surface(
     )
 
 
-def find_geom_pairs(isosurface, mesh_a, mesh_b, update_contact_pairs):
+def find_geom_pairs(body_q, isosurface, mesh_a, mesh_b, update_contact_pairs):
     # In this context: geom pairs can be tet_vs_tet pairs or tet_vs_tri pairs.
     if update_contact_pairs:
         if mesh_a.aabb_low.shape[0] > mesh_b.aabb_low.shape[0]:
@@ -1231,7 +1239,10 @@ def find_geom_pairs(isosurface, mesh_a, mesh_b, update_contact_pairs):
                 find_geom_pairs_bvh_basic,
                 dim=mesh_a.aabb_low.shape[0],
                 inputs=[
+                    body_q,
+                    mesh_b.body_id,
                     mesh_b.bvh.id,
+                    mesh_a.body_id,
                     mesh_a.aabb_low,
                     mesh_a.aabb_high,
                     True,
@@ -1245,7 +1256,10 @@ def find_geom_pairs(isosurface, mesh_a, mesh_b, update_contact_pairs):
                 find_geom_pairs_bvh_basic,
                 dim=mesh_b.aabb_low.shape[0],
                 inputs=[
+                    body_q,
+                    mesh_a.body_id,
                     mesh_a.bvh.id,
+                    mesh_b.body_id,
                     mesh_b.aabb_low,
                     mesh_b.aabb_high,
                     False,
@@ -1259,7 +1273,7 @@ def find_geom_pairs(isosurface, mesh_a, mesh_b, update_contact_pairs):
 def launch_compute_soft_vs_hard_contact_surface(
     body_q, body_q_inv_mat, mesh_a, mesh_b, isosurface, update_contact_pairs=True
 ):
-    find_geom_pairs(isosurface, mesh_a, mesh_b, update_contact_pairs)
+    find_geom_pairs(body_q, isosurface, mesh_a, mesh_b, update_contact_pairs)
 
     wp.launch(
         compute_soft_hard_contact_surface_elements,
@@ -1347,48 +1361,6 @@ def compute_contact_polygons(
         )
 
 
-def update_aabb(body_q, body_id, mesh):
-    # Compute AABB for each tetrahedron.
-    if mesh.is_soft:
-        wp.launch(
-            compute_aabb_tets,
-            dim=mesh.aabb_low.shape[0],
-            inputs=[
-                body_q,
-                body_id,
-                mesh.volume_mesh.default_points,
-                mesh.volume_mesh.indices,
-            ],
-            outputs=[
-                mesh.aabb_low,
-                mesh.aabb_high,
-            ],
-        )
-    else:
-        wp.launch(
-            compute_aabb_tris,
-            dim=mesh.aabb_low.shape[0],
-            inputs=[
-                body_q,
-                body_id,
-                mesh.surface_mesh.points,
-                mesh.surface_mesh.indices,
-            ],
-            outputs=[
-                mesh.aabb_low,
-                mesh.aabb_high,
-            ],
-        )
-
-
-def refit_bvh_for_all_meshes(model, state_0):
-    for i in range(len(model.hydro_mesh)):
-        # Update AABB.
-        update_aabb(state_0.body_q, model.hydro_mesh[i].body_id, model.hydro_mesh[i])
-        # Update BVH.
-        model.hydro_mesh[i].bvh.refit()
-
-
 def compute_contact_surfaces(model, state_0, contacts, body_q_inv_mat, update_bvh=True):
     with wp.ScopedTimer("Computation of contact surfaces", print=False):
         # Compute inverse transform of body_q
@@ -1398,15 +1370,6 @@ def compute_contact_surfaces(model, state_0, contacts, body_q_inv_mat, update_bv
             inputs=[state_0.body_q],
             outputs=[body_q_inv_mat],
         )
-
-        if update_bvh:
-            for i in range(len(model.hydro_mesh)):
-                if not model.hydro_mesh[i].update_aabb:
-                    continue
-
-                update_aabb(state_0.body_q, model.hydro_mesh[i].body_id, model.hydro_mesh[i])
-                # Update BVH.
-                model.hydro_mesh[i].bvh.refit()
 
         # Compute hydroelastic contact isosurface.
         main_stream = wp.get_stream()
