@@ -1361,7 +1361,7 @@ def compute_contact_polygons(
         )
 
 
-def compute_contact_surfaces(model, state_0, contacts, body_q_inv_mat, update_bvh=True):
+def compute_contact_surfaces(model, state_0, contacts, body_q_inv_mat, update_contact_pairs=True):
     with wp.ScopedTimer("Computation of contact surfaces", print=False):
         # Compute inverse transform of body_q
         wp.launch(
@@ -1383,7 +1383,7 @@ def compute_contact_surfaces(model, state_0, contacts, body_q_inv_mat, update_bv
                     model.hydro_mesh[isosurface.body_a],
                     model.hydro_mesh[isosurface.body_b],
                     isosurface,
-                    update_contact_pairs=update_bvh,
+                    update_contact_pairs=update_contact_pairs,
                 )
             isosurface.stream.record_event(isosurface.sync_event)
 

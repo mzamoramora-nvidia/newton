@@ -369,7 +369,7 @@ class Example:
                 self.state_0,
                 self.contacts,
                 self.body_q_inv_mat,
-                update_bvh=(i % 5 == 0 or i == self.sim_substeps - 1),
+                update_contact_pairs=(i % 5 == 0 or i == self.sim_substeps - 1),
             )
             self.assign_control(self.control)
             hydroelastic_wrenches.compute_contact_forces(
@@ -388,9 +388,6 @@ class Example:
         self.sim_time += self.frame_dt
 
         self.compute_control()
-
-        # Computing contact surface again before rendering.
-        hydroelastic_isosurface.compute_contact_surfaces(self.model, self.state_0, self.contacts, self.body_q_inv_mat)
 
         self.append_to_data_history()
 

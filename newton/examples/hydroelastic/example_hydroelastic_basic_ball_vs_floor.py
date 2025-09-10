@@ -247,7 +247,7 @@ class Example:
                 self.state_0,
                 self.contacts,
                 self.body_q_inv_mat,
-                update_bvh=(i % 2 == 0 or i == self.sim_substeps - 1),
+                update_contact_pairs=(i % 2 == 0 or i == self.sim_substeps - 1),
             )
             # self.assign_control(self.control)
             hydroelastic_wrenches.compute_contact_forces(
