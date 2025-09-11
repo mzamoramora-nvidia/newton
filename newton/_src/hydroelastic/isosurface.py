@@ -663,7 +663,7 @@ def find_geom_pairs_bvh_soft_vs_soft(
             p_query_W = wp.transform_point(body_q[body_id_query], points_b[tet_vidx_query[i]])
 
         p_query_rel = p_query_W - wp.transform_get_translation(body_q[body_id_bvh])
-        tet_vpos_query_W[i] = wp.quat_rotate(wp.transform_get_rotation(body_q[body_id_bvh]), p_query_rel)
+        tet_vpos_query_W[i] = wp.quat_rotate_inv(wp.transform_get_rotation(body_q[body_id_bvh]), p_query_rel)
 
     min_bounds_query, max_bounds_query = get_tet_bounding_box(tet_vpos_query_W)
     lower = wp.vec3(min_bounds_query.x, min_bounds_query.y, min_bounds_query.z)
