@@ -111,7 +111,6 @@ class Isosurface:
         self.max_geom_pairs = max_geom_pairs
         self.geom_pairs_found = wp.zeros(self.max_geom_pairs, dtype=wp.vec2i, device=compute_device)
         self.query_mesh_a = query_mesh_a
-        self.query_mesh_a_wp = wp.bool(self.query_mesh_a)
 
         self.intermediate_contact_polygon = ContactPolygon()
         self.contact_polygon = ContactPolygon()

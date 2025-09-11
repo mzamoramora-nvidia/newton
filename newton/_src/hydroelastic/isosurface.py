@@ -671,15 +671,15 @@ def find_geom_pairs_bvh_soft_vs_soft(
 
     # query Mesh-smaller BVH with larger mesh's AABB
     query = wp.bvh_query_aabb(bvh_id, lower, upper)
-    query_idx = wp.int32(0)
+    bvh_element = wp.int32(0)
     counter = wp.int32(0)
     counter_missed = wp.int32(0)
-    while wp.bvh_query_next(query, query_idx):
+    while wp.bvh_query_next(query, bvh_element):
         if query_with_mesh_a:
             tet_idx_a = tid
-            tet_idx_b = query_idx
+            tet_idx_b = bvh_element
         else:
-            tet_idx_a = query_idx
+            tet_idx_a = bvh_element
             tet_idx_b = tid
 
         tet_vidx_a = tet_elements_a[tet_idx_a]  # tet vertex indices
@@ -1399,7 +1399,7 @@ def find_geom_pairs_soft_vs_soft(body_q, isosurface, mesh_a, mesh_b, update_cont
                     mesh_a.volume_mesh.indices,
                     mesh_b.volume_mesh.indices,
                     mesh_b.bvh.id,
-                    isosurface.query_mesh_a_wp,
+                    isosurface.query_mesh_a,
                 ],
                 outputs=[
                     isosurface.geom_pairs_found,
@@ -1418,7 +1418,7 @@ def find_geom_pairs_soft_vs_soft(body_q, isosurface, mesh_a, mesh_b, update_cont
                     mesh_a.volume_mesh.indices,
                     mesh_b.volume_mesh.indices,
                     mesh_a.bvh.id,
-                    isosurface.query_mesh_a_wp,
+                    isosurface.query_mesh_a,
                 ],
                 outputs=[
                     isosurface.geom_pairs_found,
