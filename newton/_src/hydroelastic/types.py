@@ -90,7 +90,9 @@ def reset_contact_polygon(contact_polygon):
 
 
 class Isosurface:
-    def __init__(self, body_a, body_b, geom_pairs, mesh_b_is_soft, max_geom_pairs=-1, compute_device=None):
+    def __init__(
+        self, body_a, body_b, geom_pairs, mesh_b_is_soft, max_geom_pairs=-1, query_mesh_a=True, compute_device=None
+    ):
         if compute_device is None:
             compute_device = wp.get_device()
         self.stream = wp.Stream(compute_device)
@@ -108,6 +110,9 @@ class Isosurface:
             max_geom_pairs = self.geom_pairs.shape[0]
         self.max_geom_pairs = max_geom_pairs
         self.geom_pairs_found = wp.zeros(self.max_geom_pairs, dtype=wp.vec2i, device=compute_device)
+        self.query_mesh_a = query_mesh_a
+        self.query_mesh_a_wp = wp.bool(self.query_mesh_a)
+
         self.intermediate_contact_polygon = ContactPolygon()
         self.contact_polygon = ContactPolygon()
         initialize_contact_polygon(self.max_geom_pairs, self.intermediate_contact_polygon, compute_device)

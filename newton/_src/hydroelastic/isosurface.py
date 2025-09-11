@@ -626,6 +626,103 @@ def find_geom_pairs_bvh_basic(
 
 
 @wp.kernel
+def find_geom_pairs_bvh_soft_vs_soft(
+    body_q: wp.array(dtype=wp.transform),
+    body_a: wp.int32,
+    body_b: wp.int32,
+    points_a: wp.array(dtype=wp.vec3f),
+    points_b: wp.array(dtype=wp.vec3f),
+    tet_elements_a: wp.array(dtype=wp.vec4i),
+    tet_elements_b: wp.array(dtype=wp.vec4i),
+    bvh_id: wp.uint64,
+    query_with_mesh_a: bool,
+    # outputs
+    tet_pairs_found: wp.array(dtype=wp.vec2i),
+):
+    tid = wp.tid()  # Each thread should process one mini-geom (tet or triangle) of the querying mesh.
+
+    tet_vpos_query_W = mat43h(0.0)  # tet vertex positions in world frame
+    tet_vidx_query = tet_elements_a[tid]
+    body_id_query = body_a
+    body_id_bvh = body_b
+    block = wp.int32(tet_pairs_found.shape[0] / tet_elements_a.shape[0])
+
+    if not query_with_mesh_a:
+        tet_vidx_query = tet_elements_b[tid]
+        body_id_query = body_b
+        body_id_bvh = body_a
+        block = wp.int32(tet_pairs_found.shape[0] / tet_elements_b.shape[0])
+
+    # q_inv = wp.transform_inverse(body_q[body_id_bvh])
+    # xform_aabb_to_bvh = wp.transform_multiply(q_inv, body_q[body_id_query])
+
+    for i in range(4):
+        if query_with_mesh_a:
+            p_query_W = wp.transform_point(body_q[body_id_query], points_a[tet_vidx_query[i]])
+        else:
+            p_query_W = wp.transform_point(body_q[body_id_query], points_b[tet_vidx_query[i]])
+
+        p_query_rel = p_query_W - wp.transform_get_translation(body_q[body_id_bvh])
+        tet_vpos_query_W[i] = wp.quat_rotate(wp.transform_get_rotation(body_q[body_id_bvh]), p_query_rel)
+
+    min_bounds_query, max_bounds_query = get_tet_bounding_box(tet_vpos_query_W)
+    lower = wp.vec3(min_bounds_query.x, min_bounds_query.y, min_bounds_query.z)
+    upper = wp.vec3(max_bounds_query.x, max_bounds_query.y, max_bounds_query.z)
+
+    # query Mesh-smaller BVH with larger mesh's AABB
+    query = wp.bvh_query_aabb(bvh_id, lower, upper)
+    query_idx = wp.int32(0)
+    counter = wp.int32(0)
+    counter_missed = wp.int32(0)
+    while wp.bvh_query_next(query, query_idx):
+        if query_with_mesh_a:
+            tet_idx_a = tid
+            tet_idx_b = query_idx
+        else:
+            tet_idx_a = query_idx
+            tet_idx_b = tid
+
+        tet_vidx_a = tet_elements_a[tet_idx_a]  # tet vertex indices
+        tet_vidx_b = tet_elements_b[tet_idx_b]
+
+        tet_vpos_a_W = mat43h(0.0)  # tet vertex positions in world frame
+        tet_vpos_b_W = mat43h(0.0)
+
+        for i in range(4):
+            tet_vpos_a_W[i] = wp.transform_point(body_q[body_a], points_a[tet_vidx_a[i]])
+            tet_vpos_b_W[i] = wp.transform_point(body_q[body_b], points_b[tet_vidx_b[i]])
+
+        # Early exit: Check bounding box overlap
+        min_bounds_a, max_bounds_a = get_tet_bounding_box(tet_vpos_a_W)
+        min_bounds_b, max_bounds_b = get_tet_bounding_box(tet_vpos_b_W)
+
+        if not check_bounding_boxes_overlap(min_bounds_a, max_bounds_a, min_bounds_b, max_bounds_b):
+            # wp.printf("missed: tid, tet_idx_a, tet_idx_b: %d, %d, %d\n", tid, tet_idx_a, tet_idx_b)
+            counter_missed += 1
+            continue
+
+        idx = tid * block + counter
+        if idx >= (tid + 1) * block:
+            wp.printf(
+                "Query is overflowing: tid, tet_idx_a, tet_idx_b, idx, block, conter: %d, %d, %d, %d, %d, %d\n",
+                tid,
+                tet_idx_a,
+                tet_idx_b,
+                idx,
+                block,
+                counter,
+            )
+            idx = (tid + 1) * block - 1
+
+        tet_pairs_found[idx] = wp.vec2i(tet_idx_a, tet_idx_b)
+        counter += 1
+
+    # Can happend if box falls indefinitely.
+    # if counter_missed > 0:
+    #   wp.printf("tid, counter, counter_missed: %d, %d, %d\n", tid, counter, counter_missed)
+
+
+@wp.kernel
 def find_tet_pairs_bvh(
     body_q: wp.array(dtype=wp.transform),
     body_a: wp.int32,
@@ -1193,7 +1290,9 @@ def launch_compute_soft_vs_soft_contact_surface(
     #         ],
     #     )
 
-    find_geom_pairs(body_q, isosurface, mesh_a, mesh_b, update_contact_pairs)
+    # find_geom_pairs(body_q, isosurface, mesh_a, mesh_b, update_contact_pairs)
+
+    find_geom_pairs_soft_vs_soft(body_q, isosurface, mesh_a, mesh_b, update_contact_pairs)
 
     wp.launch(
         compute_soft_soft_contact_surface_elements,
@@ -1263,6 +1362,63 @@ def find_geom_pairs(body_q, isosurface, mesh_a, mesh_b, update_contact_pairs):
                     mesh_b.aabb_low,
                     mesh_b.aabb_high,
                     False,
+                ],
+                outputs=[
+                    isosurface.geom_pairs_found,
+                ],
+            )
+
+
+def find_geom_pairs_soft_vs_soft(body_q, isosurface, mesh_a, mesh_b, update_contact_pairs):
+    # In this context: geom pairs can be tet_vs_tet pairs or tet_vs_tri pairs.
+
+    # body_q: wp.array(dtype=wp.transform),
+    # body_a: wp.int32,
+    # body_b: wp.int32,
+    # points_a: wp.array(dtype=wp.vec3f),
+    # points_b: wp.array(dtype=wp.vec3f),
+    # tet_elements_a: wp.array(dtype=wp.vec4i),
+    # tet_elements_b: wp.array(dtype=wp.vec4i),
+    # bvh_id: wp.uint64,
+    # query_with_mesh_a: bool,
+    # # outputs
+    # tet_pairs_found: wp.array(dtype=wp.vec2i),
+
+    if update_contact_pairs:
+        if isosurface.query_mesh_a:
+            # print("querying mesh a", isosurface.body_a, isosurface.body_b)
+            wp.launch(
+                find_geom_pairs_bvh_soft_vs_soft,
+                dim=mesh_a.volume_mesh.indices.shape[0],
+                inputs=[
+                    body_q,
+                    isosurface.body_a_wp,
+                    isosurface.body_b_wp,
+                    mesh_a.volume_mesh.default_points,
+                    mesh_b.volume_mesh.default_points,
+                    mesh_a.volume_mesh.indices,
+                    mesh_b.volume_mesh.indices,
+                    mesh_b.bvh.id,
+                    isosurface.query_mesh_a_wp,
+                ],
+                outputs=[
+                    isosurface.geom_pairs_found,
+                ],
+            )
+        else:
+            wp.launch(
+                find_geom_pairs_bvh_soft_vs_soft,
+                dim=mesh_b.volume_mesh.indices.shape[0],
+                inputs=[
+                    body_q,
+                    isosurface.body_a_wp,
+                    isosurface.body_b_wp,
+                    mesh_a.volume_mesh.default_points,
+                    mesh_b.volume_mesh.default_points,
+                    mesh_a.volume_mesh.indices,
+                    mesh_b.volume_mesh.indices,
+                    mesh_a.bvh.id,
+                    isosurface.query_mesh_a_wp,
                 ],
                 outputs=[
                     isosurface.geom_pairs_found,

@@ -717,7 +717,10 @@ def init_isosurfaces(collision_pairs, isosurfaces, meshes, max_geom_pairs=-1, de
             # Surface mesh is a wp.Mesh, where the indices are a flat array of integers.
             num_elements_b = meshes[body_b].surface_mesh.indices.shape[0] // 3
         l = [(x, y) for x in range(num_elements_a) for y in range(num_elements_b)]
-        isosurfaces.append(Isosurface(body_a, body_b, l, meshes[body_b].is_soft, max_geom_pairs[i], device))
+        query_mesh_a = num_elements_a > num_elements_b
+        isosurfaces.append(
+            Isosurface(body_a, body_b, l, meshes[body_b].is_soft, max_geom_pairs[i], query_mesh_a, device)
+        )
         geom_pairs_count += len(l)
         print(
             f"{isosurfaces[-1].label} -> list of geom pairs N: {len(l)}. num_elements_a: {num_elements_a}, num_elements_b: {num_elements_b}"
