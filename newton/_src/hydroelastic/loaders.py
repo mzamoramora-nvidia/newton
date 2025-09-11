@@ -367,27 +367,28 @@ def generate_hard_mesh(V, F, params, compute_device=None):
             inputs=[points, params["Tf"]],
             outputs=[points],
         )
+    elements_count = F.shape[0]
     hydroelastic.surface_mesh = wp.Mesh(points=points, indices=flat_indices_wp)
+    hydroelastic.surface_mesh.elements_count = elements_count
     # Compute face normals.
-    faces_count = F.shape[0]
-    hydroelastic.surface_mesh.normals = wp.zeros(faces_count, dtype=wp.vec3f, device=compute_device)
+
+    hydroelastic.surface_mesh.normals = wp.zeros(elements_count, dtype=wp.vec3f, device=compute_device)
     wp.launch(
         compute_face_normals,
-        dim=faces_count,
+        dim=elements_count,
         inputs=[points, flat_indices_wp],
         outputs=[hydroelastic.surface_mesh.normals],
     )
     # TODO: Print warning if mesh is not watertight.
 
     # Compute AABB.
-    num_tris = F.shape[0]
-    hydroelastic.aabb_low = wp.zeros(num_tris, dtype=wp.vec3f, device=compute_device)
-    hydroelastic.aabb_high = wp.zeros(num_tris, dtype=wp.vec3f, device=compute_device)
+    hydroelastic.aabb_low = wp.zeros(elements_count, dtype=wp.vec3f, device=compute_device)
+    hydroelastic.aabb_high = wp.zeros(elements_count, dtype=wp.vec3f, device=compute_device)
     temp_body_q = wp.array(wp.transform_identity(), dtype=wp.transform, device=compute_device)
     body_idx = wp.int32(0)
     wp.launch(
         compute_aabb_tris,
-        dim=num_tris,
+        dim=elements_count,
         inputs=[
             temp_body_q,
             body_idx,
