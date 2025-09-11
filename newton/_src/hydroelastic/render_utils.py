@@ -9,14 +9,15 @@ from newton._src.hydroelastic.types import mat43h
 def compute_tet_mesh_edges(
     body_q: wp.array(dtype=wp.transform),
     body_id: wp.int32,
-    indices: wp.array(dtype=wp.vec4i),
+    indices: wp.array(dtype=wp.int32),
     default_points: wp.array(dtype=wp.vec3),
     # Outputs.
     line_starts: wp.array(dtype=wp.vec3),
     line_ends: wp.array(dtype=wp.vec3),
 ):
     tid = wp.tid()
-    element = indices[tid]
+    idx = 4 * tid
+    element = wp.vec4i(indices[idx], indices[idx + 1], indices[idx + 2], indices[idx + 3])
 
     v = mat43h()
     for i in range(len(element)):
@@ -301,7 +302,7 @@ def draw_tet_mesh_edges(viewer, state_0, hydro_mesh, mesh_id, color, render_tet_
     if not edges_exists and not render_tet_mesh_edges:
         return
 
-    num_tets = hydro_mesh.volume_mesh.indices.shape[0]
+    num_tets = hydro_mesh.volume_mesh.elements_count
     line_starts = wp.zeros(num_tets * 6, dtype=wp.vec3)
     line_ends = wp.zeros(num_tets * 6, dtype=wp.vec3)
 

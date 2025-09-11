@@ -655,8 +655,8 @@ def find_geom_pairs_bvh_soft_vs_soft(
     body_b: wp.int32,
     points_a: wp.array(dtype=wp.vec3f),
     points_b: wp.array(dtype=wp.vec3f),
-    tet_elements_a: wp.array(dtype=wp.vec4i),
-    tet_elements_b: wp.array(dtype=wp.vec4i),
+    tet_elements_a: wp.array(dtype=wp.int32),
+    tet_elements_b: wp.array(dtype=wp.int32),
     bvh_id: wp.uint64,
     query_with_mesh_a: bool,
     # outputs
@@ -665,25 +665,25 @@ def find_geom_pairs_bvh_soft_vs_soft(
     tid = wp.tid()  # Each thread should process one mini-geom (tet or triangle) of the querying mesh.
 
     tet_vpos_query_W = mat43h(0.0)  # tet vertex positions in world frame
-    tet_vidx_query = tet_elements_a[tid]
     body_id_query = body_a
     body_id_bvh = body_b
-    block = wp.int32(tet_pairs_found.shape[0] / tet_elements_a.shape[0])
+    block = wp.int32(tet_pairs_found.shape[0] / (tet_elements_a.shape[0] / 4))
 
     if not query_with_mesh_a:
-        tet_vidx_query = tet_elements_b[tid]
         body_id_query = body_b
         body_id_bvh = body_a
-        block = wp.int32(tet_pairs_found.shape[0] / tet_elements_b.shape[0])
+        block = wp.int32(tet_pairs_found.shape[0] / (tet_elements_b.shape[0] / 4))
 
     # q_inv = wp.transform_inverse(body_q[body_id_bvh])
     # xform_aabb_to_bvh = wp.transform_multiply(q_inv, body_q[body_id_query])
 
     for i in range(4):
         if query_with_mesh_a:
-            p_query_W = wp.transform_point(body_q[body_id_query], points_a[tet_vidx_query[i]])
+            vidx_query = tet_elements_a[4 * tid + i]
+            p_query_W = wp.transform_point(body_q[body_id_query], points_a[vidx_query])
         else:
-            p_query_W = wp.transform_point(body_q[body_id_query], points_b[tet_vidx_query[i]])
+            vidx_query = tet_elements_b[4 * tid + i]
+            p_query_W = wp.transform_point(body_q[body_id_query], points_b[vidx_query])
 
         p_query_rel = p_query_W - wp.transform_get_translation(body_q[body_id_bvh])
         tet_vpos_query_W[i] = wp.quat_rotate_inv(wp.transform_get_rotation(body_q[body_id_bvh]), p_query_rel)
@@ -705,15 +705,14 @@ def find_geom_pairs_bvh_soft_vs_soft(
             tet_idx_a = bvh_element
             tet_idx_b = tid
 
-        tet_vidx_a = tet_elements_a[tet_idx_a]  # tet vertex indices
-        tet_vidx_b = tet_elements_b[tet_idx_b]
-
         tet_vpos_a_W = mat43h(0.0)  # tet vertex positions in world frame
         tet_vpos_b_W = mat43h(0.0)
 
         for i in range(4):
-            tet_vpos_a_W[i] = wp.transform_point(body_q[body_a], points_a[tet_vidx_a[i]])
-            tet_vpos_b_W[i] = wp.transform_point(body_q[body_b], points_b[tet_vidx_b[i]])
+            vidx_a = tet_elements_a[4 * tet_idx_a + i]
+            vidx_b = tet_elements_b[4 * tet_idx_b + i]
+            tet_vpos_a_W[i] = wp.transform_point(body_q[body_a], points_a[vidx_a])
+            tet_vpos_b_W[i] = wp.transform_point(body_q[body_b], points_b[vidx_b])
 
         # Early exit: Check bounding box overlap
         min_bounds_a, max_bounds_a = get_tet_bounding_box(tet_vpos_a_W)
@@ -751,7 +750,7 @@ def find_geom_pairs_bvh_soft_vs_hard(
     body_a: wp.int32,
     body_b: wp.int32,
     points_a: wp.array(dtype=wp.vec3f),
-    tet_elements_a: wp.array(dtype=wp.vec4i),
+    tet_elements_a: wp.array(dtype=wp.int32),
     points_b: wp.array(dtype=wp.vec3f),
     tri_elements_b: wp.array(dtype=wp.int32),
     bvh_id: wp.uint64,
@@ -769,7 +768,7 @@ def find_geom_pairs_bvh_soft_vs_hard(
     # tet vertex indices
     body_id_query = body_a
     body_id_bvh = body_b
-    block = wp.int32(geom_pairs_found.shape[0] / tet_elements_a.shape[0])
+    block = wp.int32(geom_pairs_found.shape[0] / (tet_elements_a.shape[0] / element_a_stride))
     element_stride = element_a_stride
 
     if not query_with_mesh_a:
@@ -783,11 +782,11 @@ def find_geom_pairs_bvh_soft_vs_hard(
 
     for i in range(element_stride):
         if query_with_mesh_a:
-            tet_vidx_query = tet_elements_a[tid][i]
-            p_query_W = wp.transform_point(body_q[body_id_query], points_a[tet_vidx_query])
+            vidx_query = tet_elements_a[element_stride * tid + i]
+            p_query_W = wp.transform_point(body_q[body_id_query], points_a[vidx_query])
         else:
-            tet_vidx_query = tri_elements_b[element_stride * tid + i]
-            p_query_W = wp.transform_point(body_q[body_id_query], points_b[tet_vidx_query])
+            vidx_query = tri_elements_b[element_stride * tid + i]
+            p_query_W = wp.transform_point(body_q[body_id_query], points_b[vidx_query])
 
         p_query_rel = p_query_W - wp.transform_get_translation(body_q[body_id_bvh])
         tet_vpos_query_W[i] = wp.quat_rotate_inv(wp.transform_get_rotation(body_q[body_id_bvh]), p_query_rel)
@@ -813,12 +812,12 @@ def find_geom_pairs_bvh_soft_vs_hard(
         tet_vpos_b_W = mat43h(0.0)
 
         for i in range(element_a_stride):
-            tet_vidx_a = tet_elements_a[tet_idx_a][i]
-            tet_vpos_a_W[i] = wp.transform_point(body_q[body_a], points_a[tet_vidx_a])
+            vidx_a = tet_elements_a[element_a_stride * tet_idx_a + i]
+            tet_vpos_a_W[i] = wp.transform_point(body_q[body_a], points_a[vidx_a])
 
         for i in range(element_b_stride):
-            tet_vidx_b = tri_elements_b[element_b_stride * tet_idx_b + i]
-            tet_vpos_b_W[i] = wp.transform_point(body_q[body_b], points_b[tet_vidx_b])
+            vidx_b = tri_elements_b[element_b_stride * tet_idx_b + i]
+            tet_vpos_b_W[i] = wp.transform_point(body_q[body_b], points_b[vidx_b])
 
         # Early exit: Check bounding box overlap
         min_bounds_a, max_bounds_a = get_element_bounding_box(tet_vpos_a_W, element_a_stride)
@@ -932,8 +931,8 @@ def compute_soft_soft_contact_surface_elements(
     points_b: wp.array(dtype=wp.vec3f),
     default_tet_transform_inv_a: wp.array(dtype=wp.mat44),
     default_tet_transform_inv_b: wp.array(dtype=wp.mat44),
-    tet_elements_a: wp.array(dtype=wp.vec4i),  # tet vertex indices
-    tet_elements_b: wp.array(dtype=wp.vec4i),
+    tet_elements_a: wp.array(dtype=wp.int32),  # tet vertex indices
+    tet_elements_b: wp.array(dtype=wp.int32),
     p_a: wp.array(dtype=wp.float32),  # pressure field values
     p_b: wp.array(dtype=wp.float32),
     grad_p_a: wp.array(dtype=wp.vec3f),
@@ -967,9 +966,14 @@ def compute_soft_soft_contact_surface_elements(
     tet_idx_b = tet_pairs_found[tid][1]
 
     # wp.printf("tet_idx_a: %d, tet_idx_b: %d\n", tet_idx_a, tet_idx_b)
-
-    tet_vidx_a = tet_elements_a[tet_idx_a]  # tet vertex indices
-    tet_vidx_b = tet_elements_b[tet_idx_b]
+    i_a = 4 * tet_idx_a
+    i_b = 4 * tet_idx_b
+    tet_vidx_a = wp.vec4i(
+        tet_elements_a[i_a], tet_elements_a[i_a + 1], tet_elements_a[i_a + 2], tet_elements_a[i_a + 3]
+    )  # tet vertex indices
+    tet_vidx_b = wp.vec4i(
+        tet_elements_b[i_b], tet_elements_b[i_b + 1], tet_elements_b[i_b + 2], tet_elements_b[i_b + 3]
+    )
 
     tet_vpos_a_W = mat43h(0.0)  # tet vertex positions in world frame
     tet_vpos_b_W = mat43h(0.0)
@@ -1240,7 +1244,7 @@ def compute_soft_hard_contact_surface_elements(
     # Soft body (tetrahedra) data
     points_a: wp.array(dtype=wp.vec3f),
     default_tet_transform_inv_a: wp.array(dtype=wp.mat44),
-    tet_elements_a: wp.array(dtype=wp.vec4i),  # tet vertex indices
+    tet_elements_a: wp.array(dtype=wp.int32),  # tet vertex indices
     p_a: wp.array(dtype=wp.float32),  # pressure field values
     grad_p_a: wp.array(dtype=wp.vec3f),
     h_a: wp.float32,
@@ -1280,7 +1284,12 @@ def compute_soft_hard_contact_surface_elements(
     tri_id = tet_triangle_pairs[tid][1]
 
     # Get tetrahedron and triangle elements
-    tet_vidx_a = tet_elements_a[tet_id]  # tet vertex indices
+    tet_vidx_a = wp.vec4i(
+        tet_elements_a[4 * tet_id],
+        tet_elements_a[4 * tet_id + 1],
+        tet_elements_a[4 * tet_id + 2],
+        tet_elements_a[4 * tet_id + 3],
+    )  # tet vertex indices
     tri_vidx_b = wp.vec3i(
         tri_elements_b[3 * tri_id], tri_elements_b[3 * tri_id + 1], tri_elements_b[3 * tri_id + 2]
     )  # triangle vertex indices
@@ -1505,7 +1514,7 @@ def find_geom_pairs_soft_vs_soft(body_q, isosurface, mesh_a, mesh_b, update_cont
             # print("querying mesh a", isosurface.body_a, isosurface.body_b)
             wp.launch(
                 find_geom_pairs_bvh_soft_vs_soft,
-                dim=mesh_a.volume_mesh.indices.shape[0],
+                dim=mesh_a.volume_mesh.elements_count,
                 inputs=[
                     body_q,
                     isosurface.body_a_wp,
@@ -1524,7 +1533,7 @@ def find_geom_pairs_soft_vs_soft(body_q, isosurface, mesh_a, mesh_b, update_cont
         else:
             wp.launch(
                 find_geom_pairs_bvh_soft_vs_soft,
-                dim=mesh_b.volume_mesh.indices.shape[0],
+                dim=mesh_b.volume_mesh.elements_count,
                 inputs=[
                     body_q,
                     isosurface.body_a_wp,
@@ -1550,7 +1559,7 @@ def find_geom_pairs_soft_vs_hard(body_q, isosurface, mesh_a, mesh_b, update_cont
             # print("querying mesh a", isosurface.body_a, isosurface.body_b)
             wp.launch(
                 find_geom_pairs_bvh_soft_vs_hard,
-                dim=mesh_a.volume_mesh.indices.shape[0],
+                dim=mesh_a.volume_mesh.elements_count,
                 inputs=[
                     body_q,
                     isosurface.body_a_wp,

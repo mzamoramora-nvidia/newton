@@ -97,12 +97,14 @@ def compute_default_homogeneous_tet_transform(points: wp.array(dtype=wp.vec3), e
 @wp.kernel
 def compute_default_tet_transform_inv(
     default_points: wp.array(dtype=wp.vec3f),
-    indices: wp.array(dtype=wp.vec4i),
+    indices: wp.array(dtype=wp.int32),
     default_tet_transform_inv: wp.array(dtype=wp.mat44),
 ):
     tid = wp.tid()
     # Compute the homogeneous transformation matrix for the tetrahedron.
-    tet_transform = compute_default_homogeneous_tet_transform(default_points, indices[tid])
+    idx = 4 * tid
+    tet_element = wp.vec4i(indices[idx], indices[idx + 1], indices[idx + 2], indices[idx + 3])
+    tet_transform = compute_default_homogeneous_tet_transform(default_points, tet_element)
 
     # Compute the inverse of the homogeneous transformation matrix.
     default_tet_transform_inv[tid] = wp.inverse(tet_transform)
@@ -161,6 +163,31 @@ def compute_face_normals(
     v2 = vertices[flat_indices[wid + 2]]
 
     face_normals[tid] = compute_triangle_normal(v0, v1, v2, tid)
+
+
+@wp.kernel
+def compute_aabb_elements(
+    points: wp.array(dtype=wp.vec3),
+    indices: wp.array(dtype=wp.int32),  # shape [num_elements * stride]
+    stride: wp.int32,
+    lowers: wp.array(dtype=wp.vec3),
+    uppers: wp.array(dtype=wp.vec3),
+):
+    tid = wp.tid()
+
+    idx = indices[stride * tid]
+    min_bounds = points[idx]
+    max_bounds = points[idx]
+
+    for i in range(1, stride):
+        idx = indices[stride * tid + i]
+        min_bounds = wp.min(min_bounds, points[idx])
+        max_bounds = wp.max(max_bounds, points[idx])
+
+    # tiny inflation to catch "touching" pairs
+    eps = 0.0  # 1.0e-6
+    lowers[tid] = min_bounds - wp.vec3(eps, eps, eps)
+    uppers[tid] = max_bounds + wp.vec3(eps, eps, eps)
 
 
 # TODO: Simplify or remove this function. It is very similar to compute_tet_bounding_box in isosurface.py.

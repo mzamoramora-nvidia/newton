@@ -80,7 +80,7 @@ def init_convex_field(
 def compute_field_gradient(
     vertices: wp.array(dtype=wp.vec3f),
     field: wp.array(dtype=wp.float32),
-    tetrahedra: wp.array(dtype=wp.vec4i),
+    elements: wp.array(dtype=wp.int32),
     # outputs
     gradient: wp.array(dtype=wp.vec3f),
 ):
@@ -89,7 +89,8 @@ def compute_field_gradient(
     # It has been tested against the one in Drake.
 
     # Get the tetrahedron vertices
-    tet = tetrahedra[tid]
+    idx = 4 * tid
+    tet = wp.vec4i(elements[idx], elements[idx + 1], elements[idx + 2], elements[idx + 3])
     v0 = vertices[tet[0]]
     v1 = vertices[tet[1]]
     v2 = vertices[tet[2]]
