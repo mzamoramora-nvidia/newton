@@ -302,7 +302,7 @@ def draw_tet_mesh_edges(viewer, state_0, hydro_mesh, mesh_id, color, render_tet_
     if not edges_exists and not render_tet_mesh_edges:
         return
 
-    num_tets = hydro_mesh.volume_mesh.elements_count
+    num_tets = hydro_mesh.mesh.elements_count
     line_starts = wp.zeros(num_tets * 6, dtype=wp.vec3)
     line_ends = wp.zeros(num_tets * 6, dtype=wp.vec3)
 
@@ -313,8 +313,8 @@ def draw_tet_mesh_edges(viewer, state_0, hydro_mesh, mesh_id, color, render_tet_
             inputs=[
                 state_0.body_q,
                 hydro_mesh.body_id,
-                hydro_mesh.volume_mesh.indices,
-                hydro_mesh.volume_mesh.default_points,
+                hydro_mesh.mesh.indices,
+                hydro_mesh.mesh.default_points,
             ],
             outputs=[
                 line_starts,

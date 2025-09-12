@@ -151,25 +151,25 @@ def load_drake_mesh(path: str, Tf, params, compute_device=None):
     hydroelastic.is_visible = params["is_visible"]
     hydroelastic.hydroelastic_modulus = wp.float32(params["hydroelastic_modulus"])
     # Initialize volume mesh.
-    hydroelastic.volume_mesh.default_points = points_transformed
-    hydroelastic.volume_mesh.indices = wp.array(elements.flatten(), dtype=wp.int32, device=compute_device)
-    hydroelastic.volume_mesh.elements_stride = 4
-    hydroelastic.volume_mesh.elements_count = int(hydroelastic.volume_mesh.indices.shape[0] / 4)
+    hydroelastic.mesh.default_points = points_transformed
+    hydroelastic.mesh.indices = wp.array(elements.flatten(), dtype=wp.int32, device=compute_device)
+    hydroelastic.mesh.elements_stride = 4
+    hydroelastic.mesh.elements_count = int(hydroelastic.mesh.indices.shape[0] / 4)
 
-    initialize_default_tet_transform_inv(hydroelastic.volume_mesh, compute_device)
-    hydroelastic.volume_mesh.edges = wp.array(edges, dtype=wp.vec2i, device=compute_device)
+    initialize_default_tet_transform_inv(hydroelastic.mesh, compute_device)
+    hydroelastic.mesh.edges = wp.array(edges, dtype=wp.vec2i, device=compute_device)
 
     # Compute AABB.
-    num_tets = hydroelastic.volume_mesh.elements_count
+    num_tets = hydroelastic.mesh.elements_count
     hydroelastic.aabb_low = wp.zeros(num_tets, dtype=wp.vec3f, device=compute_device)
     hydroelastic.aabb_high = wp.zeros(num_tets, dtype=wp.vec3f, device=compute_device)
     wp.launch(
         compute_aabb_elements,
         dim=num_tets,
         inputs=[
-            hydroelastic.volume_mesh.default_points,
-            hydroelastic.volume_mesh.indices,
-            hydroelastic.volume_mesh.elements_stride,
+            hydroelastic.mesh.default_points,
+            hydroelastic.mesh.indices,
+            hydroelastic.mesh.elements_stride,
         ],
         outputs=[
             hydroelastic.aabb_low,
@@ -184,7 +184,7 @@ def load_drake_mesh(path: str, Tf, params, compute_device=None):
     # This might generate small field values for the vertices on the surface.
     # TODO: Consider using the distances to the surface together with a margin to evaluate
     # if a vertex is on the surface.
-    hydroelastic.volume_mesh.is_on_surface = wp.zeros(V.shape[0], dtype=wp.bool, device=compute_device)
+    hydroelastic.mesh.is_on_surface = wp.zeros(V.shape[0], dtype=wp.bool, device=compute_device)
 
     # Initialize surface mesh.
     surface_faces = extract_surface_mesh(points_transformed.numpy(), elements)
@@ -250,27 +250,27 @@ def generate_mesh(V, F, params, compute_device=None):
     # TODO check that tetrahedralize is working correctly with meshes that are not centered at the origin.
     # Initialize volume mesh.
     (
-        hydroelastic.volume_mesh.default_points,
-        hydroelastic.volume_mesh.indices,
-        hydroelastic.volume_mesh.edges,
+        hydroelastic.mesh.default_points,
+        hydroelastic.mesh.indices,
+        hydroelastic.mesh.edges,
     ) = tetrahedralize(points, indices, compute_device)
 
-    hydroelastic.volume_mesh.elements_stride = 4
-    hydroelastic.volume_mesh.elements_count = int(hydroelastic.volume_mesh.indices.shape[0] / 4)
+    hydroelastic.mesh.elements_stride = 4
+    hydroelastic.mesh.elements_count = int(hydroelastic.mesh.indices.shape[0] / 4)
 
-    initialize_default_tet_transform_inv(hydroelastic.volume_mesh, compute_device)
+    initialize_default_tet_transform_inv(hydroelastic.mesh, compute_device)
 
     # Compute AABB.
-    num_tets = hydroelastic.volume_mesh.elements_count
+    num_tets = hydroelastic.mesh.elements_count
     hydroelastic.aabb_low = wp.zeros(num_tets, dtype=wp.vec3f, device=compute_device)
     hydroelastic.aabb_high = wp.zeros(num_tets, dtype=wp.vec3f, device=compute_device)
     wp.launch(
         compute_aabb_elements,
         dim=num_tets,
         inputs=[
-            hydroelastic.volume_mesh.default_points,
-            hydroelastic.volume_mesh.indices,
-            hydroelastic.volume_mesh.elements_stride,
+            hydroelastic.mesh.default_points,
+            hydroelastic.mesh.indices,
+            hydroelastic.mesh.elements_stride,
         ],
         outputs=[
             hydroelastic.aabb_low,
@@ -282,17 +282,17 @@ def generate_mesh(V, F, params, compute_device=None):
 
     # Check that the tetrahedron orientation is correct.
     # For now, we only print warnings.
-    points_np = hydroelastic.volume_mesh.default_points.numpy()
-    indices_np = hydroelastic.volume_mesh.indices.numpy()
+    points_np = hydroelastic.mesh.default_points.numpy()
+    indices_np = hydroelastic.mesh.indices.numpy()
     check_tetrahedron_orientation(indices_np, points_np)
 
-    num_vertices = hydroelastic.volume_mesh.default_points.shape[0]
-    hydroelastic.volume_mesh.is_on_surface = initialize_is_on_surface(num_vertices, compute_device)
+    num_vertices = hydroelastic.mesh.default_points.shape[0]
+    hydroelastic.mesh.is_on_surface = initialize_is_on_surface(num_vertices, compute_device)
     hydroelastic.hydroelastic_modulus = wp.float32(params["hydroelastic_modulus"])
     # Initialize surface mesh.
     flat_indices_np = indices.numpy().flatten()
     flat_indices_wp = wp.array(flat_indices_np, dtype=wp.int32, device=compute_device)
-    hydroelastic.surface_mesh = wp.Mesh(points=hydroelastic.volume_mesh.default_points, indices=flat_indices_wp)
+    hydroelastic.surface_mesh = wp.Mesh(points=hydroelastic.mesh.default_points, indices=flat_indices_wp)
     # Initialize field values.
     init_field_by_distance_to_surface(hydroelastic, compute_device)
     return hydroelastic
@@ -366,39 +366,39 @@ def compute_field_gradient_after_init(hydroelastic: HydroelasticObject, compute_
     """
     Compute the pressure field gradient after field initialization.
     """
-    num_tetrahedra = hydroelastic.volume_mesh.elements_count
+    num_tetrahedra = hydroelastic.mesh.elements_count
 
     # Initialize gradient array
-    hydroelastic.volume_mesh.field_gradient = wp.zeros(num_tetrahedra, dtype=wp.vec3f, device=compute_device)
+    hydroelastic.mesh.field_gradient = wp.zeros(num_tetrahedra, dtype=wp.vec3f, device=compute_device)
 
     # Compute gradients for each tetrahedron
     wp.launch(
         compute_field_gradient,
         dim=num_tetrahedra,
         inputs=[
-            hydroelastic.volume_mesh.default_points,
-            hydroelastic.volume_mesh.field,
-            hydroelastic.volume_mesh.indices,
+            hydroelastic.mesh.default_points,
+            hydroelastic.mesh.field,
+            hydroelastic.mesh.indices,
         ],
-        outputs=[hydroelastic.volume_mesh.field_gradient],
+        outputs=[hydroelastic.mesh.field_gradient],
     )
 
 
 def init_field_by_distance_to_surface(hydroelastic: HydroelasticObject, compute_device):
     # Compute centroid and overestimate the max distance to the surface.
-    V_np = hydroelastic.volume_mesh.default_points.numpy()
+    V_np = hydroelastic.mesh.default_points.numpy()
     centroid_np = np.mean(V_np, axis=0)
     distances = np.linalg.norm(V_np - centroid_np, axis=1)
     estimated_max_distance = wp.float32(np.max(distances))
     # print("estimated_max_distance", estimated_max_distance)
 
     # Compute distance to surface for each vertex.
-    num_vertices = hydroelastic.volume_mesh.default_points.shape[0]
+    num_vertices = hydroelastic.mesh.default_points.shape[0]
     distance_to_surface = wp.zeros(num_vertices, dtype=wp.float32, device=compute_device)
     wp.launch(
         compute_distance_to_surface,
         dim=num_vertices,
-        inputs=[hydroelastic.volume_mesh.default_points, hydroelastic.surface_mesh.id, estimated_max_distance],
+        inputs=[hydroelastic.mesh.default_points, hydroelastic.surface_mesh.id, estimated_max_distance],
         outputs=[distance_to_surface],
     )
 
@@ -414,19 +414,19 @@ def init_field_by_distance_to_surface(hydroelastic: HydroelasticObject, compute_
 
     # Initialize field values.
     # This would need to be recomputed if the hydroelastic modulues changes on the fly.
-    hydroelastic.volume_mesh.field = wp.zeros(num_vertices, dtype=wp.float32, device=compute_device)
+    hydroelastic.mesh.field = wp.zeros(num_vertices, dtype=wp.float32, device=compute_device)
     wp.launch(
         init_convex_field,
         dim=num_vertices,
         inputs=[
-            hydroelastic.volume_mesh.default_points,
+            hydroelastic.mesh.default_points,
             distance_to_surface,
-            hydroelastic.volume_mesh.is_on_surface,
+            hydroelastic.mesh.is_on_surface,
             max_distance,
             hydroelastic.hydroelastic_modulus,
             hydroelastic.margin,
         ],
-        outputs=[hydroelastic.volume_mesh.field],
+        outputs=[hydroelastic.mesh.field],
     )
 
     # Compute field gradient after field initialization
@@ -506,10 +506,10 @@ def init_isosurfaces(collision_pairs, isosurfaces, meshes, max_geom_pairs=-1, de
     for i, c in enumerate(collision_pairs):
         body_a = c[0]
         body_b = c[1]
-        num_elements_a = meshes[body_a].volume_mesh.elements_count
+        num_elements_a = meshes[body_a].mesh.elements_count
         num_elements_b = 0
         if meshes[body_b].is_soft:
-            num_elements_b = meshes[body_b].volume_mesh.elements_count
+            num_elements_b = meshes[body_b].mesh.elements_count
         else:
             # Surface mesh is a wp.Mesh, where the indices are a flat array of integers.
             num_elements_b = meshes[body_b].surface_mesh.elements_count

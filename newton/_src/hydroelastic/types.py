@@ -43,7 +43,7 @@ class LumpedProperties:
 
 class HydroelasticObject:
     def __init__(self):
-        self.volume_mesh = HydroelasticMesh()
+        self.mesh = HydroelasticMesh()
         self.aabb_low = None
         self.aabb_high = None
         self.bvh = None
