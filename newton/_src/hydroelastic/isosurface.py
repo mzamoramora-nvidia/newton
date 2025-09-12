@@ -1333,7 +1333,6 @@ def compute_soft_hard_contact_surface_elements(
 def launch_compute_soft_vs_soft_contact_surface(
     body_q, body_q_inv_mat, mesh_a, mesh_b, isosurface, update_contact_pairs=True
 ):
-
     find_geom_pairs_soft_vs_soft(body_q, isosurface, mesh_a, mesh_b, update_contact_pairs)
 
     wp.launch(
@@ -1370,7 +1369,6 @@ def launch_compute_soft_vs_soft_contact_surface(
             isosurface.intermediate_contact_polygon.centroids,
         ],
     )
-
 
 
 def find_geom_pairs_soft_vs_soft(body_q, isosurface, mesh_a, mesh_b, update_contact_pairs):
