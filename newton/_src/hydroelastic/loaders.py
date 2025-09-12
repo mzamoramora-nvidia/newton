@@ -9,7 +9,7 @@ from newton._src.hydroelastic.make_fields import (
     max_of_array,
 )
 from newton._src.hydroelastic.tetrahedralizer import tetrahedralize
-from newton._src.hydroelastic.types import HydroelasticMesh, Isosurface
+from newton._src.hydroelastic.types import HydroelasticObject, Isosurface
 from newton._src.hydroelastic.utils import (
     compute_aabb_elements,
     compute_default_tet_transform_inv,
@@ -147,7 +147,7 @@ def load_drake_mesh(path: str, Tf, params, compute_device=None):
         outputs=[points_transformed],
     )
 
-    hydroelastic = HydroelasticMesh()
+    hydroelastic = HydroelasticObject()
     hydroelastic.is_visible = params["is_visible"]
     hydroelastic.hydroelastic_modulus = wp.float32(params["hydroelastic_modulus"])
     # Initialize volume mesh.
@@ -246,7 +246,7 @@ def generate_mesh(V, F, params, compute_device=None):
             outputs=[points],
         )
 
-    hydroelastic = HydroelasticMesh()
+    hydroelastic = HydroelasticObject()
     # TODO check that tetrahedralize is working correctly with meshes that are not centered at the origin.
     # Initialize volume mesh.
     (
@@ -302,7 +302,7 @@ def generate_hard_mesh(V, F, params, compute_device=None):
     if compute_device is None:
         compute_device = wp.get_device()
 
-    hydroelastic = HydroelasticMesh()
+    hydroelastic = HydroelasticObject()
     hydroelastic.is_soft = False
     hydroelastic.hydroelastic_modulus = wp.float32(params["hydroelastic_modulus"])
     # Initialize surface mesh.
@@ -362,7 +362,7 @@ def generate_mesh_from_obj(mesh_path, params, compute_device):
     return generate_mesh(V, F, params, compute_device)
 
 
-def compute_field_gradient_after_init(hydroelastic: HydroelasticMesh, compute_device):
+def compute_field_gradient_after_init(hydroelastic: HydroelasticObject, compute_device):
     """
     Compute the pressure field gradient after field initialization.
     """
@@ -384,7 +384,7 @@ def compute_field_gradient_after_init(hydroelastic: HydroelasticMesh, compute_de
     )
 
 
-def init_field_by_distance_to_surface(hydroelastic: HydroelasticMesh, compute_device):
+def init_field_by_distance_to_surface(hydroelastic: HydroelasticObject, compute_device):
     # Compute centroid and overestimate the max distance to the surface.
     V_np = hydroelastic.volume_mesh.default_points.numpy()
     centroid_np = np.mean(V_np, axis=0)

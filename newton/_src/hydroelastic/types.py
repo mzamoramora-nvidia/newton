@@ -16,14 +16,20 @@ mat43h = wp.types.matrix(shape=(4, 3), dtype=hydroelastic_type)
 
 
 @wp.struct
-class VolumeMesh:
+class HydroelasticMesh:
     default_points: wp.array(dtype=wp.vec3f)
     indices: wp.array(dtype=wp.int32)
+    elements_count: wp.int32
+    elements_stride: wp.int32
+
+    # Only used for soft meshes (Tetrahedral meshes).
     field: wp.array(dtype=wp.float32)
     field_gradient: wp.array(dtype=wp.vec3f)
     default_tet_transform_inv: wp.array(dtype=wp.mat44)
-    elements_count: wp.int32
-    elements_stride: wp.int32
+
+    # Only used for rigid meshes (Triangular meshes).
+    normals: wp.array(dtype=wp.vec3f)
+
     # The folllowing fields are experimental or for debugging purposes.
     edges: wp.array(dtype=wp.vec2i)
     is_on_surface: wp.array(dtype=wp.bool)
@@ -35,9 +41,9 @@ class LumpedProperties:
     inertia: wp.mat33
 
 
-class HydroelasticMesh:
+class HydroelasticObject:
     def __init__(self):
-        self.volume_mesh = VolumeMesh()
+        self.volume_mesh = HydroelasticMesh()
         self.aabb_low = None
         self.aabb_high = None
         self.bvh = None
