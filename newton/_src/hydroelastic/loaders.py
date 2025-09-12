@@ -316,17 +316,18 @@ def generate_hard_mesh(V, F, params, compute_device=None):
             outputs=[points],
         )
     elements_count = F.shape[0]
-    hydroelastic.surface_mesh = wp.Mesh(points=points, indices=flat_indices_wp)
-    hydroelastic.surface_mesh.elements_count = elements_count
-    hydroelastic.surface_mesh.elements_stride = 3
-    # Compute face normals.
+    hydroelastic.mesh.default_points = points
+    hydroelastic.mesh.indices = flat_indices_wp
+    hydroelastic.mesh.elements_count = elements_count
+    hydroelastic.mesh.elements_stride = 3
 
-    hydroelastic.surface_mesh.normals = wp.zeros(elements_count, dtype=wp.vec3f, device=compute_device)
+    # Compute face normals.
+    hydroelastic.mesh.normals = wp.zeros(elements_count, dtype=wp.vec3f, device=compute_device)
     wp.launch(
         compute_face_normals,
         dim=elements_count,
         inputs=[points, flat_indices_wp],
-        outputs=[hydroelastic.surface_mesh.normals],
+        outputs=[hydroelastic.mesh.normals],
     )
     # TODO: Print warning if mesh is not watertight.
 
@@ -337,9 +338,9 @@ def generate_hard_mesh(V, F, params, compute_device=None):
         compute_aabb_elements,
         dim=elements_count,
         inputs=[
-            hydroelastic.surface_mesh.points,
-            hydroelastic.surface_mesh.indices,
-            hydroelastic.surface_mesh.elements_stride,
+            hydroelastic.mesh.default_points,
+            hydroelastic.mesh.indices,
+            hydroelastic.mesh.elements_stride,
         ],
         outputs=[
             hydroelastic.aabb_low,
@@ -348,6 +349,8 @@ def generate_hard_mesh(V, F, params, compute_device=None):
     )
     # Initialize BVH.
     hydroelastic.bvh = wp.Bvh(hydroelastic.aabb_low, hydroelastic.aabb_high)
+
+    hydroelastic.surface_mesh = wp.Mesh(points=points, indices=flat_indices_wp)
     return hydroelastic
 
 
@@ -507,12 +510,8 @@ def init_isosurfaces(collision_pairs, isosurfaces, meshes, max_geom_pairs=-1, de
         body_a = c[0]
         body_b = c[1]
         num_elements_a = meshes[body_a].mesh.elements_count
-        num_elements_b = 0
-        if meshes[body_b].is_soft:
-            num_elements_b = meshes[body_b].mesh.elements_count
-        else:
-            # Surface mesh is a wp.Mesh, where the indices are a flat array of integers.
-            num_elements_b = meshes[body_b].surface_mesh.elements_count
+        num_elements_b = meshes[body_b].mesh.elements_count
+
         l = [(x, y) for x in range(num_elements_a) for y in range(num_elements_b)]
         query_mesh_a = num_elements_a > num_elements_b
         isosurfaces.append(

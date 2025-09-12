@@ -1566,8 +1566,8 @@ def find_geom_pairs_soft_vs_hard(body_q, isosurface, mesh_a, mesh_b, update_cont
                     isosurface.body_b_wp,
                     mesh_a.mesh.default_points,
                     mesh_a.mesh.indices,
-                    mesh_b.surface_mesh.points,
-                    mesh_b.surface_mesh.indices,
+                    mesh_b.mesh.default_points,
+                    mesh_b.mesh.indices,
                     mesh_b.bvh.id,
                     isosurface.query_mesh_a,
                 ],
@@ -1578,15 +1578,15 @@ def find_geom_pairs_soft_vs_hard(body_q, isosurface, mesh_a, mesh_b, update_cont
         else:
             wp.launch(
                 find_geom_pairs_bvh_soft_vs_hard,
-                dim=mesh_b.surface_mesh.elements_count,
+                dim=mesh_b.mesh.elements_count,
                 inputs=[
                     body_q,
                     isosurface.body_a_wp,
                     isosurface.body_b_wp,
                     mesh_a.mesh.default_points,
                     mesh_a.mesh.indices,
-                    mesh_b.surface_mesh.points,
-                    mesh_b.surface_mesh.indices,
+                    mesh_b.mesh.default_points,
+                    mesh_b.mesh.indices,
                     mesh_a.bvh.id,
                     isosurface.query_mesh_a,
                 ],
@@ -1619,9 +1619,9 @@ def launch_compute_soft_vs_hard_contact_surface(
             mesh_a.mesh.field_gradient,
             mesh_a.hydroelastic_modulus,
             # Hard body data
-            mesh_b.surface_mesh.points,
-            mesh_b.surface_mesh.indices,
-            mesh_b.surface_mesh.normals,  # Pre-computed face normals
+            mesh_b.mesh.default_points,
+            mesh_b.mesh.indices,
+            mesh_b.mesh.normals,  # Pre-computed face normals
         ],
         outputs=[
             isosurface.contact_polygon.vertices,
