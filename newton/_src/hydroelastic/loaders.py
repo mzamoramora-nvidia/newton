@@ -161,8 +161,8 @@ def load_drake_mesh(path: str, Tf, params, compute_device=None):
 
     # Compute AABB.
     num_tets = hydroelastic.mesh.elements_count
-    hydroelastic.aabb_low = wp.zeros(num_tets, dtype=wp.vec3f, device=compute_device)
-    hydroelastic.aabb_high = wp.zeros(num_tets, dtype=wp.vec3f, device=compute_device)
+    aabb_low = wp.zeros(num_tets, dtype=wp.vec3f, device=compute_device)
+    aabb_high = wp.zeros(num_tets, dtype=wp.vec3f, device=compute_device)
     wp.launch(
         compute_aabb_elements,
         dim=num_tets,
@@ -172,12 +172,12 @@ def load_drake_mesh(path: str, Tf, params, compute_device=None):
             hydroelastic.mesh.elements_stride,
         ],
         outputs=[
-            hydroelastic.aabb_low,
-            hydroelastic.aabb_high,
+            aabb_low,
+            aabb_high,
         ],
     )
     # Initialize BVH.
-    hydroelastic.bvh = wp.Bvh(hydroelastic.aabb_low, hydroelastic.aabb_high)
+    hydroelastic.bvh = wp.Bvh(aabb_low, aabb_high)
 
     # Initialize is_on_surface array.
     # This initiaization ensures that the field value is computed for every vertex.
@@ -262,8 +262,8 @@ def generate_mesh(V, F, params, compute_device=None):
 
     # Compute AABB.
     num_tets = hydroelastic.mesh.elements_count
-    hydroelastic.aabb_low = wp.zeros(num_tets, dtype=wp.vec3f, device=compute_device)
-    hydroelastic.aabb_high = wp.zeros(num_tets, dtype=wp.vec3f, device=compute_device)
+    aabb_low = wp.zeros(num_tets, dtype=wp.vec3f, device=compute_device)
+    aabb_high = wp.zeros(num_tets, dtype=wp.vec3f, device=compute_device)
     wp.launch(
         compute_aabb_elements,
         dim=num_tets,
@@ -273,12 +273,12 @@ def generate_mesh(V, F, params, compute_device=None):
             hydroelastic.mesh.elements_stride,
         ],
         outputs=[
-            hydroelastic.aabb_low,
-            hydroelastic.aabb_high,
+            aabb_low,
+            aabb_high,
         ],
     )
     # Initialize BVH.
-    hydroelastic.bvh = wp.Bvh(hydroelastic.aabb_low, hydroelastic.aabb_high)
+    hydroelastic.bvh = wp.Bvh(aabb_low, aabb_high)
 
     # Check that the tetrahedron orientation is correct.
     # For now, we only print warnings.
@@ -332,8 +332,8 @@ def generate_hard_mesh(V, F, params, compute_device=None):
     # TODO: Print warning if mesh is not watertight.
 
     # Compute AABB.
-    hydroelastic.aabb_low = wp.zeros(elements_count, dtype=wp.vec3f, device=compute_device)
-    hydroelastic.aabb_high = wp.zeros(elements_count, dtype=wp.vec3f, device=compute_device)
+    aabb_low = wp.zeros(elements_count, dtype=wp.vec3f, device=compute_device)
+    aabb_high = wp.zeros(elements_count, dtype=wp.vec3f, device=compute_device)
     wp.launch(
         compute_aabb_elements,
         dim=elements_count,
@@ -343,12 +343,12 @@ def generate_hard_mesh(V, F, params, compute_device=None):
             hydroelastic.mesh.elements_stride,
         ],
         outputs=[
-            hydroelastic.aabb_low,
-            hydroelastic.aabb_high,
+            aabb_low,
+            aabb_high,
         ],
     )
     # Initialize BVH.
-    hydroelastic.bvh = wp.Bvh(hydroelastic.aabb_low, hydroelastic.aabb_high)
+    hydroelastic.bvh = wp.Bvh(aabb_low, aabb_high)
 
     hydroelastic.surface_mesh = wp.Mesh(points=points, indices=flat_indices_wp)
     return hydroelastic
@@ -520,9 +520,6 @@ def init_isosurfaces(collision_pairs, isosurfaces, meshes, max_geom_pairs=-1, de
         geom_pairs_count += len(l)
         print(
             f"{isosurfaces[-1].label} -> list of geom pairs N: {len(l)}. num_elements_a: {num_elements_a}, num_elements_b: {num_elements_b}"
-        )
-        print(
-            f"meshes[body_a].aabb_low.shape: {meshes[body_a].aabb_low.shape}, meshes[body_b].aabb_low.shape: {meshes[body_b].aabb_low.shape}"
         )
 
     return len(isosurfaces)

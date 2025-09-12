@@ -598,57 +598,6 @@ def warn_degenerate_plane(plane_normal: wp.vec3, tid: wp.int32):
 
 
 @wp.kernel
-def find_geom_pairs_bvh_basic(
-    body_q: wp.array(dtype=wp.transform),
-    body_id_bvh: wp.int32,
-    bvh_id: wp.uint64,
-    body_id_to_query: wp.int32,
-    lowers: wp.array(dtype=wp.vec3f),
-    uppers: wp.array(dtype=wp.vec3f),
-    query_with_mesh_a: bool,
-    # outputs
-    geom_pairs_found: wp.array(dtype=wp.vec2i),
-):
-    tid = wp.tid()  # Each thread should process one geom (tet or triangle) of the querying mesh.
-
-    block = wp.int32(geom_pairs_found.shape[0] / lowers.shape[0])
-
-    # Transform the query AABB to the BVH frame.
-    q_inv = wp.transform_inverse(body_q[body_id_bvh])
-    xform_aabb_to_bvh = wp.transform_multiply(q_inv, body_q[body_id_to_query])
-
-    lowers_body_frame = wp.transform_point(xform_aabb_to_bvh, lowers[tid])
-    uppers_body_frame = wp.transform_point(xform_aabb_to_bvh, uppers[tid])
-    query = wp.bvh_query_aabb(bvh_id, lowers_body_frame, uppers_body_frame)
-    query_idx = wp.int32(0)
-    counter = wp.int32(0)
-    while wp.bvh_query_next(query, query_idx):
-        if query_with_mesh_a:
-            geom_idx_a = tid
-            geom_idx_b = query_idx
-        else:
-            geom_idx_a = query_idx
-            geom_idx_b = tid
-
-        idx = tid * block + counter
-        if idx >= (tid + 1) * block:
-            wp.printf(
-                "Query is overflowing: tid, geom_idx_a, geom_idx_b, idx, block, counter: %d, %d, %d, %d, %d, %d\n",
-                tid,
-                geom_idx_a,
-                geom_idx_b,
-                idx,
-                block,
-                counter,
-            )
-            idx = (tid + 1) * block - 1
-
-        geom_pairs_found[idx] = wp.vec2i(geom_idx_a, geom_idx_b)
-        counter += 1
-    # wp.printf("tid, counter: %d, %d\n", tid, counter)
-
-
-@wp.kernel
 def find_geom_pairs_bvh_soft_vs_soft(
     body_q: wp.array(dtype=wp.transform),
     body_a: wp.int32,
@@ -1384,50 +1333,6 @@ def compute_soft_hard_contact_surface_elements(
 def launch_compute_soft_vs_soft_contact_surface(
     body_q, body_q_inv_mat, mesh_a, mesh_b, isosurface, update_contact_pairs=True
 ):
-    # if mesh_a.aabb_low.shape[0] > mesh_b.aabb_low.shape[0]:
-    #     wp.launch(
-    #         find_tet_pairs_bvh,
-    #         dim=mesh_a.mesh.indices.shape[0],
-    #         inputs=[
-    #             body_q,
-    #             isosurface.body_a_wp,
-    #             isosurface.body_b_wp,
-    #             mesh_a.mesh.default_points,
-    #             mesh_b.mesh.default_points,
-    #             mesh_a.mesh.indices,
-    #             mesh_b.mesh.indices,
-    #             mesh_b.bvh.id,
-    #             mesh_a.aabb_low,
-    #             mesh_a.aabb_high,
-    #             True,
-    #         ],
-    #         outputs=[
-    #             isosurface.geom_pairs_found,
-    #         ],
-    #     )
-    # else:
-    #     wp.launch(
-    #         find_tet_pairs_bvh,
-    #         dim=mesh_b.mesh.indices.shape[0],
-    #         inputs=[
-    #             body_q,
-    #             isosurface.body_a_wp,
-    #             isosurface.body_b_wp,
-    #             mesh_a.mesh.default_points,
-    #             mesh_b.mesh.default_points,
-    #             mesh_a.mesh.indices,
-    #             mesh_b.mesh.indices,
-    #             mesh_a.bvh.id,
-    #             mesh_b.aabb_low,
-    #             mesh_b.aabb_high,
-    #             False,
-    #         ],
-    #         outputs=[
-    #             isosurface.geom_pairs_found,
-    #         ],
-    #     )
-
-    # find_geom_pairs(body_q, isosurface, mesh_a, mesh_b, update_contact_pairs)
 
     find_geom_pairs_soft_vs_soft(body_q, isosurface, mesh_a, mesh_b, update_contact_pairs)
 
@@ -1466,44 +1371,6 @@ def launch_compute_soft_vs_soft_contact_surface(
         ],
     )
 
-
-def find_geom_pairs(body_q, isosurface, mesh_a, mesh_b, update_contact_pairs):
-    # In this context: geom pairs can be tet_vs_tet pairs or tet_vs_tri pairs.
-    if update_contact_pairs:
-        if mesh_a.aabb_low.shape[0] > mesh_b.aabb_low.shape[0]:
-            wp.launch(
-                find_geom_pairs_bvh_basic,
-                dim=mesh_a.aabb_low.shape[0],
-                inputs=[
-                    body_q,
-                    isosurface.body_b_wp,
-                    mesh_b.bvh.id,
-                    isosurface.body_a_wp,
-                    mesh_a.aabb_low,
-                    mesh_a.aabb_high,
-                    True,
-                ],
-                outputs=[
-                    isosurface.geom_pairs_found,
-                ],
-            )
-        else:
-            wp.launch(
-                find_geom_pairs_bvh_basic,
-                dim=mesh_b.aabb_low.shape[0],
-                inputs=[
-                    body_q,
-                    isosurface.body_a_wp,
-                    mesh_a.bvh.id,
-                    isosurface.body_b_wp,
-                    mesh_b.aabb_low,
-                    mesh_b.aabb_high,
-                    False,
-                ],
-                outputs=[
-                    isosurface.geom_pairs_found,
-                ],
-            )
 
 
 def find_geom_pairs_soft_vs_soft(body_q, isosurface, mesh_a, mesh_b, update_contact_pairs):
