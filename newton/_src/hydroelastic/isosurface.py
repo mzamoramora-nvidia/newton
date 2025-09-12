@@ -32,6 +32,7 @@ import warp as wp
 
 from newton._src.hydroelastic.types import mat43h, vec4i
 from newton._src.hydroelastic.utils import compute_body_q_inv_mat
+from newton._src.hydroelastic.wrenches import compute_wrench_fun, launch_add_wrench_to_body_f
 
 MAX_POLYGON_VERTICES = 8
 
@@ -688,6 +689,275 @@ def find_geom_pairs_bvh_soft_vs_soft(
         tet_pairs_found[idx] = wp.vec2i(tet_idx_a, tet_idx_b)
         counter += 1
 
+    # Can happend if box falls indefinitely.
+    # if counter_missed > 0:
+    #   wp.printf("tid, counter, counter_missed: %d, %d, %d\n", tid, counter, counter_missed)
+
+
+@wp.kernel
+def compute_soft_soft_contact_surface_bvh(
+    body_q: wp.array(dtype=wp.transform),
+    body_qd: wp.array(dtype=wp.spatial_vector),
+    body_a: wp.int32,
+    body_b: wp.int32,
+    points_a: wp.array(dtype=wp.vec3f),
+    points_b: wp.array(dtype=wp.vec3f),
+    tet_elements_a: wp.array(dtype=wp.int32),
+    tet_elements_b: wp.array(dtype=wp.int32),
+    bvh_id: wp.uint64,
+    query_with_mesh_a: bool,
+    default_tet_transform_inv_a: wp.array(dtype=wp.mat44),
+    default_tet_transform_inv_b: wp.array(dtype=wp.mat44),
+    p_a: wp.array(dtype=wp.float32),
+    p_b: wp.array(dtype=wp.float32),
+    grad_p_a: wp.array(dtype=wp.vec3f),
+    grad_p_b: wp.array(dtype=wp.vec3f),
+    h_a: wp.float32,  # hydroelastic modulus
+    h_b: wp.float32,
+    d_a: wp.float32,  # hunt_crossley_dissipation
+    d_b: wp.float32,  # hunt_crossley_dissipation
+    mu_static_a: wp.float32,
+    mu_static_b: wp.float32,
+    mu_dynamic_a: wp.float32,
+    mu_dynamic_b: wp.float32,
+    quadrature_weights: wp.array(dtype=wp.float32),
+    quadrature_coords: wp.array(dtype=wp.vec3f),
+    soft_vs_soft: wp.array(dtype=wp.int32),
+    twist_convention: int,
+    # outputs
+    tet_pairs_found: wp.array(dtype=wp.vec2i),
+    cp_vcounts: wp.array(dtype=wp.int32),
+    cp_vertices: wp.array(dtype=wp.vec3f),
+    cp_centroids: wp.array(dtype=wp.vec3f),
+    cp_normals: wp.array(dtype=wp.vec3f),
+    centroid_pressure: wp.array(dtype=wp.float32),
+    force: wp.array(dtype=wp.vec3f),
+    torque_a: wp.array(dtype=wp.vec3f),
+    torque_b: wp.array(dtype=wp.vec3f),
+    torque_a_body: wp.array(dtype=wp.vec3f),
+    torque_b_body: wp.array(dtype=wp.vec3f),
+    force_n: wp.array(dtype=wp.vec3f),
+    force_t: wp.array(dtype=wp.vec3f),
+):
+    tid = wp.tid()  # Each thread should process one mini-geom (tet or triangle) of the querying mesh.
+
+    tet_vpos_query_W = mat43h(0.0)  # tet vertex positions in world frame
+    body_id_query = body_a
+    body_id_bvh = body_b
+    block = wp.int32(tet_pairs_found.shape[0] / (tet_elements_a.shape[0] / 4))
+
+    if not query_with_mesh_a:
+        body_id_query = body_b
+        body_id_bvh = body_a
+        block = wp.int32(tet_pairs_found.shape[0] / (tet_elements_b.shape[0] / 4))
+
+    for i in range(4):
+        if query_with_mesh_a:
+            vidx_query = tet_elements_a[4 * tid + i]
+            p_query_W = wp.transform_point(body_q[body_id_query], points_a[vidx_query])
+        else:
+            vidx_query = tet_elements_b[4 * tid + i]
+            p_query_W = wp.transform_point(body_q[body_id_query], points_b[vidx_query])
+
+        p_query_rel = p_query_W - wp.transform_get_translation(body_q[body_id_bvh])
+        tet_vpos_query_W[i] = wp.quat_rotate_inv(wp.transform_get_rotation(body_q[body_id_bvh]), p_query_rel)
+
+    min_bounds_query, max_bounds_query = get_tet_bounding_box(tet_vpos_query_W)
+    lower = wp.vec3(min_bounds_query.x, min_bounds_query.y, min_bounds_query.z)
+    upper = wp.vec3(max_bounds_query.x, max_bounds_query.y, max_bounds_query.z)
+
+    # Initialize variables for the contact surface computation.
+    tet_vpos_a_W = mat43h(0.0)  # tet vertex positions in world frame
+    tet_vpos_b_W = mat43h(0.0)
+    vidx_a = wp.vec4i(0)
+    vidx_b = wp.vec4i(0)
+    body_q_inv_mat_a = wp.transform_to_matrix(wp.transform_inverse(body_q[body_a]))
+    body_q_inv_mat_b = wp.transform_to_matrix(wp.transform_inverse(body_q[body_b]))
+
+    # Initialize variables to accumulate the contact wrenches of multiple element pairs.
+    force_i = wp.vec3f(0.0, 0.0, 0.0)
+    torque_a_i = wp.vec3f(0.0, 0.0, 0.0)
+    torque_b_i = wp.vec3f(0.0, 0.0, 0.0)
+    torque_a_i_body = wp.vec3f(0.0, 0.0, 0.0)
+    torque_b_i_body = wp.vec3f(0.0, 0.0, 0.0)
+    force_n_i = wp.vec3f(0.0, 0.0, 0.0)
+    force_t_i = wp.vec3f(0.0, 0.0, 0.0)
+
+    # query Mesh-smaller BVH with larger mesh's AABB
+    query = wp.bvh_query_aabb(bvh_id, lower, upper)
+    bvh_element = wp.int32(0)
+    counter = wp.int32(0)
+    counter_missed = wp.int32(0)
+    while wp.bvh_query_next(query, bvh_element):
+        if query_with_mesh_a:
+            tet_idx_a = tid
+            tet_idx_b = bvh_element
+        else:
+            tet_idx_a = bvh_element
+            tet_idx_b = tid
+
+        # Compute tet vertex positions in world frame
+        i_a = 4 * tet_idx_a
+        i_b = 4 * tet_idx_b
+        for i in range(4):
+            vidx_a[i] = tet_elements_a[i_a + i]
+            vidx_b[i] = tet_elements_b[i_b + i]
+            tet_vpos_a_W[i] = wp.transform_point(body_q[body_a], points_a[vidx_a[i]])
+            tet_vpos_b_W[i] = wp.transform_point(body_q[body_b], points_b[vidx_b[i]])
+
+        # Early exit: Check bounding box overlap
+        min_bounds_a, max_bounds_a = get_tet_bounding_box(tet_vpos_a_W)
+        min_bounds_b, max_bounds_b = get_tet_bounding_box(tet_vpos_b_W)
+
+        if not check_bounding_boxes_overlap(min_bounds_a, max_bounds_a, min_bounds_b, max_bounds_b):
+            # wp.printf("missed: tid, tet_idx_a, tet_idx_b: %d, %d, %d\n", tid, tet_idx_a, tet_idx_b)
+            counter_missed += 1
+            continue
+
+        pair_idx = tid * block + counter
+        if pair_idx >= (tid + 1) * block:
+            wp.printf(
+                "compute_soft_soft_contact_surface_bvh: Query is overflowing: tid, tet_idx_a, tet_idx_b, idx, block, conter: %d, %d, %d, %d, %d, %d\n",
+                tid,
+                tet_idx_a,
+                tet_idx_b,
+                pair_idx,
+                block,
+                counter,
+            )
+            pair_idx = (tid + 1) * block - 1
+
+        tet_pairs_found[pair_idx] = wp.vec2i(tet_idx_a, tet_idx_b)
+        counter += 1
+
+        # ================================================================
+        # Compute contact surface
+
+        # Build pressure field vectors.
+        # TODO: Consider building the field vectors when loading the meshes.
+        p_a_vec = wp.vec4(p_a[vidx_a[0]], p_a[vidx_a[1]], p_a[vidx_a[2]], p_a[vidx_a[3]])
+        p_b_vec = wp.vec4(p_b[vidx_b[0]], p_b[vidx_b[1]], p_b[vidx_b[2]], p_b[vidx_b[3]])
+
+        inv_mat_a = default_tet_transform_inv_a[tet_idx_a] * body_q_inv_mat_a
+        inv_mat_b = default_tet_transform_inv_b[tet_idx_b] * body_q_inv_mat_b
+
+        # Combine field contributions weighted by material compliance
+        homogeneous_to_penetration_map_a = p_a_vec * inv_mat_a
+        homogeneous_to_penetration_map_b = p_b_vec * inv_mat_b
+
+        # Compute plane equation.
+        max_modulus = wp.max(h_a, h_b)
+        scale_factor_a = max_modulus / h_b
+        scale_factor_b = max_modulus / h_a
+        weighted_field_a = homogeneous_to_penetration_map_a * scale_factor_a
+        weighted_field_b = homogeneous_to_penetration_map_b * scale_factor_b
+
+        plane_equation = weighted_field_a - weighted_field_b
+        normal_magnitude = wp.length(wp.vec3(plane_equation.x, plane_equation.y, plane_equation.z))
+
+        # Normalizing plane equation.
+        plane_equation = (1.0 / normal_magnitude) * plane_equation
+        plane_normal = wp.vec3(plane_equation.x, plane_equation.y, plane_equation.z)
+        warn_degenerate_plane(plane_normal, pair_idx)
+
+        # Transform the pressure gradient to the world frame.
+        grad_p_a_W = wp.transform_vector(body_q[body_a], grad_p_a[tet_idx_a])
+        grad_p_b_W = -wp.transform_vector(body_q[body_b], grad_p_b[tet_idx_b])
+
+        # Check if the plane normal is aligned with the pressure gradient.
+        if not is_normal_along_pressure_gradient(grad_p_a_W, plane_normal, body_a, pair_idx):
+            continue
+
+        if not is_normal_along_pressure_gradient(grad_p_b_W, plane_normal, body_b, pair_idx):
+            continue
+
+        # Array pointing to block of memory for the vertices of the current contact polygon.
+        ptr = cp_vertices.ptr + wp.uint64(MAX_POLYGON_VERTICES * pair_idx * VEC3F_BYTE_SIZE_)
+        cp_v = wp.array(ptr=ptr, shape=(MAX_POLYGON_VERTICES,), dtype=wp.vec3f)
+
+        # Build initial polygon from plane-tetrahedron intersection
+        # Clip polygon with first tetrahedron
+        cp_vcounts[pair_idx] = plane_tetrahedron_intersection(plane_equation, tet_vpos_a_W, cp_v)
+
+        # Return if the polygon is empty.
+        if cp_vcounts[pair_idx] == 0:
+            continue
+
+        # Clip polygon with second tetrahedron
+        cp_vcounts[pair_idx] = clip_polygon_with_tetrahedron(tet_vpos_b_W, cp_v, cp_vcounts[pair_idx])
+
+        # Return if the polygon is empty.
+        if cp_vcounts[pair_idx] == 0:
+            continue
+
+        # Compute centroid of the final polygon.
+        centroid = compute_polygon_centroid(cp_v, cp_vcounts[pair_idx])
+
+        # Compute pressure at the centroid.
+        c_homogeneous = wp.vec4(centroid.x, centroid.y, centroid.z, 1.0)
+        penetration_extent_a = wp.dot(homogeneous_to_penetration_map_a, c_homogeneous)
+        pressure_a = h_a * penetration_extent_a
+        warn_potential_overflow_for_pressure(h_a, penetration_extent_a, pair_idx)
+        warn_degenerate_pressure(pressure_a, tid)
+
+        # Store results.
+        cp_centroids[pair_idx] = centroid
+        cp_normals[pair_idx] = plane_normal
+        centroid_pressure[pair_idx] = pressure_a
+
+        # ================================================================
+        # Compute contact wrench
+        # TODO: Implement contact wrench computation.
+        (
+            force_i,
+            torque_a_i,
+            torque_b_i,
+            torque_a_i_body,
+            torque_b_i_body,
+            force_n_i,
+            force_t_i,
+        ) = compute_wrench_fun(
+            pair_idx,
+            tet_pairs_found,
+            body_q,
+            body_qd,
+            body_a,
+            body_b,
+            cp_vcounts,
+            cp_vertices,
+            cp_centroids,
+            cp_normals,
+            homogeneous_to_penetration_map_a,
+            grad_p_a,
+            grad_p_b,
+            h_a,
+            h_b,
+            d_a,
+            d_b,
+            mu_static_a,
+            mu_static_b,
+            mu_dynamic_a,
+            mu_dynamic_b,
+            quadrature_weights,
+            quadrature_coords,
+            soft_vs_soft,
+            twist_convention,
+            force_i,
+            torque_a_i,
+            torque_b_i,
+            torque_a_i_body,
+            torque_b_i_body,
+            force_n_i,
+            force_t_i,
+        )
+
+    wp.atomic_add(force, 0, force_i)
+    wp.atomic_add(torque_a, 0, torque_a_i)
+    wp.atomic_add(torque_b, 0, torque_b_i)
+    wp.atomic_add(torque_a_body, 0, torque_a_i_body)
+    wp.atomic_add(torque_b_body, 0, torque_b_i_body)
+    wp.atomic_add(force_n, 0, force_n_i)
+    wp.atomic_add(force_t, 0, force_t_i)
     # Can happend if box falls indefinitely.
     # if counter_missed > 0:
     #   wp.printf("tid, counter, counter_missed: %d, %d, %d\n", tid, counter, counter_missed)
@@ -1581,3 +1851,189 @@ def compute_contact_surfaces(model, state_0, contacts, body_q_inv_mat, update_co
 
         for isosurface in contacts.isosurface:
             main_stream.wait_event(isosurface.sync_event)
+
+
+def launch_compute_soft_soft_contact_surface_bvh(
+    body_q,
+    body_qd,
+    object_a,
+    object_b,
+    isosurface,
+    twist_convention,
+    update_contact_pairs=True,
+):
+    if not update_contact_pairs:
+        return
+
+    if isosurface.query_mesh_a:
+        # print("querying mesh a", isosurface.body_a, isosurface.body_b)
+        wp.launch(
+            compute_soft_soft_contact_surface_bvh,
+            dim=object_a.mesh.elements_count,
+            inputs=[
+                body_q,
+                body_qd,
+                isosurface.body_a_wp,
+                isosurface.body_b_wp,
+                object_a.mesh.default_points,
+                object_b.mesh.default_points,
+                object_a.mesh.indices,
+                object_b.mesh.indices,
+                object_b.bvh.id,
+                isosurface.query_mesh_a,
+                object_a.mesh.default_tet_transform_inv,
+                object_b.mesh.default_tet_transform_inv,
+                object_a.mesh.field,
+                object_b.mesh.field,
+                object_a.mesh.field_gradient,
+                object_b.mesh.field_gradient,
+                object_a.hydroelastic_modulus,
+                object_b.hydroelastic_modulus,
+                object_a.hunt_crossley_dissipation,
+                object_b.hunt_crossley_dissipation,
+                object_a.mu_static,
+                object_b.mu_static,
+                object_a.mu_dynamic,
+                object_b.mu_dynamic,
+                isosurface.quadrature_weights,
+                isosurface.quadrature_coords,
+                isosurface.soft_vs_soft_wp,
+                twist_convention,
+            ],
+            outputs=[
+                isosurface.geom_pairs_found,
+                isosurface.contact_polygon.vertex_counts,
+                isosurface.contact_polygon.vertices,
+                isosurface.contact_polygon.centroids,
+                isosurface.contact_polygon.normals,
+                isosurface.contact_polygon.centroid_pressure,
+                isosurface.force,
+                isosurface.torque_a,
+                isosurface.torque_b,
+                isosurface.torque_a_body,
+                isosurface.torque_b_body,
+                isosurface.force_n,
+                isosurface.force_t,
+            ],
+        )
+    else:
+        wp.launch(
+            compute_soft_soft_contact_surface_bvh,
+            dim=object_b.mesh.elements_count,
+            inputs=[
+                body_q,
+                body_qd,
+                isosurface.body_a_wp,
+                isosurface.body_b_wp,
+                object_a.mesh.default_points,
+                object_b.mesh.default_points,
+                object_a.mesh.indices,
+                object_b.mesh.indices,
+                object_a.bvh.id,
+                isosurface.query_mesh_a,
+                object_a.mesh.default_tet_transform_inv,
+                object_b.mesh.default_tet_transform_inv,
+                object_a.mesh.field,
+                object_b.mesh.field,
+                object_a.mesh.field_gradient,
+                object_b.mesh.field_gradient,
+                object_a.hydroelastic_modulus,
+                object_b.hydroelastic_modulus,
+                object_a.hunt_crossley_dissipation,
+                object_b.hunt_crossley_dissipation,
+                object_a.mu_static,
+                object_b.mu_static,
+                object_a.mu_dynamic,
+                object_b.mu_dynamic,
+                isosurface.quadrature_weights,
+                isosurface.quadrature_coords,
+                isosurface.soft_vs_soft_wp,
+                twist_convention,
+            ],
+            outputs=[
+                isosurface.geom_pairs_found,
+                isosurface.contact_polygon.vertex_counts,
+                isosurface.contact_polygon.vertices,
+                isosurface.contact_polygon.centroids,
+                isosurface.contact_polygon.normals,
+                isosurface.contact_polygon.centroid_pressure,
+                isosurface.force,
+                isosurface.torque_a,
+                isosurface.torque_b,
+                isosurface.torque_a_body,
+                isosurface.torque_b_body,
+                isosurface.force_n,
+                isosurface.force_t,
+            ],
+        )
+
+
+def compute_contact_polygons_and_wrenches(
+    body_q,
+    body_qd,
+    mesh_a,
+    mesh_b,
+    isosurface,
+    twist_convention,
+    update_contact_pairs=True,
+):
+    isosurface.contact_polygon.vertex_counts.zero_()
+    isosurface.geom_pairs_found.fill_(-1)
+    isosurface.force.zero_()
+    isosurface.torque_a.zero_()
+    isosurface.torque_b.zero_()
+    isosurface.torque_a_body.zero_()
+    isosurface.torque_b_body.zero_()
+    isosurface.force_n.zero_()
+    isosurface.force_t.zero_()
+
+    # Compute contact surface elements
+    if isosurface.soft_vs_soft:
+        launch_compute_soft_soft_contact_surface_bvh(
+            body_q, body_qd, mesh_a, mesh_b, isosurface, twist_convention, update_contact_pairs
+        )
+    # else:
+    #     launch_compute_soft_hard_contact_surface_bvh(
+    #         body_q, mesh_a, mesh_b, isosurface, update_contact_pairs
+    #     )
+
+
+def compute_contact_surfaces_and_wrenches(solver, state, contacts, twist_convention, update_contact_pairs=True):
+    with wp.ScopedTimer("Computation of contact surfaces", print=False):
+        if twist_convention == 0:  # newton convention
+            print("Newton convention not supported yet")
+        elif twist_convention == 1:  # featherstone convention
+            main_stream = wp.get_stream()
+            init_event = main_stream.record_event()
+            for isosurface in contacts.isosurface:
+                isosurface.stream.wait_event(init_event)
+                with wp.ScopedStream(isosurface.stream):
+                    compute_contact_polygons_and_wrenches(
+                        state.body_q,
+                        solver.body_v_s,
+                        solver.model.hydro_mesh[isosurface.body_a],
+                        solver.model.hydro_mesh[isosurface.body_b],
+                        isosurface,
+                        twist_convention,
+                        update_contact_pairs,
+                    )
+                isosurface.stream.record_event(isosurface.sync_event)
+
+            for isosurface in contacts.isosurface:
+                main_stream.wait_event(isosurface.sync_event)
+
+            for isosurface in contacts.isosurface:
+                launch_add_wrench_to_body_f(
+                    body_a=isosurface.body_a,
+                    body_b=isosurface.body_b,
+                    force=isosurface.force,
+                    torque_a=isosurface.torque_a,
+                    torque_b=isosurface.torque_b,
+                    twist_convention=twist_convention,
+                    body_f=state.body_f,
+                )
+
+        elif twist_convention == 2:  # mujoco convention
+            print("Mujoco convention not supported yet")
+        else:
+            raise ValueError("Invalid twist convention")

@@ -36,6 +36,35 @@ class HydroelasticMesh:
 
 
 @wp.struct
+class HydroelasticBatch:
+    default_points: wp.array(dtype=wp.vec3f)
+    indices: wp.array(dtype=wp.int32)
+    elements_count: wp.int32
+    elements_stride: wp.int32
+
+    # Only used for soft meshes (Tetrahedral meshes).
+    field: wp.array(dtype=wp.float32)
+    field_gradient: wp.array(dtype=wp.vec3f)
+    default_tet_transform_inv: wp.array(dtype=wp.mat44)
+
+    # Only used for rigid meshes (Triangular meshes).
+    normals: wp.array(dtype=wp.vec3f)
+
+    # Material properties
+    hydroelastic_modulus: wp.float32
+    mu_static: wp.float32
+    mu_dynamic: wp.float32
+    hunt_crossley_dissipation: wp.float32
+
+    # Bvh
+    bvh_id: wp.int32
+
+    # The folllowing fields are experimental or for debugging purposes.
+    edges: wp.array(dtype=wp.vec2i)
+    is_on_surface: wp.array(dtype=wp.bool)
+
+
+@wp.struct
 class LumpedProperties:
     mass: wp.float32
     inertia: wp.mat33
@@ -95,6 +124,23 @@ def reset_contact_polygon(contact_polygon):
     contact_polygon.centroid_pressure.fill_(0.0)
 
 
+@wp.struct
+class IsosurfaceBatch:
+    geom_pairs: wp.array(dtype=wp.vec2i)
+    geom_pairs_found: wp.array(dtype=wp.vec2i)
+    max_geom_pairs: wp.int32
+    body_a: wp.array(dtype=wp.int32)
+    body_b: wp.array(dtype=wp.int32)
+
+    ## Contact polygon data
+    v_counts: wp.array(dtype=wp.int32)
+    vertices: wp.array(dtype=wp.vec3f)
+    centroids: wp.array(dtype=wp.vec3f)
+    cartesian_to_penetration: wp.array(dtype=wp.vec4f)
+    normals: wp.array(dtype=wp.vec3f)
+    centroid_pressure: wp.array(dtype=wp.float32)
+
+
 class Isosurface:
     def __init__(
         self, body_a, body_b, geom_pairs, mesh_b_is_soft, max_geom_pairs=-1, query_mesh_a=True, compute_device=None
@@ -109,7 +155,7 @@ class Isosurface:
         self.body_b_wp = wp.int32(body_b)  # This is used for the kernel to avoid htod transfers.
         self.label = f"Body_{body_a}_vs_Body_{body_b}"
         self.soft_vs_soft = mesh_b_is_soft
-        self.sotf_vs_soft_wp = wp.array([1], dtype=wp.int32) if mesh_b_is_soft else wp.array([0], dtype=wp.int32)
+        self.soft_vs_soft_wp = wp.array([1], dtype=wp.int32) if mesh_b_is_soft else wp.array([0], dtype=wp.int32)
         self.geom_pairs = wp.array(geom_pairs, dtype=wp.vec2i, device=compute_device)
         # num_geom_pairs = self.geom_pairs.shape[0]
         if max_geom_pairs == -1:

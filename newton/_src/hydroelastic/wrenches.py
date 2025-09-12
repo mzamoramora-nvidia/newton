@@ -77,6 +77,211 @@ def compute_stribeck_friction_coefficient(
         return mu_static * step5(v)
 
 
+@wp.func
+def compute_wrench_fun(
+    pair_idx: wp.int32,
+    element_pairs_found: wp.array(dtype=wp.vec2i),
+    body_q: wp.array(dtype=wp.transform),
+    body_qd: wp.array(dtype=wp.spatial_vector),
+    body_a: wp.int32,
+    body_b: wp.int32,
+    polygon_vcounts: wp.array(dtype=wp.int32),
+    polygon_vertices: wp.array(dtype=wp.vec3f),
+    polygon_centroids: wp.array(dtype=wp.vec3f),
+    polygon_normals: wp.array(dtype=wp.vec3f),
+    cartesian_to_penetration: wp.vec4f,
+    grad_p_a: wp.array(dtype=wp.vec3f),
+    grad_p_b: wp.array(dtype=wp.vec3f),
+    h_a: wp.float32,  # hydroelastic modulus
+    h_b: wp.float32,
+    d_a: wp.float32,  # hunt_crossley_dissipation
+    d_b: wp.float32,  # hunt_crossley_dissipation
+    mu_static_a: wp.float32,
+    mu_static_b: wp.float32,
+    mu_dynamic_a: wp.float32,
+    mu_dynamic_b: wp.float32,
+    quadrature_weights: wp.array(dtype=wp.float32),
+    quadrature_coords: wp.array(dtype=wp.vec3f),
+    soft_vs_soft: wp.array(dtype=wp.int32),
+    twist_convention: int,
+    force_i: wp.vec3f,
+    torque_a_i: wp.vec3f,
+    torque_b_i: wp.vec3f,
+    torque_a_i_body: wp.vec3f,
+    torque_b_i_body: wp.vec3f,
+    force_n_i: wp.vec3f,
+    force_t_i: wp.vec3f,
+):
+    # Get the tet pair.
+    el_id_a = element_pairs_found[pair_idx][0]
+    el_id_b = element_pairs_found[pair_idx][1]
+
+    # TODO: This could be done once when creating the data for the isosurface.
+    # Compute combined parameters.
+    mu_static = compute_combined_friction_coefficient(mu_static_a, mu_static_b)
+    mu_dynamic = compute_combined_friction_coefficient(mu_dynamic_a, mu_dynamic_b)
+    h = compute_combined_hydroelastic_modulus(h_a, h_b)
+    d = compute_combined_dissipation(h_a, h_b, d_a, d_b)
+    num_quadrature_points = quadrature_weights.shape[0]
+
+    com_a = wp.vec3f(body_q[body_a][0], body_q[body_a][1], body_q[body_a][2])
+    com_b = wp.vec3f(body_q[body_b][0], body_q[body_b][1], body_q[body_b][2])
+    normal = polygon_normals[pair_idx]
+
+    # Integrate polygon.
+    # For each vertex, we have a triangle.
+    # TODO: Rename cp_idx to v_idx.
+    for cp_idx in range(polygon_vcounts[pair_idx]):
+        # Get triangle vertices.
+        index_b = cp_idx
+        index_c = (cp_idx + 1) % polygon_vcounts[pair_idx]
+        vertex_a = polygon_centroids[pair_idx]
+        vertex_b = polygon_vertices[8 * pair_idx + index_b]
+        vertex_c = polygon_vertices[8 * pair_idx + index_c]
+
+        # Compute triangle normal.
+        triangle_normal = wp.cross(vertex_b - vertex_a, vertex_c - vertex_a)
+        area = wp.length(triangle_normal) * 0.5
+        triangle_normal = wp.normalize(triangle_normal)
+
+        # Skip zero area triangles.
+        # Drake uses 1.0e-14, but we use 1.0e-10 to avoid numerical issues.
+        if area < 1.0e-10:
+            continue
+
+        # Make sure the triangle normal is aligned with the normal of the contact polygon.
+        # Polygon normals should be normalized already.
+        cos_normals = wp.dot(triangle_normal, normal)
+        cos_threshold = wp.cos(30.0 * wp.pi / 180.0)
+        if cos_normals < cos_threshold:
+            vertex_b = polygon_vertices[8 * pair_idx + index_c]
+            vertex_c = polygon_vertices[8 * pair_idx + index_b]
+            triangle_normal = -triangle_normal
+
+            cos_normals = wp.dot(triangle_normal, normal)
+            if cos_normals < cos_threshold:
+                # If normals are not aligned after the previous step, it is likely due the triangle being too small.
+                # wp.printf("may day: normals are not aligned: %f, area: %e, tid: %d\n", cos_normals, area, tid)
+                continue
+
+        # Integrate triangle.
+        for i in range(num_quadrature_points):
+            # R = (vertex_a + vertex_b + vertex_c) * (1.0 / 3.0)
+            R = (
+                vertex_a * quadrature_coords[i][0]
+                + vertex_b * quadrature_coords[i][1]
+                + vertex_c * quadrature_coords[i][2]
+            )
+
+            # Compute iso_pressure.
+            homogeneous_position = wp.vec4(R.x, R.y, R.z, 1.0)
+            penetration_extent_a = wp.dot(cartesian_to_penetration, homogeneous_position)
+            pressure_a = h_a * penetration_extent_a
+
+            Ra_dot = compute_velocity_at_point(body_q[body_a], body_qd[body_a], R, twist_convention)
+            Rb_dot = compute_velocity_at_point(body_q[body_b], body_qd[body_b], R, twist_convention)
+
+            Rab_dot = Ra_dot - Rb_dot
+            Rab_dot_normal = wp.dot(Rab_dot, normal) * normal
+            Rab_dot_tangential = Rab_dot - Rab_dot_normal
+
+            # Compute pressure gradient.
+            # The gradient should be positve pointing into the body.
+            # Some filtering is already done when creating the isosurface.
+            # TODO: Should the gradient be computed at the quadrature point R? Is this a reasonable approximation?
+            field_gradient_a_W = wp.transform_vector(body_q[body_a], grad_p_a[el_id_a])
+            cos_theta_a = wp.dot(wp.normalize(field_gradient_a_W), normal)
+            if cos_theta_a < 0.0:
+                wp.printf(
+                    "gradient a is negative: %f, tet_id_a: %d\n",
+                    cos_theta_a,
+                    el_id_a,
+                )
+
+            g_a = wp.abs(wp.dot(field_gradient_a_W, normal))
+            if g_a < GRADIENT_EPSILON:
+                # wp.printf("gradient is too small: %f, %f\n", g_a, g_b)
+                continue
+
+            g = g_a
+
+            if soft_vs_soft[0] >= 1:
+                field_gradient_b_W = wp.transform_vector(body_q[body_b], grad_p_b[el_id_b])
+                cos_theta_b = wp.dot(-wp.normalize(field_gradient_b_W), normal)
+                if cos_theta_b < 0.0:
+                    wp.printf(
+                        "gradient b is negative: %f, tet_id_b: %d\n",
+                        cos_theta_b,
+                        el_id_b,
+                    )
+
+                g_b = wp.abs(wp.dot(-field_gradient_b_W, normal))
+                if g_b < GRADIENT_EPSILON:
+                    # wp.printf("gradient is too small: %f, %f\n", g_a, g_b)
+                    continue
+
+                # From drake implementation:
+                # // The expression below is mathematically equivalent to g =
+                # // gN*gM/(gN+gM) but it has the advantage of also being valid if
+                # // one of the gradients is infinity.
+                g = 1.0 / (1.0 / g_a + 1.0 / g_b)
+
+            # Compute dissipation.
+            dissipation = d * (g / h) * wp.dot(Rab_dot, normal)
+
+            # Compute total pressure. (This should be positive)
+            hc = 1.0 - dissipation
+            # TODO: Add a flag to enable printing of warnings.
+            # if hc < 0.0:
+            #     wp.printf("Hunt & Crossley  term is negative: %f, tid: %d\n", hc, tid)
+            # if pressure_a < 0.0:
+            #     wp.printf("pressure is negative: %f, tid: %d\n", pressure_a, tid)
+
+            # pR = pressure_a * hc
+            pR = wp.max(0.0, pressure_a * wp.max(0.0, hc))
+
+            # Compute normal traction
+            T_N = pR * normal
+
+            # Compute friction traction
+            T_F = wp.vec3f(0.0, 0.0, 0.0)  # - mu_static * pR * Rab_dot_tangential
+            # if wp.length(Rab_dot_tangential) > 1.0e-9:
+            #     T_F = -mu_dynamic * pR * wp.normalize(Rab_dot_tangential)
+
+            # # Regularized friction
+            # slip_regularizer = 1.0e-12
+            # T_F = -mu_dynamic * pR * (1.0 / wp.sqrt(wp.length(Rab_dot_tangential) + slip_regularizer)) * Rab_dot_tangential
+
+            # # # Stribeck friction model.
+            # TODO: Make this a parameter.
+            v_stiction_tolerance = 1.0e-4
+            mu_stribeck = compute_stribeck_friction_coefficient(
+                Rab_dot_tangential, v_stiction_tolerance, mu_static, mu_dynamic
+            )
+            # # Uncomment to monitor the regime in which the friction is computed. (Stick or slip)
+            # if thread_id == 0 and i == 0:
+            #     wp.printf("mu_stribeck, mu_static, mu_dynamic: %f, %f, %f\n", mu_stribeck, mu_static, mu_dynamic)
+            T_F = -mu_stribeck * pR * wp.normalize(Rab_dot_tangential)
+
+            # Compute total traction
+            T_R = T_N + T_F
+
+            # Compute force
+            force_i += T_R * area * quadrature_weights[i]
+
+            force_n_i += T_N * area * quadrature_weights[i]
+            force_t_i += T_F * area * quadrature_weights[i]
+
+            # Compute torques
+            torque_a_i += wp.cross(R, T_R) * area * quadrature_weights[i]
+            torque_a_i_body += wp.cross(R - com_a, T_R) * area * quadrature_weights[i]
+
+            torque_b_i += wp.cross(R, T_R) * area * quadrature_weights[i]
+            torque_b_i_body += wp.cross(R - com_b, T_R) * area * quadrature_weights[i]
+
+    return force_i, torque_a_i, torque_b_i, torque_a_i_body, torque_b_i_body, force_n_i, force_t_i
+
+
 @wp.kernel
 def compute_wrench(
     geom_pairs_found: wp.array(dtype=wp.vec2i),
@@ -367,7 +572,7 @@ def launch_compute_wrench(
             mesh_b.mu_dynamic,
             isosurface.quadrature_weights,
             isosurface.quadrature_coords,
-            isosurface.sotf_vs_soft_wp,
+            isosurface.soft_vs_soft_wp,
             twist_convention,
         ],
         outputs=[
