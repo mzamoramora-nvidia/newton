@@ -88,8 +88,8 @@ def compute_wrench_fun(
     polygon_vcounts: wp.array(dtype=wp.int32),
     polygon_vertices: wp.array(dtype=wp.vec3f),
     polygon_centroids: wp.array(dtype=wp.vec3f),
+    cartesian_to_penetration: wp.array(dtype=wp.vec4f),
     polygon_normals: wp.array(dtype=wp.vec3f),
-    cartesian_to_penetration: wp.vec4f,
     grad_p_a: wp.array(dtype=wp.vec3f),
     grad_p_b: wp.array(dtype=wp.vec3f),
     h_a: wp.float32,  # hydroelastic modulus
@@ -175,7 +175,7 @@ def compute_wrench_fun(
 
             # Compute iso_pressure.
             homogeneous_position = wp.vec4(R.x, R.y, R.z, 1.0)
-            penetration_extent_a = wp.dot(cartesian_to_penetration, homogeneous_position)
+            penetration_extent_a = wp.dot(cartesian_to_penetration[pair_idx], homogeneous_position)
             pressure_a = h_a * penetration_extent_a
 
             Ra_dot = compute_velocity_at_point(body_q[body_a], body_qd[body_a], R, twist_convention)
