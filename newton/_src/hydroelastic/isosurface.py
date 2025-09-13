@@ -630,6 +630,7 @@ def compute_contact_surface_and_wrenches(
     quadrature_coords: wp.array(dtype=wp.vec3f),
     soft_vs_soft: wp.array(dtype=wp.int32),
     twist_convention: int,
+    update_pairs: bool,
     # outputs
     element_pairs: wp.array(dtype=wp.vec2i),
     cp_vcounts: wp.array(dtype=wp.int32),
@@ -678,14 +679,14 @@ def compute_contact_surface_and_wrenches(
     # tet vertex indices
     body_id_query = body_a
     body_id_bvh = body_b
-    block = wp.int32(element_pairs.shape[0] / elements_a_count)
     element_stride = element_a_stride
+    el_max_pairs = wp.int32(element_pairs.shape[0] / elements_a_count)
 
     if not query_with_mesh_a:
         body_id_query = body_b
         body_id_bvh = body_a
-        block = wp.int32(element_pairs.shape[0] / elements_b_count)
         element_stride = element_b_stride
+        el_max_pairs = wp.int32(element_pairs.shape[0] / elements_b_count)
 
     # q_inv = wp.transform_inverse(body_q[body_id_bvh])
     # xform_aabb_to_bvh = wp.transform_multiply(q_inv, body_q[body_id_query])
@@ -705,18 +706,47 @@ def compute_contact_surface_and_wrenches(
     lower = wp.vec3(min_bounds_query.x, min_bounds_query.y, min_bounds_query.z)
     upper = wp.vec3(max_bounds_query.x, max_bounds_query.y, max_bounds_query.z)
 
-    # query Mesh-smaller BVH with larger mesh's AABB
+    # Setup BVH query with the AABB of the querying mesh.
     query = wp.bvh_query_aabb(bvh_id, lower, upper)
     bvh_element = wp.int32(0)
+    bvh_counter = wp.int32(0)
+
+    # Initialize loop variables.
     counter = wp.int32(0)
-    counter_missed = wp.int32(0)
-    while wp.bvh_query_next(query, bvh_element):
-        if query_with_mesh_a:
-            el_a_idx = tid
-            el_b_idx = bvh_element
+    pair_idx = wp.int32(0)
+
+    # Loop over pairs of elements.
+    while counter < el_max_pairs or update_pairs:
+        pair_idx = tid * el_max_pairs + wp.min(counter, el_max_pairs - 1)
+        if update_pairs:
+            if not wp.bvh_query_next(query, bvh_element):
+                break
+
+            if query_with_mesh_a:
+                el_a_idx = tid
+                el_b_idx = bvh_element
+            else:
+                el_a_idx = bvh_element
+                el_b_idx = tid
+
+            if bvh_counter >= el_max_pairs:
+                wp.printf(
+                    "compute_contact_surface_and_wrenches: Query is overflowing: tid, el_a_idx, el_b_idx, pair_idx, el_max_pairs, bvh_counter: %d, %d, %d, %d, %d, %d\n",
+                    tid,
+                    el_a_idx,
+                    el_b_idx,
+                    pair_idx,
+                    el_max_pairs,
+                    bvh_counter,
+                )
+
+            bvh_counter += 1
+            element_pairs[pair_idx] = wp.vec2i(el_a_idx, el_b_idx)
         else:
-            el_a_idx = bvh_element
-            el_b_idx = tid
+            if element_pairs[pair_idx][0] == -1 or element_pairs[pair_idx][1] == -1:
+                break
+            el_a_idx = element_pairs[pair_idx][0]
+            el_b_idx = element_pairs[pair_idx][1]
 
         for i in range(element_a_stride):
             vidx_a[i] = elements_a[element_a_stride * el_a_idx + i]
@@ -732,25 +762,8 @@ def compute_contact_surface_and_wrenches(
 
         if not check_bounding_boxes_overlap(min_bounds_a, max_bounds_a, min_bounds_b, max_bounds_b):
             # wp.printf("missed: tid, tet_idx_a, tet_idx_b: %d, %d, %d\n", tid, tet_idx_a, tet_idx_b)
-            counter_missed += 1
+            counter += 1
             continue
-
-        pair_idx = tid * block + counter
-        if pair_idx >= (tid + 1) * block:
-            wp.printf(
-                "Query is overflowing: tid, el_a_idx, el_b_idx, pair_idx, block, conter: %d, %d, %d, %d, %d, %d\n",
-                tid,
-                el_a_idx,
-                el_b_idx,
-                pair_idx,
-                block,
-                counter,
-            )
-            pair_idx = (tid + 1) * block - 1
-
-        element_pairs[pair_idx] = wp.vec2i(el_a_idx, el_b_idx)
-        counter += 1
-
         # =================================================================================
         # Compute contact surface elements.
         if soft_vs_soft[0] == 1:
@@ -783,6 +796,7 @@ def compute_contact_surface_and_wrenches(
             )
 
             if not is_valid:
+                counter += 1
                 continue
         else:
             is_valid = compute_soft_hard_fun(
@@ -809,6 +823,7 @@ def compute_contact_surface_and_wrenches(
             )
 
             if not is_valid:
+                counter += 1
                 continue
 
         valid_pairs_count += 1
@@ -857,7 +872,7 @@ def compute_contact_surface_and_wrenches(
             force_t_i,
         )
 
-    # TODO: Wrap in conditionals. If force is not zero then add it to the total force.
+        counter += 1
 
     if valid_pairs_count > 0:
         wp.atomic_add(force, 0, force_i)
@@ -1164,8 +1179,10 @@ def launch_compute_contact_polygons_and_wrenches(
     twist_convention,
     update_contact_pairs=True,
 ):
+    if update_contact_pairs:
+        isosurface.geom_pairs_found.fill_(-1)
+
     isosurface.contact_polygon.vertex_counts.zero_()
-    isosurface.geom_pairs_found.fill_(-1)
     isosurface.force.zero_()
     isosurface.torque_a.zero_()
     isosurface.torque_b.zero_()
@@ -1173,9 +1190,6 @@ def launch_compute_contact_polygons_and_wrenches(
     isosurface.torque_b_body.zero_()
     isosurface.force_n.zero_()
     isosurface.force_t.zero_()
-
-    if not update_contact_pairs:
-        return
 
     if isosurface.query_mesh_a:
         # print("querying mesh a", isosurface.body_a, isosurface.body_b)
@@ -1214,6 +1228,7 @@ def launch_compute_contact_polygons_and_wrenches(
                 isosurface.quadrature_coords,
                 isosurface.soft_vs_soft_wp,
                 twist_convention,
+                update_contact_pairs,
             ],
             outputs=[
                 isosurface.geom_pairs_found,
@@ -1268,6 +1283,7 @@ def launch_compute_contact_polygons_and_wrenches(
                 isosurface.quadrature_coords,
                 isosurface.soft_vs_soft_wp,
                 twist_convention,
+                update_contact_pairs,
             ],
             outputs=[
                 isosurface.geom_pairs_found,
