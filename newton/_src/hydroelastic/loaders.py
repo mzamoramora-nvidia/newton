@@ -9,13 +9,44 @@ from newton._src.hydroelastic.make_fields import (
     max_of_array,
 )
 from newton._src.hydroelastic.tetrahedralizer import tetrahedralize
-from newton._src.hydroelastic.types import HydroelasticObject, Isosurface
+from newton._src.hydroelastic.types import (
+    HydroelasticObject,
+    Isosurface,
+)
 from newton._src.hydroelastic.utils import (
     compute_aabb_elements,
     compute_default_tet_transform_inv,
     compute_face_normals,
     transform_array,
 )
+from newton._src.hydroelastic.wrenches import combine_material_properties
+
+
+@wp.kernel
+def set_query_with_mesh_a(
+    elements_count: wp.array(dtype=wp.int32),
+    body_a_idx: wp.array(dtype=wp.int32),
+    body_b_idx: wp.array(dtype=wp.int32),
+    # outputs
+    query_with_mesh_a: wp.array(dtype=wp.bool),
+):
+    tid = wp.tid()
+    body_a = body_a_idx[tid]
+    body_b = body_b_idx[tid]
+    query_with_mesh_a[tid] = elements_count[body_a] > elements_count[body_b]
+
+
+@wp.kernel
+def set_soft_vs_soft(
+    is_soft: wp.array(dtype=wp.bool),
+    body_a_idx: wp.array(dtype=wp.int32),
+    body_b_idx: wp.array(dtype=wp.int32),
+    soft_vs_soft: wp.array(dtype=wp.bool),
+):
+    tid = wp.tid()
+    body_a = body_a_idx[tid]
+    body_b = body_b_idx[tid]
+    soft_vs_soft[tid] = is_soft[body_a] and is_soft[body_b]
 
 
 def extract_surface_mesh(vertices, tetrahedrons):
@@ -525,7 +556,205 @@ def init_isosurfaces(collision_pairs, isosurfaces, meshes, max_geom_pairs=-1, de
     return len(isosurfaces)
 
 
-def init_streams(num_streams, streams, compute_device):
-    for _ in range(num_streams):
-        # streams.append(wp.Stream(device=compute_device))
-        streams.append(wp.get_stream())
+def init_hydro_batch(hydro_objects, hydro_batch):
+    # mesh_batch = HydroelasticBatch()
+
+    # This assumes that each mesh is associated with a different body.
+    meshes_count = len(hydro_objects)
+
+    max_points_count = 0
+    max_indices_count = 0
+    max_elements_count = 0
+    for object in hydro_objects:
+        max_points_count = max(max_points_count, int(object.mesh.default_points.shape[0]))
+        max_indices_count = max(max_indices_count, int(object.mesh.indices.shape[0]))
+        max_elements_count = max(max_elements_count, int(object.mesh.elements_count))
+
+    default_points = np.zeros((meshes_count, max_points_count, 3))
+    indices = np.zeros((meshes_count, max_indices_count), dtype=np.int32)
+    elements_count = np.zeros((meshes_count), dtype=np.int32)
+    elements_stride = np.zeros((meshes_count), dtype=np.int32)
+    is_soft = np.zeros((meshes_count), dtype=np.bool)
+    # Per-vertex fields.
+    field = np.zeros((meshes_count, max_points_count), dtype=np.float32)
+    # Per-element fields gradient.
+    field_gradient = np.zeros((meshes_count, max_elements_count, 3), dtype=np.float32)
+    default_tet_transform_inv = np.zeros((meshes_count, max_elements_count, 4, 4), dtype=np.float32)
+    normals = np.zeros((meshes_count, max_elements_count, 3), dtype=np.float32)
+
+    h = np.zeros((meshes_count), dtype=np.float32)
+    d = np.zeros((meshes_count), dtype=np.float32)
+    mu_static = np.zeros((meshes_count), dtype=np.float32)
+    mu_dynamic = np.zeros((meshes_count), dtype=np.float32)
+    bvh_ids = np.zeros((meshes_count), dtype=np.uint64)
+
+    for i, object in enumerate(hydro_objects):
+        points_count = int(object.mesh.default_points.shape[0])
+        indices_count = int(object.mesh.indices.shape[0])
+        el_count = int(object.mesh.elements_count)
+
+        default_points[i, :points_count, :] = object.mesh.default_points.numpy()
+        indices[i, :indices_count] = object.mesh.indices.numpy().flatten()
+        elements_count[i] = el_count
+        elements_stride[i] = object.mesh.elements_stride
+
+        is_soft[i] = object.is_soft
+
+        if object.is_soft:
+            field[i, :points_count] = object.mesh.field.numpy()
+            field_gradient[i, :el_count, :] = object.mesh.field_gradient.numpy()
+            default_tet_transform_inv[i, :el_count, :, :] = object.mesh.default_tet_transform_inv.numpy()
+
+        if not object.is_soft:
+            normals[i, :el_count, :] = object.mesh.normals.numpy()
+
+        h[i] = object.hydroelastic_modulus
+        d[i] = object.hunt_crossley_dissipation
+        mu_static[i] = object.mu_static
+        mu_dynamic[i] = object.mu_dynamic
+        bvh_ids[i] = object.bvh.id
+
+    # Initialize the mesh batch.
+    hydro_batch.default_points = wp.zeros((meshes_count, max_points_count), dtype=wp.vec3f)
+    hydro_batch.indices = wp.zeros((meshes_count, max_indices_count), dtype=wp.int32)
+    hydro_batch.elements_count = wp.zeros((meshes_count), dtype=wp.int32)
+    hydro_batch.elements_stride = wp.zeros((meshes_count), dtype=wp.int32)
+
+    hydro_batch.is_soft = wp.zeros((meshes_count), dtype=wp.bool)
+
+    hydro_batch.field = wp.zeros((meshes_count, max_elements_count), dtype=wp.float32)
+    hydro_batch.field_gradient = wp.zeros((meshes_count, max_elements_count), dtype=wp.vec3f)
+    hydro_batch.default_tet_transform_inv = wp.zeros((meshes_count, max_elements_count), dtype=wp.mat44)
+
+    hydro_batch.normals = wp.zeros((meshes_count, max_elements_count), dtype=wp.vec3f)
+
+    hydro_batch.h = wp.zeros((meshes_count), dtype=wp.float32)
+    hydro_batch.d = wp.zeros((meshes_count), dtype=wp.float32)
+    hydro_batch.mu_static = wp.zeros((meshes_count), dtype=wp.float32)
+    hydro_batch.mu_dynamic = wp.zeros((meshes_count), dtype=wp.float32)
+
+    hydro_batch.bvh_ids = wp.zeros((meshes_count), dtype=wp.uint64)
+
+    # Convert numpy arrays to wp arrays.
+    # TODO: Remove the assigne and use the wp arrays directly.
+    # Assigning the numpy arrays to the wp arrays just as sanity check to make sure that
+    # the dimensions are correct.
+    hydro_batch.default_points.assign(wp.array(default_points, dtype=wp.vec3f))
+    hydro_batch.indices.assign(wp.array(indices, dtype=wp.int32))
+    hydro_batch.elements_count.assign(wp.array(elements_count, dtype=wp.int32))
+    hydro_batch.elements_stride.assign(wp.array(elements_stride, dtype=wp.int32))
+
+    hydro_batch.is_soft.assign(wp.array(is_soft, dtype=wp.bool))
+
+    hydro_batch.field.assign(wp.array(field, dtype=wp.float32))
+    hydro_batch.field_gradient.assign(wp.array(field_gradient, dtype=wp.vec3f))
+    # TODO: Double check if the dimensions are correct.
+    hydro_batch.default_tet_transform_inv.assign(wp.array(default_tet_transform_inv, dtype=wp.mat44))
+
+    hydro_batch.normals.assign(wp.array(normals, dtype=wp.vec3f))
+
+    hydro_batch.h.assign(wp.array(h, dtype=wp.float32))
+    hydro_batch.d.assign(wp.array(d, dtype=wp.float32))
+    hydro_batch.mu_static.assign(wp.array(mu_static, dtype=wp.float32))
+    hydro_batch.mu_dynamic.assign(wp.array(mu_dynamic, dtype=wp.float32))
+
+    hydro_batch.bvh_ids.assign(wp.array(bvh_ids, dtype=wp.int32))
+
+
+def init_isosurface_batch(isosurface_batch, collision_pairs, hydro_batch, max_element_pairs=-1):
+    isosurface_count = len(collision_pairs)
+    # ================================================================================================================
+    # Find the maximum number of element pairs.
+    if max_element_pairs == -1:
+        max_element_pairs = 0
+        element_counts = hydro_batch.elements_count.numpy()
+        for c in collision_pairs:
+            body_a = c[0]
+            body_b = c[1]
+            num_elements_a = element_counts[body_a]
+            num_elements_b = element_counts[body_b]
+            element_pairs_count = num_elements_a * num_elements_b
+            max_element_pairs = max(max_element_pairs, element_pairs_count)
+            pair_label = f"body_a: {body_a}, body_b: {body_b}"
+            pair_info = f"List of element pairs N: {element_pairs_count}. num_elements_a: {num_elements_a}, num_elements_b: {num_elements_b}"
+            print(f"{pair_label} -> {pair_info}")
+    print(f"max_element_pairs: {max_element_pairs}")
+
+    # ================================================================================================================
+    # Initialize the isosurface batch.
+    isosurface_batch.max_element_pairs = wp.int32(max_element_pairs)
+    isosurface_batch.element_pairs = wp.zeros((isosurface_count, max_element_pairs), dtype=wp.vec2i)
+    isosurface_batch.body_a_idx = wp.zeros(isosurface_count, dtype=wp.int32)
+    isosurface_batch.body_b_idx = wp.zeros(isosurface_count, dtype=wp.int32)
+
+    isosurface_batch.v_counts = wp.zeros((isosurface_count, max_element_pairs), dtype=wp.int32)
+    isosurface_batch.vertices = wp.zeros((isosurface_count, 8 * max_element_pairs), dtype=wp.vec3f)
+    isosurface_batch.centroids = wp.zeros((isosurface_count, max_element_pairs), dtype=wp.vec3f)
+    isosurface_batch.cartesian_to_penetration = wp.zeros((isosurface_count, max_element_pairs), dtype=wp.vec4f)
+    isosurface_batch.normals = wp.zeros((isosurface_count, max_element_pairs), dtype=wp.vec3f)
+    isosurface_batch.centroid_pressure = wp.zeros((isosurface_count, max_element_pairs), dtype=wp.float32)
+
+    isosurface_batch.h_combined = wp.zeros(isosurface_count, dtype=wp.float32)
+    isosurface_batch.d_combined = wp.zeros(isosurface_count, dtype=wp.float32)
+    isosurface_batch.mu_static_combined = wp.zeros(isosurface_count, dtype=wp.float32)
+    isosurface_batch.mu_dynamic_combined = wp.zeros(isosurface_count, dtype=wp.float32)
+    isosurface_batch.query_with_mesh_a = wp.zeros(isosurface_count, dtype=wp.bool)
+    isosurface_batch.soft_vs_soft = wp.zeros(isosurface_count, dtype=wp.bool)
+
+    # ================================================================================================================
+    # TODO: Collision pairs should represent mesh ids, not body ids.
+    # For now, it works as each mesh is associated with a different body.
+    body_a_idx = np.zeros((isosurface_count), dtype=np.int32)
+    body_b_idx = np.zeros((isosurface_count), dtype=np.int32)
+
+    for i, c in enumerate(collision_pairs):
+        # TODO: This should be a better way to get body ides
+        # body_a = meshes[c[0]].mesh.body_id
+        body_a = c[0]
+        body_b = c[1]
+        body_a_idx[i] = body_a
+        body_b_idx[i] = body_b
+
+    isosurface_batch.body_a_idx.assign(wp.array(body_a_idx, dtype=wp.int32))
+    isosurface_batch.body_b_idx.assign(wp.array(body_b_idx, dtype=wp.int32))
+
+    wp.launch(
+        combine_material_properties,
+        dim=isosurface_count,
+        inputs=[
+            isosurface_batch.body_a_idx,
+            isosurface_batch.body_b_idx,
+            hydro_batch.h,
+            hydro_batch.d,
+            hydro_batch.mu_static,
+            hydro_batch.mu_dynamic,
+        ],
+        outputs=[
+            isosurface_batch.h_combined,
+            isosurface_batch.d_combined,
+            isosurface_batch.mu_static_combined,
+            isosurface_batch.mu_dynamic_combined,
+        ],
+    )
+
+    wp.launch(
+        set_query_with_mesh_a,
+        dim=isosurface_count,
+        inputs=[
+            hydro_batch.elements_count,
+            isosurface_batch.body_a_idx,
+            isosurface_batch.body_b_idx,
+        ],
+        outputs=[isosurface_batch.query_with_mesh_a],
+    )
+
+    wp.launch(
+        set_soft_vs_soft,
+        dim=isosurface_count,
+        inputs=[
+            hydro_batch.is_soft,
+            isosurface_batch.body_a_idx,
+            isosurface_batch.body_b_idx,
+        ],
+        outputs=[isosurface_batch.soft_vs_soft],
+    )

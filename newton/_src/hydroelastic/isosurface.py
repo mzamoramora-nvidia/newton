@@ -597,6 +597,119 @@ def warn_degenerate_plane(plane_normal: wp.vec3, tid: wp.int32):
     return False
 
 
+# @wp.kernel
+# def batch_compute_contact_surface_and_wrenches_from_bvh(
+#     body_q: wp.array(dtype=wp.transform),
+#     body_qd: wp.array(dtype=wp.spatial_vector),
+#     body_a_idx: wp.array(dtype=wp.int32),
+#     body_b_idx: wp.array(dtype=wp.int32),
+#     points: wp.array(dtype=wp.vec3f),
+#     elements: wp.array(dtype=wp.int32),
+#     element_strides: wp.array(dtype=wp.int32),
+#     queries_with_mesh_a: wp.array(dtype=wp.bool),
+#     bvh_ids: wp.array(dtype=wp.uint64),
+#     default_tet_transform_inv: wp.array(dtype=wp.mat44),
+#     p: wp.array(dtype=wp.float32),
+#     grad_p: wp.array(dtype=wp.vec3f),
+#     h_combined: wp.array(dtype=wp.float32),  # Combined hydroelastic modulus
+#     h_mesh: wp.array(dtype=wp.float32),
+#     d_combined: wp.array(dtype=wp.float32),  # Combined hunt_crossley_dissipation
+#     d_mesh: wp.array(dtype=wp.float32),
+#     mu_static_combined: wp.array(dtype=wp.float32),
+#     mu_static_mesh: wp.array(dtype=wp.float32),
+#     mu_dynamic_combined: wp.array(dtype=wp.float32),
+#     mu_dynamic_mesh: wp.array(dtype=wp.float32),
+#     tri_normals: wp.array(dtype=wp.vec3f),
+#     soft_vs_soft: wp.array(dtype=wp.int32),
+#     quadrature_weights: wp.array(dtype=wp.float32),
+#     quadrature_coords: wp.array(dtype=wp.vec3f),
+#     twist_convention: int,
+#     # outputs
+#     element_pairs_batch: wp.array(dtype=wp.vec2i),
+#     cp_vcounts_batch: wp.array(dtype=wp.int32),
+#     cp_vertices_batch: wp.array(dtype=wp.vec3f),
+#     cp_centroids_batch: wp.array(dtype=wp.vec3f),
+#     cp_penetration_batch: wp.array(dtype=wp.vec4f),
+#     cp_normals_batch: wp.array(dtype=wp.vec3f),
+#     centroid_pressure_batch: wp.array(dtype=wp.float32),
+#     force_batch: wp.array(dtype=wp.vec3f),
+#     torque_a_batch: wp.array(dtype=wp.vec3f),
+#     torque_b_batch: wp.array(dtype=wp.vec3f),
+#     torque_a_body_batch: wp.array(dtype=wp.vec3f),
+#     torque_b_body_batch: wp.array(dtype=wp.vec3f),
+#     force_n_batch: wp.array(dtype=wp.vec3f),
+#     force_t_batch: wp.array(dtype=wp.vec3f),
+# ):
+#     surf_id, tid = wp.tid()
+
+#     # Get flag for soft vs soft surface
+#     soft_vs_soft_surface = soft_vs_soft[surf_id]
+
+#     # Get scalar values for input variables
+#     body_a = body_a_idx[surf_id]
+#     body_b = body_b_idx[surf_id]
+
+#     element_a_stride = element_strides[body_a]
+#     element_b_stride = element_strides[body_b]
+
+#     query_with_mesh_a = queries_with_mesh_a[surf_id]
+
+#     bvh_id = bvh_ids[body_a]
+#     if not query_with_mesh_a:
+#         bvh_id = bvh_ids[body_b]
+
+#     # Get scalar values for material properties
+#     h = h_combined[surf_id]
+#     h_a = h_mesh[body_a]
+#     h_b = h_mesh[body_b]
+
+#     d = d_combined[surf_id]
+#     d_a = d_mesh[body_a]
+#     d_b = d_mesh[body_b]
+
+#     mu_static = mu_static_combined[surf_id]
+#     mu_static_a = mu_static_mesh[body_a]
+#     mu_static_b = mu_static_mesh[body_b]
+
+#     mu_dynamic = mu_dynamic_combined[surf_id]
+#     mu_dynamic_a = mu_dynamic_mesh[body_a]
+#     mu_dynamic_b = mu_dynamic_mesh[body_b]
+
+#     # Get array views for input variables
+#     points_a = points[body_a]
+#     points_b = points[body_b]
+
+#     elements_a = elements[body_a]
+#     elements_b = elements[body_a]
+
+#     default_tet_transform_inv_a = default_tet_transform_inv[body_a]
+#     default_tet_transform_inv_b = default_tet_transform_inv[body_b]
+
+#     p_a = p[body_a]
+#     p_b = p[body_b]
+
+#     grad_p_a = grad_p[body_a]
+#     grad_p_b = grad_p[body_b]
+
+#     tri_normals_b = tri_normals[body_b]
+
+#     # Get array views for output arrays
+#     element_pairs = element_pairs_batch[surf_id]
+#     cp_vcounts = cp_vcounts_batch[surf_id]
+#     cp_vertices = cp_vertices_batch[surf_id]
+#     cp_centroids = cp_centroids_batch[surf_id]
+#     cp_penetration = cp_penetration_batch[surf_id]
+#     cp_normals = cp_normals_batch[surf_id]
+#     centroid_pressure = centroid_pressure_batch[surf_id]
+#     force = force_batch[surf_id]
+#     torque_a = torque_a_batch[surf_id]
+#     torque_b = torque_b_batch[surf_id]
+#     torque_a_body = torque_a_body_batch[surf_id]
+#     torque_b_body = torque_b_body_batch[surf_id]
+#     force_n = force_n_batch[surf_id]
+#     force_t = force_t_batch[surf_id]
+
+
 @wp.kernel
 def compute_contact_surface_and_wrenches_from_bvh(
     body_q: wp.array(dtype=wp.transform),

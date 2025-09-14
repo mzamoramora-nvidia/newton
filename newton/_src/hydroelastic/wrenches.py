@@ -77,6 +77,29 @@ def compute_stribeck_friction_coefficient(
         return mu_static * step5(v)
 
 
+@wp.kernel
+def combine_material_properties(
+    body_a_idx: wp.array(dtype=wp.int32),
+    body_b_idx: wp.array(dtype=wp.int32),
+    h: wp.array(dtype=wp.float32),
+    d: wp.array(dtype=wp.float32),
+    mu_static: wp.array(dtype=wp.float32),
+    mu_dynamic: wp.array(dtype=wp.float32),
+    # outputs
+    h_combined: wp.array(dtype=wp.float32),
+    d_combined: wp.array(dtype=wp.float32),
+    mu_static_combined: wp.array(dtype=wp.float32),
+    mu_dynamic_combined: wp.array(dtype=wp.float32),
+):
+    tid = wp.tid()
+    body_a = body_a_idx[tid]
+    body_b = body_b_idx[tid]
+    h_combined[tid] = compute_combined_hydroelastic_modulus(h[body_a], h[body_b])
+    d_combined[tid] = compute_combined_dissipation(h[body_a], h[body_b], d[body_a], d[body_b])
+    mu_static_combined[tid] = compute_combined_friction_coefficient(mu_static[body_a], mu_static[body_b])
+    mu_dynamic_combined[tid] = compute_combined_friction_coefficient(mu_dynamic[body_a], mu_dynamic[body_b])
+
+
 @wp.func
 def compute_wrench_fun(
     pair_idx: wp.int32,

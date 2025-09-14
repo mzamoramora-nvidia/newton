@@ -40,6 +40,7 @@ import newton._src.hydroelastic.imgui as hydroelastic_imgui
 import newton._src.hydroelastic.isosurface as hydroelastic_isosurface
 import newton._src.hydroelastic.loaders as hydroelastic_loaders
 import newton._src.hydroelastic.render_utils as hydroelastic_render_utils
+import newton._src.hydroelastic.types as hydroelastic_types
 import newton._src.hydroelastic.utils as hydroelastic_utils
 import newton.examples
 import newton.utils
@@ -122,6 +123,18 @@ class Example:
         max_geom_pairs = 512 * 10
         self.contacts.num_isosurfaces = hydroelastic_loaders.init_isosurfaces(
             self.model.collision_pairs, self.contacts.isosurface, self.model.hydro_mesh, max_geom_pairs, self.device
+        )
+
+        # ==============================================================================================================
+        # Setup hydroelastic batch
+        self.model.hydro_batch = hydroelastic_types.HydroelasticBatch()
+        hydroelastic_loaders.init_hydro_batch(self.model.hydro_mesh, self.model.hydro_batch)
+
+        # ==============================================================================================================
+        # Setup isosurface batch
+        self.contacts.isosurface_batch = hydroelastic_types.IsosurfaceBatch()
+        hydroelastic_loaders.init_isosurface_batch(
+            self.contacts.isosurface_batch, self.model.collision_pairs, self.model.hydro_batch, max_geom_pairs
         )
 
         # ==============================================================================================================
