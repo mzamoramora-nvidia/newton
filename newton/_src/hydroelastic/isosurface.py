@@ -659,11 +659,11 @@ def batch_compute_contact_surface_and_wrenches_from_bvh(
 
     if query_with_mesh_a:
         if tid >= elements_count_a:
-            wp.printf("tid >= elements_count_a: %d, %d\n", tid, elements_count_a)
+            # wp.printf("tid >= elements_count_a: %d, %d\n", tid, elements_count_a)
             return
     else:
         if tid >= elements_count_b:
-            wp.printf("tid >= elements_count_b: %d, %d\n", tid, elements_count_b)
+            # wp.printf("tid >= elements_count_b: %d, %d\n", tid, elements_count_b)
             return
 
     # Get flag for soft vs soft surface
@@ -983,11 +983,11 @@ def batch_compute_contact_surface_and_wrenches_from_pairs(
 
     if query_with_mesh_a:
         if tid >= elements_count_a:
-            wp.printf("tid >= elements_count_a: %d, %d\n", tid, elements_count_a)
+            # wp.printf("tid >= elements_count_a: %d, %d\n", tid, elements_count_a)
             return
     else:
         if tid >= elements_count_b:
-            wp.printf("tid >= elements_count_b: %d, %d\n", tid, elements_count_b)
+            # wp.printf("tid >= elements_count_b: %d, %d\n", tid, elements_count_b)
             return
 
     # Get flag for soft vs soft surface
