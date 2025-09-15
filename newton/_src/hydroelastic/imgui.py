@@ -140,7 +140,7 @@ class HydroelasticImGuiManager:
             return
 
         if not hasattr(self.example.contacts, "isosurface"):
-            print("example.contacts.isosurface not found")
+            # print("example.contacts.isosurface not found")
             return
 
         if self.example.contacts.isosurface is None:

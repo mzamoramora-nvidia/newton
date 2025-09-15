@@ -97,6 +97,7 @@ def reset_contact_polygon(contact_polygon):
 
 @wp.struct
 class HydroelasticBatch:
+    max_elements_count: wp.int32
     default_points: wp.array(dtype=wp.vec3f)
     indices: wp.array(dtype=wp.int32)
     elements_count: wp.array(dtype=wp.int32)
@@ -152,8 +153,18 @@ class IsosurfaceBatch:
     mu_dynamic_combined: wp.array(dtype=wp.float32)
 
     query_with_mesh_a: wp.array(dtype=wp.bool)
-
     soft_vs_soft: wp.array(dtype=wp.bool)
+
+    quadrature_weights: wp.array(dtype=wp.float32)
+    quadrature_coords: wp.array(dtype=wp.vec3f)
+
+    force: wp.array(dtype=wp.vec3f)
+    torque_a: wp.array(dtype=wp.vec3f)
+    torque_b: wp.array(dtype=wp.vec3f)
+    torque_a_body: wp.array(dtype=wp.vec3f)
+    torque_b_body: wp.array(dtype=wp.vec3f)
+    force_n: wp.array(dtype=wp.vec3f)
+    force_t: wp.array(dtype=wp.vec3f)
 
 
 class Isosurface:

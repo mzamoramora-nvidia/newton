@@ -615,6 +615,7 @@ def init_hydro_batch(hydro_objects, hydro_batch):
         bvh_ids[i] = object.bvh.id
 
     # Initialize the mesh batch.
+    hydro_batch.max_elements_count = wp.int32(max_elements_count)
     hydro_batch.default_points = wp.zeros((meshes_count, max_points_count), dtype=wp.vec3f)
     hydro_batch.indices = wp.zeros((meshes_count, max_indices_count), dtype=wp.int32)
     hydro_batch.elements_count = wp.zeros((meshes_count), dtype=wp.int32)
@@ -658,7 +659,7 @@ def init_hydro_batch(hydro_objects, hydro_batch):
     hydro_batch.mu_static.assign(wp.array(mu_static, dtype=wp.float32))
     hydro_batch.mu_dynamic.assign(wp.array(mu_dynamic, dtype=wp.float32))
 
-    hydro_batch.bvh_ids.assign(wp.array(bvh_ids, dtype=wp.int32))
+    hydro_batch.bvh_ids.assign(wp.array(bvh_ids, dtype=wp.uint64))
 
 
 def init_isosurface_batch(isosurface_batch, collision_pairs, hydro_batch, max_element_pairs=-1):
@@ -700,6 +701,14 @@ def init_isosurface_batch(isosurface_batch, collision_pairs, hydro_batch, max_el
     isosurface_batch.mu_dynamic_combined = wp.zeros(isosurface_count, dtype=wp.float32)
     isosurface_batch.query_with_mesh_a = wp.zeros(isosurface_count, dtype=wp.bool)
     isosurface_batch.soft_vs_soft = wp.zeros(isosurface_count, dtype=wp.bool)
+
+    isosurface_batch.force = wp.zeros((isosurface_count), dtype=wp.vec3f)
+    isosurface_batch.torque_a = wp.zeros((isosurface_count), dtype=wp.vec3f)
+    isosurface_batch.torque_b = wp.zeros((isosurface_count), dtype=wp.vec3f)
+    isosurface_batch.torque_a_body = wp.zeros((isosurface_count), dtype=wp.vec3f)
+    isosurface_batch.torque_b_body = wp.zeros((isosurface_count), dtype=wp.vec3f)
+    isosurface_batch.force_n = wp.zeros((isosurface_count), dtype=wp.vec3f)
+    isosurface_batch.force_t = wp.zeros((isosurface_count), dtype=wp.vec3f)
 
     # ================================================================================================================
     # TODO: Collision pairs should represent mesh ids, not body ids.
@@ -758,3 +767,14 @@ def init_isosurface_batch(isosurface_batch, collision_pairs, hydro_batch, max_el
         ],
         outputs=[isosurface_batch.soft_vs_soft],
     )
+
+    # Quadrature points and weights.
+    isosurface_batch.quadrature_weights = wp.array([1.0], dtype=wp.float32)
+    isosurface_batch.quadrature_coords = wp.array([[1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]], dtype=wp.vec3f)
+
+    # # Second order quadrature rule for triangles.
+    # isosurface_batch.quadrature_weights = wp.array([1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], dtype=wp.float32)
+    # isosurface_batch.quadrature_coords = wp.array(
+    #     [[1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0], [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0], [2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0]],
+    #     dtype=wp.vec3f,
+    # )

@@ -120,35 +120,42 @@ def render_visuals(viewer, state_0, visuals):
 
 
 def render_isosurfaces(viewer, state_0, contacts, editable_vars):
+    vertex_counts = contacts.isosurface_batch.v_counts.numpy()
+    vertices = contacts.isosurface_batch.vertices.numpy()
+    centroids = contacts.isosurface_batch.centroids.numpy()
+    normals = contacts.isosurface_batch.normals.numpy()
+    centroid_pressure = contacts.isosurface_batch.centroid_pressure.numpy()
+    num_isosurfaces = vertex_counts.shape[0]
+
     with wp.ScopedTimer("draw_polygon_normals", print=False):
-        for i in range(len(contacts.isosurface)):
-            # max_polygons_for_rendering = contacts.isosurface[i].geom_pairs.shape[0]
-            max_polygons_for_rendering = 512
+        # max_polygons_for_rendering = contacts.isosurface[i].geom_pairs.shape[0]
+        max_polygons_for_rendering = 512
+        for i in range(num_isosurfaces):
             draw_polygon_normals(
                 viewer,
-                f"/{contacts.isosurface[i].label}",
+                f"/isosurface_batch_normals_{i}",
                 max_polygons_for_rendering,
-                contacts.isosurface[i].contact_polygon.vertex_counts.numpy(),
-                contacts.isosurface[i].contact_polygon.centroids.numpy(),
-                contacts.isosurface[i].contact_polygon.normals.numpy(),
-                contacts.isosurface[i].contact_polygon.centroid_pressure.numpy(),
+                vertex_counts[i],
+                centroids[i],
+                normals[i],
+                centroid_pressure[i],
                 np_vertex_offset=editable_vars.np_vertex_offset,
                 render_normals=editable_vars.render_isosurfaces_normals,
             )
 
     with wp.ScopedTimer("draw_polygon_edges", print=False):
-        for i in range(len(contacts.isosurface)):
+        for i in range(num_isosurfaces):
             # max_polygons_for_rendering = contacts.isosurface[i].geom_pairs.shape[0]
             max_polygons_for_rendering = 512
             draw_polygon_edges(
                 viewer,
-                f"/{contacts.isosurface[i].label}",
+                f"/isosurface_batch_edges_{i}",
                 max_polygons_for_rendering,
-                contacts.isosurface[i].contact_polygon.vertex_counts.numpy(),
-                contacts.isosurface[i].contact_polygon.vertices.numpy(),
-                contacts.isosurface[i].contact_polygon.centroids.numpy(),
-                contacts.isosurface[i].contact_polygon.normals.numpy(),
-                contacts.isosurface[i].contact_polygon.centroid_pressure.numpy(),
+                vertex_counts[i],
+                vertices[i],
+                centroids[i],
+                normals[i],
+                centroid_pressure[i],
                 np_vertex_offset=editable_vars.np_vertex_offset,
                 render_edges=editable_vars.render_isosurfaces_edges,
             )
