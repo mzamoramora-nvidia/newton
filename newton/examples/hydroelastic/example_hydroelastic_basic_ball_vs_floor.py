@@ -83,7 +83,6 @@ class Example:
 
         self.verbose = verbose
         self.viewer = viewer
-        self.viewer._paused = True
 
         self.use_imgui = True  # self.render_mode == RenderMode.OPENGL
         self.up_axis = newton.Axis.Z
@@ -147,7 +146,6 @@ class Example:
         hydroelastic_isosurface.batch_compute_contact_surfaces_and_wrenches(
             self.solver, self.state_0, self.contacts, self.twist_convention
         )
-        wp.synchronize()
 
         # TODO: Find a better place to store this body_f.
         self.body_f = wp.zeros_like(self.state_1.body_f)

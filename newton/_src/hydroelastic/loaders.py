@@ -623,7 +623,7 @@ def init_hydro_batch(hydro_objects, hydro_batch):
 
     hydro_batch.is_soft = wp.zeros((meshes_count), dtype=wp.bool)
 
-    hydro_batch.field = wp.zeros((meshes_count, max_elements_count), dtype=wp.float32)
+    hydro_batch.field = wp.zeros((meshes_count, max_points_count), dtype=wp.float32)
     hydro_batch.field_gradient = wp.zeros((meshes_count, max_elements_count), dtype=wp.vec3f)
     hydro_batch.default_tet_transform_inv = wp.zeros((meshes_count, max_elements_count), dtype=wp.mat44)
 

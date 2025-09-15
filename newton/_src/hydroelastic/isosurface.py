@@ -1747,37 +1747,6 @@ def compute_soft_soft_fun_batch(
     pressure_a = h_a * penetration_extent_a
     warn_potential_overflow_for_pressure(h_a, penetration_extent_a, pair_idx)
     warn_degenerate_pressure(pressure_a, pair_idx)
-    if wp.abs(pressure_a) < 1e-6:
-        wp.printf("pair_idx: %d, p_a_vec: %f, %f, %f, %f\n", pair_idx, p_a_vec.x, p_a_vec.y, p_a_vec.z, p_a_vec.w)
-        wp.printf(
-            "pair_idx: %d, body_a: %d, v_idx_a: %d, %d, %d, %d\n",
-            pair_idx,
-            body_a,
-            vidx_a[0],
-            vidx_a[1],
-            vidx_a[2],
-            vidx_a[3],
-        )
-        wp.printf(
-            "pair_idx: %d, body_b: %d, v_idx_b: %d, %d, %d, %d\n",
-            pair_idx,
-            body_b,
-            vidx_b[0],
-            vidx_b[1],
-            vidx_b[2],
-            vidx_b[3],
-        )
-        # default_tet_transform_inv[body_a, tet_idx_a] * body_q_inv_mat_a
-        # p_a_vec * inv_mat_a
-        # wp.printf("pair_idx: %d, default_tet_transform_inv[body_a, tet_idx_a]: %f, %f, %f, %f\n", pair_idx, default_tet_transform_inv[body_a, tet_idx_a][0, 0], default_tet_transform_inv[body_a, tet_idx_a][0, 1], default_tet_transform_inv[body_a, tet_idx_a][0, 2], default_tet_transform_inv[body_a, tet_idx_a][0, 3])
-        # wp.printf("pair_idx: %d, default_tet_transform_inv[body_a, tet_idx_a]: %f, %f, %f, %f\n", pair_idx, default_tet_transform_inv[body_a, tet_idx_a][1, 0], default_tet_transform_inv[body_a, tet_idx_a][1, 1], default_tet_transform_inv[body_a, tet_idx_a][1, 2], default_tet_transform_inv[body_a, tet_idx_a][1, 3])
-        # wp.printf("pair_idx: %d, default_tet_transform_inv[body_a, tet_idx_a]: %f, %f, %f, %f\n", pair_idx, default_tet_transform_inv[body_a, tet_idx_a][2, 0], default_tet_transform_inv[body_a, tet_idx_a][2, 1], default_tet_transform_inv[body_a, tet_idx_a][2, 2], default_tet_transform_inv[body_a, tet_idx_a][2, 3])
-        # wp.printf("pair_idx: %d, default_tet_transform_inv[body_a, tet_idx_a]: %f, %f, %f, %f\n", pair_idx, default_tet_transform_inv[body_a, tet_idx_a][3, 0], default_tet_transform_inv[body_a, tet_idx_a][3, 1], default_tet_transform_inv[body_a, tet_idx_a][3, 2], default_tet_transform_inv[body_a, tet_idx_a][3, 3])
-        # wp.printf("pair_idx: %d, inv_mat_a: %f, %f, %f, %f\n", pair_idx, inv_mat_a[0, 0], inv_mat_a[0, 1], inv_mat_a[0, 2], inv_mat_a[0, 3])
-        # wp.printf("pair_idx: %d, inv_mat_a: %f, %f, %f, %f\n", pair_idx, inv_mat_a[1, 0], inv_mat_a[1, 1], inv_mat_a[1, 2], inv_mat_a[1, 3])
-        # wp.printf("pair_idx: %d, inv_mat_a: %f, %f, %f, %f\n", pair_idx, inv_mat_a[2, 0], inv_mat_a[2, 1], inv_mat_a[2, 2], inv_mat_a[2, 3])
-        # wp.printf("pair_idx: %d, inv_mat_a: %f, %f, %f, %f\n", pair_idx, inv_mat_a[3, 0], inv_mat_a[3, 1], inv_mat_a[3, 2], inv_mat_a[3, 3])
-        # wp.printf("pair_idx: %d, homogeneous_to_penetration_map_a: %f, %f, %f, %f\n", pair_idx, homogeneous_to_penetration_map_a.x, homogeneous_to_penetration_map_a.y, homogeneous_to_penetration_map_a.z, homogeneous_to_penetration_map_a.w)
 
     # Store results.
     for i in range(cp_vcounts[surf_id, pair_idx]):
@@ -2291,7 +2260,7 @@ def launch_batch_compute_contact_polygons_and_wrenches_from_bvh(
     isosurface_batch.force_n.zero_()
     isosurface_batch.force_t.zero_()
 
-    print("Kernel dims: ", (isosurface_batch.element_pairs.shape[0], objects_batch.max_elements_count))
+    # print("Kernel dims: ", (isosurface_batch.element_pairs.shape[0], objects_batch.max_elements_count))
 
     wp.launch(
         batch_compute_contact_surface_and_wrenches_from_bvh,

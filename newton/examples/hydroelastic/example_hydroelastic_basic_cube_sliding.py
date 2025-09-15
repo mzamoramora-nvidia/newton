@@ -84,7 +84,6 @@ class Example:
 
         self.verbose = verbose
         self.viewer = viewer
-        self.viewer._paused = True
 
         self.use_imgui = True  # self.render_mode == RenderMode.OPENGL
         self.up_axis = newton.Axis.Z

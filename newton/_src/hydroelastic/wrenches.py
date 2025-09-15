@@ -368,18 +368,6 @@ def compute_wrench_fun_simple(
         # Skip zero area triangles.
         # Drake uses 1.0e-14, but we use 1.0e-10 to avoid numerical issues.
         if area < 1.0e-10:
-            wp.printf(
-                "zero area triangle: vertex_a: %f, %f, %f, vertex_b: %f, %f, %f, vertex_c: %f, %f, %f\n",
-                vertex_a[0],
-                vertex_a[1],
-                vertex_a[2],
-                vertex_b[0],
-                vertex_b[1],
-                vertex_b[2],
-                vertex_c[0],
-                vertex_c[1],
-                vertex_c[2],
-            )
             continue
 
         # Make sure the triangle normal is aligned with the normal of the contact polygon.
@@ -394,13 +382,13 @@ def compute_wrench_fun_simple(
             cos_normals = wp.dot(triangle_normal, normal)
             if cos_normals < cos_threshold:
                 # If normals are not aligned after the previous step, it is likely due the triangle being too small.
-                wp.printf(
-                    "may day: normals are not aligned: %f, area: %e, surf_id, pair_idx: %d, %d\n",
-                    cos_normals,
-                    area,
-                    surf_id,
-                    pair_idx,
-                )
+                # wp.printf(
+                #     "may day: normals are not aligned: %f, area: %e, surf_id, pair_idx: %d, %d\n",
+                #     cos_normals,
+                #     area,
+                #     surf_id,
+                #     pair_idx,
+                # )
                 continue
 
         # Integrate triangle.
