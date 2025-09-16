@@ -5,6 +5,78 @@ import newton.viewer
 from newton._src.hydroelastic.types import mat43h
 
 
+@wp.func
+def bourke_color_map_wp_func(low: wp.float32, high: wp.float32, v: wp.float32):
+    c = wp.vec3(1.0, 1.0, 1.0)
+
+    if v < low:
+        v = low
+    if v > high:
+        v = high
+    dv = high - low
+
+    if v < (low + 0.25 * dv):
+        c[0] = 0.0
+        c[1] = 4.0 * (v - low) / dv
+    elif v < (low + 0.5 * dv):
+        c[0] = 0.0
+        c[2] = 1.0 + 4.0 * (low + 0.25 * dv - v) / dv
+    elif v < (low + 0.75 * dv):
+        c[0] = 4.0 * (v - low - 0.5 * dv) / dv
+        c[2] = 0.0
+    else:
+        c[1] = 1.0 + 4.0 * (low + 0.75 * dv - v) / dv
+        c[2] = 0.0
+
+    return c
+
+
+@wp.kernel
+def get_isosurface_normals_data(
+    vertex_counts: wp.array2d(dtype=wp.int32),
+    centroids: wp.array2d(dtype=wp.vec3),
+    normals: wp.array2d(dtype=wp.vec3),
+    pressure_values: wp.array2d(dtype=wp.float32),
+    vertex_offset: wp.vec3,
+    # Outputs.
+    starts: wp.array(dtype=wp.vec3),
+    tips: wp.array(dtype=wp.vec3),
+    colors: wp.array(dtype=wp.vec3),
+):
+    surf_id = wp.tid()
+    num_isosurfaces = centroids.shape[0]
+    max_polygons_for_rendering = wp.int32(starts.shape[0] / num_isosurfaces)
+
+    num_polygons = centroids.shape[1]
+    valid_counter = wp.int32(0)
+    min_pressure = wp.float32(0.0)
+    max_pressure = wp.float32(0.0)
+    # Loop over all polygons to set starts and tips, and to compute min and max pressure.
+    for i in range(num_polygons):
+        if vertex_counts[surf_id, i] > 0:
+            if valid_counter < max_polygons_for_rendering:
+                offset = surf_id * max_polygons_for_rendering
+                starts[offset + valid_counter] = centroids[surf_id, i] + vertex_offset
+                tips[offset + valid_counter] = starts[offset + valid_counter] + 0.01 * normals[surf_id, i]
+                valid_counter += 1
+
+            min_pressure = wp.min(min_pressure, pressure_values[surf_id, i])
+            max_pressure = wp.max(max_pressure, pressure_values[surf_id, i])
+
+    # Loop over all polygons to set colors, with early exit.
+    valid_counter = wp.int32(0)
+    for i in range(num_polygons):
+        if vertex_counts[surf_id, i] > 0:
+            offset = surf_id * max_polygons_for_rendering
+            colors[offset + valid_counter] = bourke_color_map_wp_func(
+                min_pressure, max_pressure, pressure_values[surf_id, i]
+            )
+            valid_counter += 1
+
+        if valid_counter > max_polygons_for_rendering:
+            break
+
+
 @wp.kernel
 def compute_tet_mesh_edges(
     body_q: wp.array(dtype=wp.transform),
@@ -127,6 +199,24 @@ def render_isosurfaces(viewer, state_0, contacts, editable_vars):
     centroid_pressure = contacts.isosurface_batch.centroid_pressure.numpy()
     num_isosurfaces = vertex_counts.shape[0]
 
+    if not hasattr(viewer, "isosurface_data"):
+        max_polygons_for_rendering = 512
+        num_isosurfaces = vertex_counts.shape[0]
+        viewer.isosurface_data = {}
+        viewer.isosurface_data["normals"] = {}
+        viewer.isosurface_data["normals"]["starts"] = wp.zeros(
+            num_isosurfaces * max_polygons_for_rendering, dtype=wp.vec3
+        )
+        viewer.isosurface_data["normals"]["tips"] = wp.zeros(
+            num_isosurfaces * max_polygons_for_rendering, dtype=wp.vec3
+        )
+        viewer.isosurface_data["normals"]["colors"] = wp.zeros(
+            num_isosurfaces * max_polygons_for_rendering, dtype=wp.vec3
+        )
+        viewer.isosurface_data["normals"]["radii"] = wp.full(
+            num_isosurfaces * max_polygons_for_rendering, value=0.00125, dtype=wp.float32
+        )
+
     with wp.ScopedTimer("draw_polygon_normals", print=False):
         # max_polygons_for_rendering = contacts.isosurface[i].geom_pairs.shape[0]
         max_polygons_for_rendering = 512
@@ -159,6 +249,38 @@ def render_isosurfaces(viewer, state_0, contacts, editable_vars):
                 np_vertex_offset=editable_vars.np_vertex_offset,
                 render_edges=editable_vars.render_isosurfaces_edges,
             )
+
+
+def render_isosurfaces_batch(viewer, state_0, contacts, editable_vars):
+    if not hasattr(viewer, "isosurface_data"):
+        max_polygons_for_rendering = 512
+        num_isosurfaces = contacts.isosurface_batch.v_counts.shape[0]
+        normals_size = num_isosurfaces * max_polygons_for_rendering
+        viewer.isosurface_data = {}
+        viewer.isosurface_data["normals"] = {}
+        viewer.isosurface_data["normals"]["lines_name"] = "/isosurface_batch_normals"
+        viewer.isosurface_data["normals"]["points_name"] = "/isosurface_batch_normals_tips"
+        viewer.isosurface_data["normals"]["starts"] = wp.zeros(normals_size, dtype=wp.vec3)
+        viewer.isosurface_data["normals"]["tips"] = wp.zeros(normals_size, dtype=wp.vec3)
+        viewer.isosurface_data["normals"]["colors"] = wp.zeros(normals_size, dtype=wp.vec3)
+        viewer.isosurface_data["normals"]["radii"] = wp.full(normals_size, value=0.00125, dtype=wp.float32)
+
+    # ================================
+    # Update drawing data
+    update_drawing_data_for_polygon_normals_batch(
+        viewer,
+        contacts.isosurface_batch,
+        editable_vars.np_vertex_offset,
+        editable_vars.render_isosurfaces_normals,
+    )
+
+    wp.synchronize()
+    # ================================
+    with wp.ScopedTimer("draw_polygon_normals", print=False):
+        draw_polygon_normals_batch(
+            viewer,
+            editable_vars.render_isosurfaces_normals,
+        )
 
 
 def draw_polygon_normals(
@@ -211,6 +333,7 @@ def draw_polygon_normals(
         ends=valid_tips_wp,
         colors=colors_wp,
         width=0.0005,
+        hidden=not render_normals,
     )
 
     viewer.log_points(
@@ -218,6 +341,79 @@ def draw_polygon_normals(
         points=valid_tips_wp,
         radii=tips_radii_wp,
         colors=colors_wp,
+        hidden=not render_normals,
+    )
+
+
+def check_if_polygon_normals_should_be_drawn(viewer, render_normals, lines_name, points_name):
+    normals_exists = False
+    if isinstance(viewer, newton.viewer.ViewerGL):
+        normals_exists = lines_name in viewer.lines
+
+    if not normals_exists and not render_normals:
+        return False
+
+    return True
+
+
+def update_drawing_data_for_polygon_normals_batch(
+    viewer,
+    isosurface_batch,
+    np_vertex_offset,
+    render_normals,
+):
+    lines_name = viewer.isosurface_data["normals"]["lines_name"]
+    points_name = viewer.isosurface_data["normals"]["points_name"]
+    if not check_if_polygon_normals_should_be_drawn(viewer, render_normals, lines_name, points_name):
+        return
+
+    viewer.isosurface_data["normals"]["starts"].zero_()
+    viewer.isosurface_data["normals"]["tips"].zero_()
+    viewer.isosurface_data["normals"]["colors"].zero_()
+    if render_normals:
+        vertex_offset = wp.vec3(np_vertex_offset)
+        wp.launch(
+            get_isosurface_normals_data,
+            dim=isosurface_batch.centroids.shape[0],
+            inputs=[
+                isosurface_batch.v_counts,
+                isosurface_batch.centroids,
+                isosurface_batch.normals,
+                isosurface_batch.centroid_pressure,
+                vertex_offset,
+            ],
+            outputs=[
+                viewer.isosurface_data["normals"]["starts"],
+                viewer.isosurface_data["normals"]["tips"],
+                viewer.isosurface_data["normals"]["colors"],
+            ],
+        )
+
+
+def draw_polygon_normals_batch(
+    viewer,
+    render_normals,
+):
+    lines_name = viewer.isosurface_data["normals"]["lines_name"]
+    points_name = viewer.isosurface_data["normals"]["points_name"]
+    if not check_if_polygon_normals_should_be_drawn(viewer, render_normals, lines_name, points_name):
+        return
+
+    viewer.log_lines(
+        name=lines_name,
+        starts=viewer.isosurface_data["normals"]["starts"],
+        ends=viewer.isosurface_data["normals"]["tips"],
+        colors=viewer.isosurface_data["normals"]["colors"],
+        width=0.0005,
+        hidden=not render_normals,
+    )
+
+    viewer.log_points(
+        name=points_name,
+        points=viewer.isosurface_data["normals"]["tips"],
+        radii=viewer.isosurface_data["normals"]["radii"],
+        colors=viewer.isosurface_data["normals"]["colors"],
+        hidden=not render_normals,
     )
 
 

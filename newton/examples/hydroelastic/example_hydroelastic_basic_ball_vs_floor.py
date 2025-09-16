@@ -284,7 +284,7 @@ class Example:
         self.viewer.log_state(self.state_0)
         # #self.render_forces()
         # #self.render_visuals()
-        # #self.render_isosurface()
+        self.render_isosurface()
         self.viewer.end_frame()
 
         # self.plot()
@@ -444,7 +444,7 @@ class Example:
         # hydroelastic_render_utils.render_visuals(self.viewer, self.state_0, self.visuals,)
 
     def render_isosurface(self):
-        hydroelastic_render_utils.render_isosurfaces(
+        hydroelastic_render_utils.render_isosurfaces_batch(
             self.viewer,
             self.state_0,
             self.contacts,

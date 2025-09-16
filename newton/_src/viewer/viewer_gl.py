@@ -309,6 +309,7 @@ class ViewerGL(ViewerBase):
             self.lines[name] = LinesGL(max_lines, self.device, hidden=hidden)
 
         self.lines[name].update(starts, ends, colors)
+        self.lines[name].hidden = hidden
 
     def log_points(self, name, points, radii, colors, hidden=False):
         """
