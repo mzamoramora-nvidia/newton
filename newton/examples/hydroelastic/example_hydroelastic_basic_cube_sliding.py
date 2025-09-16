@@ -157,6 +157,10 @@ class Example:
             self.viewer.fps = self.fps
             self.viewer.stage.SetFramesPerSecond(self.fps)
 
+        hydroelastic_render_utils.init_isosurface_data_for_rendering(
+            self.viewer, self.contacts, max_polygons_for_rendering=1024
+        )
+
         # ==============================================================================================================
         # Setup data history and figures for plotting
         self.data_history = []
@@ -469,12 +473,13 @@ class Example:
         # hydroelastic_render_utils.render_visuals(self.viewer, self.state_0, self.visuals,)
 
     def render_isosurface(self):
-        hydroelastic_render_utils.render_isosurfaces(
-            self.viewer,
-            self.state_0,
-            self.contacts,
-            self.editable_vars,
-        )
+        # hydroelastic_render_utils.render_isosurfaces(
+        #     self.viewer,
+        #     self.state_0,
+        #     self.contacts,
+        #     self.editable_vars,
+        # )
+        hydroelastic_render_utils.render_isosurfaces_batch(self.viewer, self.state_0, self.contacts, self.editable_vars)
 
     def setup_imgui(self):
         # Initialize ImGui manager

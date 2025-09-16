@@ -78,6 +78,68 @@ def get_isosurface_normals_data(
 
 
 @wp.kernel
+def get_isosurface_edges_data(
+    vertex_counts: wp.array2d(dtype=wp.int32),
+    vertices: wp.array2d(dtype=wp.vec3),
+    centroids: wp.array2d(dtype=wp.vec3),
+    pressure_values: wp.array2d(dtype=wp.float32),
+    vertex_offset: wp.vec3,
+    # Outputs.
+    starts: wp.array(dtype=wp.vec3),
+    ends: wp.array(dtype=wp.vec3),
+    colors: wp.array(dtype=wp.vec3),
+):
+    surf_id = wp.tid()
+    num_isosurfaces = centroids.shape[0]
+    max_vertices_per_isosurface = wp.int32(starts.shape[0] / num_isosurfaces)
+
+    num_polygons = centroids.shape[1]
+    valid_counter = wp.int32(0)
+    min_pressure = wp.float32(0.0)
+    max_pressure = wp.float32(0.0)
+    for i in range(num_polygons):
+        offset = surf_id * max_vertices_per_isosurface
+        v_count = vertex_counts[surf_id, i]
+        if v_count > 0:
+            if 2 * v_count + valid_counter < max_vertices_per_isosurface:
+                for j in range(v_count):
+                    v_idx = 8 * i + j
+
+                    # Edge between centroid and vertex.
+                    starts[offset + valid_counter] = centroids[surf_id, i] + vertex_offset
+                    ends[offset + valid_counter] = vertices[surf_id, v_idx] + vertex_offset
+                    valid_counter += 1
+
+                    # Edge between vertex and vertex.
+                    v_idx_next = 8 * i + (j + 1) % v_count
+                    starts[offset + valid_counter] = vertices[surf_id, v_idx] + vertex_offset
+                    ends[offset + valid_counter] = vertices[surf_id, v_idx_next] + vertex_offset
+                    valid_counter += 1
+
+            min_pressure = wp.min(min_pressure, pressure_values[surf_id, i])
+            max_pressure = wp.max(max_pressure, pressure_values[surf_id, i])
+
+    # Loop over all polygons to set colors, with early exit.
+    valid_counter = wp.int32(0)
+    for i in range(num_polygons):
+        offset = surf_id * max_vertices_per_isosurface
+        v_count = vertex_counts[surf_id, i]
+        if v_count > 0:
+            if 2 * v_count + valid_counter < max_vertices_per_isosurface:
+                # Set same color for all edges of the polygon.
+                color = bourke_color_map_wp_func(min_pressure, max_pressure, pressure_values[surf_id, i])
+                for _ in range(v_count):
+                    colors[offset + valid_counter] = color
+                    valid_counter += 1
+
+                    colors[offset + valid_counter] = color
+                    valid_counter += 1
+
+            if valid_counter > max_vertices_per_isosurface:
+                break
+
+
+@wp.kernel
 def compute_tet_mesh_edges(
     body_q: wp.array(dtype=wp.transform),
     body_id: wp.int32,
@@ -199,24 +261,6 @@ def render_isosurfaces(viewer, state_0, contacts, editable_vars):
     centroid_pressure = contacts.isosurface_batch.centroid_pressure.numpy()
     num_isosurfaces = vertex_counts.shape[0]
 
-    if not hasattr(viewer, "isosurface_data"):
-        max_polygons_for_rendering = 512
-        num_isosurfaces = vertex_counts.shape[0]
-        viewer.isosurface_data = {}
-        viewer.isosurface_data["normals"] = {}
-        viewer.isosurface_data["normals"]["starts"] = wp.zeros(
-            num_isosurfaces * max_polygons_for_rendering, dtype=wp.vec3
-        )
-        viewer.isosurface_data["normals"]["tips"] = wp.zeros(
-            num_isosurfaces * max_polygons_for_rendering, dtype=wp.vec3
-        )
-        viewer.isosurface_data["normals"]["colors"] = wp.zeros(
-            num_isosurfaces * max_polygons_for_rendering, dtype=wp.vec3
-        )
-        viewer.isosurface_data["normals"]["radii"] = wp.full(
-            num_isosurfaces * max_polygons_for_rendering, value=0.00125, dtype=wp.float32
-        )
-
     with wp.ScopedTimer("draw_polygon_normals", print=False):
         # max_polygons_for_rendering = contacts.isosurface[i].geom_pairs.shape[0]
         max_polygons_for_rendering = 512
@@ -251,20 +295,33 @@ def render_isosurfaces(viewer, state_0, contacts, editable_vars):
             )
 
 
-def render_isosurfaces_batch(viewer, state_0, contacts, editable_vars):
-    if not hasattr(viewer, "isosurface_data"):
-        max_polygons_for_rendering = 512
-        num_isosurfaces = contacts.isosurface_batch.v_counts.shape[0]
-        normals_size = num_isosurfaces * max_polygons_for_rendering
-        viewer.isosurface_data = {}
-        viewer.isosurface_data["normals"] = {}
-        viewer.isosurface_data["normals"]["lines_name"] = "/isosurface_batch_normals"
-        viewer.isosurface_data["normals"]["points_name"] = "/isosurface_batch_normals_tips"
-        viewer.isosurface_data["normals"]["starts"] = wp.zeros(normals_size, dtype=wp.vec3)
-        viewer.isosurface_data["normals"]["tips"] = wp.zeros(normals_size, dtype=wp.vec3)
-        viewer.isosurface_data["normals"]["colors"] = wp.zeros(normals_size, dtype=wp.vec3)
-        viewer.isosurface_data["normals"]["radii"] = wp.full(normals_size, value=0.00125, dtype=wp.float32)
+def init_isosurface_data_for_rendering(viewer, contacts, max_polygons_for_rendering=512):
+    if hasattr(viewer, "isosurface_data"):
+        return
 
+    num_isosurfaces = contacts.isosurface_batch.v_counts.shape[0]
+    normals_size = num_isosurfaces * max_polygons_for_rendering
+    edges_size = num_isosurfaces * max_polygons_for_rendering * 16
+
+    viewer.isosurface_data = {}
+    # Normals
+    viewer.isosurface_data["normals"] = {}
+    viewer.isosurface_data["normals"]["lines_name"] = "/isosurface_batch_normals"
+    viewer.isosurface_data["normals"]["points_name"] = "/isosurface_batch_normals_tips"
+    viewer.isosurface_data["normals"]["starts"] = wp.zeros(normals_size, dtype=wp.vec3)
+    viewer.isosurface_data["normals"]["tips"] = wp.zeros(normals_size, dtype=wp.vec3)
+    viewer.isosurface_data["normals"]["colors"] = wp.zeros(normals_size, dtype=wp.vec3)
+    viewer.isosurface_data["normals"]["radii"] = wp.full(normals_size, value=0.00125, dtype=wp.float32)
+
+    # Edges
+    viewer.isosurface_data["edges"] = {}
+    viewer.isosurface_data["edges"]["lines_name"] = "/isosurface_batch_edges"
+    viewer.isosurface_data["edges"]["starts"] = wp.zeros(edges_size, dtype=wp.vec3)
+    viewer.isosurface_data["edges"]["ends"] = wp.zeros(edges_size, dtype=wp.vec3)
+    viewer.isosurface_data["edges"]["colors"] = wp.zeros(edges_size, dtype=wp.vec3)
+
+
+def render_isosurfaces_batch(viewer, state_0, contacts, editable_vars):
     # ================================
     # Update drawing data
     update_drawing_data_for_polygon_normals_batch(
@@ -274,12 +331,27 @@ def render_isosurfaces_batch(viewer, state_0, contacts, editable_vars):
         editable_vars.render_isosurfaces_normals,
     )
 
-    wp.synchronize()
+    update_drawing_data_for_polygon_edges_batch(
+        viewer,
+        contacts.isosurface_batch,
+        editable_vars.np_vertex_offset,
+        editable_vars.render_isosurfaces_edges,
+    )
+
+    if editable_vars.render_isosurfaces_normals or editable_vars.render_isosurfaces_edges:
+        wp.synchronize()
+
     # ================================
     with wp.ScopedTimer("draw_polygon_normals", print=False):
         draw_polygon_normals_batch(
             viewer,
             editable_vars.render_isosurfaces_normals,
+        )
+
+    with wp.ScopedTimer("draw_polygon_edges", print=False):
+        draw_polygon_edges_batch(
+            viewer,
+            editable_vars.render_isosurfaces_edges,
         )
 
 
@@ -414,6 +486,68 @@ def draw_polygon_normals_batch(
         radii=viewer.isosurface_data["normals"]["radii"],
         colors=viewer.isosurface_data["normals"]["colors"],
         hidden=not render_normals,
+    )
+
+
+def check_if_polygon_edges_should_be_drawn(viewer, render_edges, edges_name):
+    edges_exists = False
+    if isinstance(viewer, newton.viewer.ViewerGL):
+        edges_exists = edges_name in viewer.lines
+
+    if not edges_exists and not render_edges:
+        return False
+
+    return True
+
+
+def update_drawing_data_for_polygon_edges_batch(
+    viewer,
+    isosurface_batch,
+    np_vertex_offset,
+    render_edges,
+):
+    edges_name = viewer.isosurface_data["edges"]["lines_name"]
+    if not check_if_polygon_edges_should_be_drawn(viewer, render_edges, edges_name):
+        return
+
+    viewer.isosurface_data["edges"]["starts"].zero_()
+    viewer.isosurface_data["edges"]["ends"].zero_()
+    viewer.isosurface_data["edges"]["colors"].zero_()
+    if render_edges:
+        vertex_offset = wp.vec3(np_vertex_offset)
+        wp.launch(
+            get_isosurface_edges_data,
+            dim=isosurface_batch.centroids.shape[0],
+            inputs=[
+                isosurface_batch.v_counts,
+                isosurface_batch.vertices,
+                isosurface_batch.centroids,
+                isosurface_batch.centroid_pressure,
+                vertex_offset,
+            ],
+            outputs=[
+                viewer.isosurface_data["edges"]["starts"],
+                viewer.isosurface_data["edges"]["ends"],
+                viewer.isosurface_data["edges"]["colors"],
+            ],
+        )
+
+
+def draw_polygon_edges_batch(
+    viewer,
+    render_edges,
+):
+    edges_name = viewer.isosurface_data["edges"]["lines_name"]
+    if not check_if_polygon_edges_should_be_drawn(viewer, render_edges, edges_name):
+        return
+
+    viewer.log_lines(
+        name=edges_name,
+        starts=viewer.isosurface_data["edges"]["starts"],
+        ends=viewer.isosurface_data["edges"]["ends"],
+        colors=viewer.isosurface_data["edges"]["colors"],
+        width=0.0005,
+        # hidden=not render_edges,
     )
 
 
