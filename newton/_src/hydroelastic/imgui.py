@@ -121,6 +121,13 @@ class HydroelasticImGuiManager:
 
         imgui.separator()
 
+        imgui.set_next_item_open(True, imgui.Cond_.appearing)
+        if imgui.collapsing_header("render_tet_meshes"):
+            _, editable_vars.render_tet_mesh_edges = imgui.checkbox(
+                "render_tet_mesh_edges", editable_vars.render_tet_mesh_edges
+            )
+        imgui.separator()
+
         _, editable_vars.plot_flag = imgui.checkbox("plot_flag", editable_vars.plot_flag)
 
         changed, value = imgui.input_float("force_scale", editable_vars.force_scale)
@@ -133,7 +140,7 @@ class HydroelasticImGuiManager:
             return
 
         if not hasattr(self.example.contacts, "isosurface"):
-            print("example.contacts.isosurface not found")
+            # print("example.contacts.isosurface not found")
             return
 
         if self.example.contacts.isosurface is None:

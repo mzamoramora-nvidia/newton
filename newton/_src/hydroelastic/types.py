@@ -1,5 +1,3 @@
-from enum import Enum
-
 import numpy as np
 import warp as wp
 
@@ -16,12 +14,20 @@ mat43h = wp.types.matrix(shape=(4, 3), dtype=hydroelastic_type)
 
 
 @wp.struct
-class VolumeMesh:
+class HydroelasticMesh:
     default_points: wp.array(dtype=wp.vec3f)
-    indices: wp.array(dtype=wp.vec4i)
+    indices: wp.array(dtype=wp.int32)
+    elements_count: wp.int32
+    elements_stride: wp.int32
+
+    # Only used for soft meshes (Tetrahedral meshes).
     field: wp.array(dtype=wp.float32)
     field_gradient: wp.array(dtype=wp.vec3f)
     default_tet_transform_inv: wp.array(dtype=wp.mat44)
+
+    # Only used for rigid meshes (Triangular meshes).
+    normals: wp.array(dtype=wp.vec3f)
+
     # The folllowing fields are experimental or for debugging purposes.
     edges: wp.array(dtype=wp.vec2i)
     is_on_surface: wp.array(dtype=wp.bool)
@@ -33,9 +39,10 @@ class LumpedProperties:
     inertia: wp.mat33
 
 
-class HydroelasticMesh:
+class HydroelasticObject:
     def __init__(self):
-        self.volume_mesh = VolumeMesh()
+        self.mesh = HydroelasticMesh()
+        self.bvh = None
         self.surface_mesh = None
         self.is_soft = True
         self.hydroelastic_modulus = wp.float32(1.0e3)
@@ -48,105 +55,76 @@ class HydroelasticMesh:
         self.compute_mesh_density = False
         self.mass = 0.0
         self.density = 1000.0
+        self.body_id = -1
+        self.update_aabb = True
 
 
 @wp.struct
-class ContactPolygon:
-    vertex_counts: wp.array(dtype=wp.int32)
-    vertices: wp.array(dtype=wp.vec3f)
-    centroids: wp.array(dtype=wp.vec3f)
-    # TODO: Find a better name for this.
-    # The pressure is computed as:
-    # homogeneous_R = [R; 1]
-    # cartesian_to_penetration = field_values * inv(transformation_matrix)
-    # penetration_extent = dot(cartesian_to_penetration, homogeneous_R)
-    # p = hydroelastic_modulus * penetration_extent
-    cartesian_to_penetration: wp.array(dtype=wp.vec4f)
-    normals: wp.array(dtype=wp.vec3f)
-    centroid_pressure: wp.array(dtype=wp.float32)
+class HydroelasticBatch:
+    max_elements_count: wp.int32
+    default_points: wp.array2d(dtype=wp.vec3f)
+    indices: wp.array2d(dtype=wp.int32)
+    elements_count: wp.array(dtype=wp.int32)
+    elements_stride: wp.array(dtype=wp.int32)
+
+    is_soft: wp.array(dtype=wp.bool)
+
+    # Only used for soft meshes (Tetrahedral meshes).
+    field: wp.array2d(dtype=wp.float32)
+    field_gradient: wp.array2d(dtype=wp.vec3f)
+    default_tet_transform_inv: wp.array2d(dtype=wp.mat44)
+
+    # Only used for rigid meshes (Triangular meshes).
+    normals: wp.array2d(dtype=wp.vec3f)
+
+    # Material properties
+    h: wp.array(dtype=wp.float32)
+    d: wp.array(dtype=wp.float32)
+    mu_static: wp.array(dtype=wp.float32)
+    mu_dynamic: wp.array(dtype=wp.float32)
+
+    # Bvh
+    bvh_ids: wp.array(dtype=wp.uint64)
 
 
-def initialize_contact_polygon(num_tet_pairs, contact_polygon, compute_device):
-    contact_polygon.vertex_counts = wp.zeros(num_tet_pairs, dtype=wp.int32, device=compute_device)
-    contact_polygon.vertices = wp.zeros(8 * num_tet_pairs, dtype=wp.vec3f, device=compute_device)
-    contact_polygon.centroids = wp.zeros(num_tet_pairs, dtype=wp.vec3f, device=compute_device)
-    contact_polygon.cartesian_to_penetration = wp.zeros(num_tet_pairs, dtype=wp.vec4f, device=compute_device)
-    contact_polygon.normals = wp.zeros(num_tet_pairs, dtype=wp.vec3f, device=compute_device)
-    contact_polygon.centroid_pressure = wp.zeros(num_tet_pairs, dtype=wp.float32, device=compute_device)
+@wp.struct
+class IsosurfaceBatch:
+    max_element_pairs: wp.int32
+    element_pairs: wp.array2d(dtype=wp.vec2i)
+    body_a_idx: wp.array(dtype=wp.int32)
+    body_b_idx: wp.array(dtype=wp.int32)
 
+    ## Contact polygon data
+    v_counts: wp.array2d(dtype=wp.int32)
+    vertices: wp.array2d(dtype=wp.vec3f)
+    centroids: wp.array2d(dtype=wp.vec3f)
+    cartesian_to_penetration: wp.array2d(dtype=wp.vec4f)
+    normals: wp.array2d(dtype=wp.vec3f)
+    centroid_pressure: wp.array2d(dtype=wp.float32)
 
-def reset_contact_polygon(contact_polygon):
-    contact_polygon.vertex_counts.fill_(0)
-    contact_polygon.vertices.fill_(0.0)
-    contact_polygon.centroids.fill_(0.0)
-    contact_polygon.cartesian_to_penetration.fill_(0.0)
-    contact_polygon.normals.fill_(0.0)
-    contact_polygon.centroid_pressure.fill_(0.0)
+    # Combined material properties
+    # Hydroelastic modulus
+    h_combined: wp.array(dtype=wp.float32)
+    # Hunt-Crossley dissipation
+    d_combined: wp.array(dtype=wp.float32)
+    # Static friction coefficient
+    mu_static_combined: wp.array(dtype=wp.float32)
+    # Dynamic friction coefficient
+    mu_dynamic_combined: wp.array(dtype=wp.float32)
 
+    query_with_mesh_a: wp.array(dtype=wp.bool)
+    soft_vs_soft: wp.array(dtype=wp.bool)
 
-class Isosurface:
-    def __init__(self, body_a, body_b, geom_pairs, mesh_b_is_soft, compute_device):
-        self.body_a = body_a
-        self.body_b = body_b
-        self.body_a_wp = wp.int32(body_a)
-        self.body_b_wp = wp.int32(body_b)  # This is used for the kernel to avoid htod transfers.
-        self.label = f"Body_{body_a}_vs_Body_{body_b}"
-        self.soft_vs_soft = mesh_b_is_soft
-        self.sotf_vs_soft_wp = wp.array([1], dtype=wp.int32) if mesh_b_is_soft else wp.array([0], dtype=wp.int32)
-        self.geom_pairs = wp.array(geom_pairs, dtype=wp.vec2i, device=compute_device)
-        num_geom_pairs = self.geom_pairs.shape[0]
-        self.intermediate_contact_polygon = ContactPolygon()
-        self.contact_polygon = ContactPolygon()
-        initialize_contact_polygon(num_geom_pairs, self.intermediate_contact_polygon, compute_device)
-        initialize_contact_polygon(num_geom_pairs, self.contact_polygon, compute_device)
-        self.num_nonzero_polygons = wp.zeros(1, dtype=wp.int32, device=compute_device)
-        # Quadrature points and weights.
-        self.quadrature_weights = wp.array([1.0], dtype=wp.float32, device=compute_device)
-        self.quadrature_coords = wp.array([[1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]], dtype=wp.vec3f, device=compute_device)
-        # # Second order quadrature rule for triangles.
-        # self.quadrature_weights = wp.array([1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], dtype=wp.float32, device=compute_device)
-        # self.quadrature_coords = wp.array(
-        #     [[1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0], [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0], [2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0]],
-        #     dtype=wp.vec3f,
-        #     device=compute_device,
-        # )
-        # Result of integration
-        self.force = wp.zeros(1, dtype=wp.vec3f, device=compute_device)
-        self.torque_a = wp.zeros(1, dtype=wp.vec3f, device=compute_device)
-        self.torque_b = wp.zeros(1, dtype=wp.vec3f, device=compute_device)
-        self.torque_a_body = wp.zeros(1, dtype=wp.vec3f, device=compute_device)
-        self.torque_b_body = wp.zeros(1, dtype=wp.vec3f, device=compute_device)
-        self.force_n = wp.zeros(1, dtype=wp.vec3f, device=compute_device)
-        self.force_t = wp.zeros(1, dtype=wp.vec3f, device=compute_device)
-        # Offset for visualization.
-        self.polygon_normals = None
-        self.polygon_centers = None
-        self.pressure_values = None
-        self.max_triangles_found = 0
-        self.max_edges_found = 0
-        self.max_normals_found = 0
-        self.max_contact_polygons_found = {"intermediate": 0, "contact": 0}
-        self.max_tet_pairs_found = 0
-        # These variables are used for drawing.
-        self.is_valid = False
-        self.vertices = None
-        self.triangles = None
-        self.radii = None  # This one facilitates drawing the isosurface.
-        self.edges = None  # This one facilitates drawing the isosurface.
-        self.per_triangle_pressure = None  # This one facilitates drawing the isosurface.
-        self.per_triangle_tet_pairs = None
-        self.is_valid_counter = 0  # Might not be necessary.
-        self.vertex_counts_np = 0
-        self.valid_polygons = []
+    quadrature_weights: wp.array(dtype=wp.float32)
+    quadrature_coords: wp.array(dtype=wp.vec3f)
 
-
-class RenderMode(Enum):
-    NONE = "none"
-    OPENGL = "opengl"
-    USD = "usd"
-
-    def __str__(self):
-        return self.value
+    force: wp.array(dtype=wp.vec3f)
+    torque_a: wp.array(dtype=wp.vec3f)
+    torque_b: wp.array(dtype=wp.vec3f)
+    torque_a_body: wp.array(dtype=wp.vec3f)
+    torque_b_body: wp.array(dtype=wp.vec3f)
+    force_n: wp.array(dtype=wp.vec3f)
+    force_t: wp.array(dtype=wp.vec3f)
 
 
 class Dirs:

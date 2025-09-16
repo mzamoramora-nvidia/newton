@@ -2,6 +2,31 @@ import numpy as np
 import warp as wp
 
 import newton.viewer
+from newton._src.hydroelastic.types import mat43h
+
+
+@wp.kernel
+def compute_tet_mesh_edges(
+    body_q: wp.array(dtype=wp.transform),
+    body_id: wp.int32,
+    indices: wp.array(dtype=wp.int32),
+    default_points: wp.array(dtype=wp.vec3),
+    # Outputs.
+    line_starts: wp.array(dtype=wp.vec3),
+    line_ends: wp.array(dtype=wp.vec3),
+):
+    tid = wp.tid()
+    idx = 4 * tid
+    element = wp.vec4i(indices[idx], indices[idx + 1], indices[idx + 2], indices[idx + 3])
+
+    v = mat43h()
+    for i in range(len(element)):
+        v[i] = wp.transform_point(body_q[body_id], default_points[element[i]])
+
+    for i in range(len(element)):
+        j = (i + 1) % len(element)
+        line_starts[tid * 6 + i] = v[i]
+        line_ends[tid * 6 + i] = v[j]
 
 
 def draw_force_arrows(viewer, id, pos, tips, arrow_width, color_arrow, tips_radii, tips_colors):
@@ -95,35 +120,42 @@ def render_visuals(viewer, state_0, visuals):
 
 
 def render_isosurfaces(viewer, state_0, contacts, editable_vars):
+    vertex_counts = contacts.isosurface_batch.v_counts.numpy()
+    vertices = contacts.isosurface_batch.vertices.numpy()
+    centroids = contacts.isosurface_batch.centroids.numpy()
+    normals = contacts.isosurface_batch.normals.numpy()
+    centroid_pressure = contacts.isosurface_batch.centroid_pressure.numpy()
+    num_isosurfaces = vertex_counts.shape[0]
+
     with wp.ScopedTimer("draw_polygon_normals", print=False):
-        for i in range(len(contacts.isosurface)):
-            # max_polygons_for_rendering = contacts.isosurface[i].geom_pairs.shape[0]
-            max_polygons_for_rendering = 512
+        # max_polygons_for_rendering = contacts.isosurface[i].geom_pairs.shape[0]
+        max_polygons_for_rendering = 512
+        for i in range(num_isosurfaces):
             draw_polygon_normals(
                 viewer,
-                f"/{contacts.isosurface[i].label}",
+                f"/isosurface_batch_normals_{i}",
                 max_polygons_for_rendering,
-                contacts.isosurface[i].contact_polygon.vertex_counts.numpy(),
-                contacts.isosurface[i].contact_polygon.centroids.numpy(),
-                contacts.isosurface[i].contact_polygon.normals.numpy(),
-                contacts.isosurface[i].contact_polygon.centroid_pressure.numpy(),
+                vertex_counts[i],
+                centroids[i],
+                normals[i],
+                centroid_pressure[i],
                 np_vertex_offset=editable_vars.np_vertex_offset,
                 render_normals=editable_vars.render_isosurfaces_normals,
             )
 
     with wp.ScopedTimer("draw_polygon_edges", print=False):
-        for i in range(len(contacts.isosurface)):
+        for i in range(num_isosurfaces):
             # max_polygons_for_rendering = contacts.isosurface[i].geom_pairs.shape[0]
             max_polygons_for_rendering = 512
             draw_polygon_edges(
                 viewer,
-                f"/{contacts.isosurface[i].label}",
+                f"/isosurface_batch_edges_{i}",
                 max_polygons_for_rendering,
-                contacts.isosurface[i].contact_polygon.vertex_counts.numpy(),
-                contacts.isosurface[i].contact_polygon.vertices.numpy(),
-                contacts.isosurface[i].contact_polygon.centroids.numpy(),
-                contacts.isosurface[i].contact_polygon.normals.numpy(),
-                contacts.isosurface[i].contact_polygon.centroid_pressure.numpy(),
+                vertex_counts[i],
+                vertices[i],
+                centroids[i],
+                normals[i],
+                centroid_pressure[i],
                 np_vertex_offset=editable_vars.np_vertex_offset,
                 render_edges=editable_vars.render_isosurfaces_edges,
             )
@@ -264,3 +296,54 @@ def draw_polygon_edges(
         colors=wp.array(colors, dtype=wp.vec3),
         width=0.0005,
     )
+
+
+def draw_tet_mesh_edges(viewer, state_0, hydro_mesh, mesh_id, color, render_tet_mesh_edges):
+    if not hydro_mesh.is_soft:
+        return
+    edges_name = f"/mesh_{mesh_id}_tet_mesh_edges"
+    edges_exists = False
+    if isinstance(viewer, newton.viewer.ViewerGL):
+        edges_exists = edges_name in viewer.lines
+
+    if not edges_exists and not render_tet_mesh_edges:
+        return
+
+    num_tets = hydro_mesh.mesh.elements_count
+    line_starts = wp.zeros(num_tets * 6, dtype=wp.vec3)
+    line_ends = wp.zeros(num_tets * 6, dtype=wp.vec3)
+
+    if render_tet_mesh_edges:
+        wp.launch(
+            compute_tet_mesh_edges,
+            dim=num_tets,
+            inputs=[
+                state_0.body_q,
+                hydro_mesh.body_id,
+                hydro_mesh.mesh.indices,
+                hydro_mesh.mesh.default_points,
+            ],
+            outputs=[
+                line_starts,
+                line_ends,
+            ],
+        )
+
+    viewer.log_lines(
+        name=edges_name,
+        starts=line_starts,
+        ends=line_ends,
+        colors=wp.full(shape=line_starts.shape, value=wp.vec3(*color)),
+        width=0.0005,
+    )
+
+
+def render_tet_meshes(viewer, model, state_0, editable_vars):
+    with wp.ScopedTimer("render_tet_meshe_edges", print=False):
+        num_meshes = len(model.hydro_mesh)
+        for i in range(num_meshes):
+            render_tet_mesh_edges = False
+            if hasattr(editable_vars, "render_tet_mesh_edges"):
+                render_tet_mesh_edges = editable_vars.render_tet_mesh_edges
+            color = wp.render.bourke_color_map(0, num_meshes - 1, i)
+            draw_tet_mesh_edges(viewer, state_0, model.hydro_mesh[i], i, color, render_tet_mesh_edges)

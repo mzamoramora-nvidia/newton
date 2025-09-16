@@ -145,7 +145,7 @@ def initialize_tetrahedral_vertices(
 def create_tetrahedral_elements(
     surface_faces: wp.array(dtype=wp.vec3i),
     centroid_vertex_index: wp.int32,
-    tetrahedral_elements: wp.array(dtype=wp.vec4i),
+    tetrahedral_elements: wp.array(dtype=wp.int32),
 ):
     """
     Create tetrahedral elements from surface triangles.
@@ -158,17 +158,16 @@ def create_tetrahedral_elements(
 
     # Create tetrahedron: centroid + triangle vertices
     # Order: centroid, vertex_p, vertex_q, vertex_r
-    tetrahedral_elements[triangle_id] = wp.vec4i(
-        centroid_vertex_index,
-        face[0],  # vertex_p
-        face[1],  # vertex_q
-        face[2],  # vertex_r
-    )
+    idx = 4 * triangle_id
+    tetrahedral_elements[idx + 0] = centroid_vertex_index
+    tetrahedral_elements[idx + 1] = face[0]
+    tetrahedral_elements[idx + 2] = face[1]
+    tetrahedral_elements[idx + 3] = face[2]
 
 
 @wp.kernel
 def generate_tetrahedral_edges(
-    tetrahedral_elements: wp.array(dtype=wp.vec4i),
+    tetrahedral_elements: wp.array(dtype=wp.int32),
     tetrahedral_edges: wp.array(dtype=wp.vec2i),
 ):
     """
@@ -178,7 +177,13 @@ def generate_tetrahedral_edges(
     Edge ordering follows the pattern defined in TETRAHEDRON_EDGES.
     """
     tetrahedron_id = wp.tid()
-    element = tetrahedral_elements[tetrahedron_id]
+    idx = 4 * tetrahedron_id
+    element = wp.vec4i(
+        tetrahedral_elements[idx + 0],
+        tetrahedral_elements[idx + 1],
+        tetrahedral_elements[idx + 2],
+        tetrahedral_elements[idx + 3],
+    )
 
     # Base index for this tetrahedron's edges
     edge_base_index = tetrahedron_id * EDGES_PER_TETRAHEDRON
@@ -288,7 +293,7 @@ def tetrahedralize(
     # -----------------------------------
     # Each surface triangle becomes one tetrahedron
     centroid_index = num_vertices  # Index of centroid vertex
-    tetrahedral_elements = wp.zeros(num_faces, dtype=wp.vec4i, device=device)
+    tetrahedral_elements = wp.zeros(4 * num_faces, dtype=wp.int32, device=device)
 
     wp.launch(
         create_tetrahedral_elements,

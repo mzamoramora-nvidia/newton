@@ -43,8 +43,8 @@ import newton._src.hydroelastic.imgui as hydroelastic_imgui
 import newton._src.hydroelastic.isosurface as hydroelastic_isosurface
 import newton._src.hydroelastic.loaders as hydroelastic_loaders
 import newton._src.hydroelastic.render_utils as hydroelastic_render_utils
+import newton._src.hydroelastic.types as hydroelastic_types
 import newton._src.hydroelastic.utils as hydroelastic_utils
-import newton._src.hydroelastic.wrenches as hydroelastic_wrenches
 import newton.examples
 import newton.utils
 
@@ -64,6 +64,7 @@ class EditableVars:
 
         self.render_isosurfaces_edges = False
         self.render_isosurfaces_normals = False
+        self.render_tet_mesh_edges = False
         self.render_forces_flag = True
         # With a scale of 0.01, an object of 1kg that results in a force of 9.8N, will have an arrow of approx 0.01m = 1cm.
         # The maximum gripping force of Robotiq 2F-140 is 125N. With a scale of 0.001, the arrow will be 0.125m = 12.5cm.
@@ -128,17 +129,30 @@ class Example:
         # ==============================================================================================================
         # Setup hydroelastic contacts
         self.contacts.use_hydroelastic_inside_solver = False
-        self.contacts.isosurface = []
-        self.contacts.num_isosurfaces = hydroelastic_loaders.init_isosurfaces(
-            self.model.collision_pairs, self.contacts.isosurface, self.model.hydro_mesh, self.device
+
+        # ==============================================================================================================
+        # Setup hydroelastic batch
+        self.model.hydro_batch = hydroelastic_types.HydroelasticBatch()
+        hydroelastic_loaders.init_hydro_batch(self.model.hydro_mesh, self.model.hydro_batch)
+
+        # ==============================================================================================================
+        # Setup isosurface batch
+        max_element_pairs = -1
+        self.contacts.isosurface_batch = hydroelastic_types.IsosurfaceBatch()
+        hydroelastic_loaders.init_isosurface_batch(
+            self.contacts.isosurface_batch, self.model.collision_pairs, self.model.hydro_batch, max_element_pairs
         )
 
         # ==============================================================================================================
         # Perform fake step to initialize the solver.
         # This is useful for the Featherstone solver in particular, to populate stuff like body_v_s.
-        self.body_q_inv_mat = wp.array(shape=(self.model.body_count,), dtype=wp.mat44, device=self.device)
-        hydroelastic_isosurface.compute_contact_surfaces(self.model, self.state_0, self.contacts, self.body_q_inv_mat)
         self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+        hydroelastic_isosurface.batch_compute_contact_surfaces_and_wrenches(
+            self.solver,
+            self.state_0,
+            self.contacts,
+            self.twist_convention,
+        )
 
         # TODO: Find a better place to store this body_f.
         self.body_f = wp.zeros_like(self.state_1.body_f)
@@ -167,102 +181,7 @@ class Example:
         print("Done init")
 
     def load_model(self):
-        # ==============================================================================================================
-        # Loading of the meshes should be moved somewhere else (e.g the model builder).
-        import trimesh  # noqa: PLC0415
-
         dirs = self.dirs
-        meshes = []
-
-        # ------------------------------------------------------------------------------------------------------------
-        # Load table 0
-        object = trimesh.creation.box(extents=0.3 * dirs.right + 0.05 * dirs.up + 0.3 * dirs.front)
-        params = {
-            "hydroelastic_modulus": 1e3,
-        }
-        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
-        meshes[-1].mu_static = wp.float32(1.0)
-        meshes[-1].mu_dynamic = wp.float32(0.8)
-        meshes[-1].mass = 1.0
-        meshes[-1].compute_mesh_density = True
-        meshes[-1].hunt_crossley_dissipation = wp.float32(1.0)
-
-        # ------------------------------------------------------------------------------------------------------------
-        # Load table 2
-        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), wp.quat_identity())
-        object = trimesh.creation.cylinder(radius=0.2, height=0.01)
-        params = {
-            "hydroelastic_modulus": 1e3,
-            "is_visible": True,
-            "Tf": Tf,
-        }
-        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
-        # Realistic values
-        meshes[-1].mu_static = wp.float32(1.0)
-        meshes[-1].mu_dynamic = wp.float32(0.8)
-
-        # ------------------------------------------------------------------------------------------------------------
-        # Load Object
-        quat = wp.quat_from_axis_angle(wp.vec3f(0.0, 0.0, 1.0), 0.25 * wp.pi)
-        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), quat)
-        object_path = "./newton/examples/assets/experimental-hydroelastic-assets/graspgen_handwheel.obj"
-        object = trimesh.load(object_path)
-        if not object.is_watertight:
-            print("Wheel is not watertight.")
-        params = {
-            "hydroelastic_modulus": 1e3,
-            "is_visible": True,
-            "Tf": Tf,
-        }
-        meshes.append(hydroelastic_loaders.generate_hard_mesh(object.vertices, object.faces, params))
-        meshes[-1].mu_static = wp.float32(1.0)
-        meshes[-1].mu_dynamic = wp.float32(0.5)
-        meshes[-1].mass = 0.200
-        meshes[-1].compute_mesh_density = True
-
-        # ------------------------------------------------------------------------------------------------------------
-        # Load gripper base
-        object = trimesh.creation.box(extents=0.1 * dirs.right + 0.02 * dirs.up + 0.02 * dirs.front)
-        params = {
-            "hydroelastic_modulus": 5e3,
-        }
-        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
-        meshes[-1].mu_static = wp.float32(0.6)  # wp.float32(5.0)
-        meshes[-1].mu_dynamic = wp.float32(0.575)  # wp.float32(4.9)
-        meshes[-1].mass = 0.05
-        meshes[-1].compute_mesh_density = True
-
-        # ------------------------------------------------------------------------------------------------------------
-        # Robotique 140 finger dims = (0.0078, 0.0655, 0.027)
-        # Load robotiq finger 1
-        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), wp.quat_identity())
-        object = trimesh.creation.box(extents=0.0078 * dirs.right + 0.0655 * dirs.up + 0.027 * dirs.front)
-        # object = object.subdivide_to_size(0.002)
-        params = {
-            "hydroelastic_modulus": 5e3,
-            "is_visible": True,
-            "Tf": Tf,
-        }
-        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
-        meshes[-1].mu_static = wp.float32(0.8)
-        meshes[-1].mu_dynamic = wp.float32(0.7)
-        meshes[-1].mass = 0.025
-        meshes[-1].compute_mesh_density = True
-
-        # Load robotiq finger 2
-        quat = wp.quat_identity()  # wp.quat_from_axis_angle(wp.vec3f(0.0, 1.0, 0.0), 0.5 * np.pi)
-        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), quat)
-        params = {
-            "hydroelastic_modulus": 5e3,
-            "is_visible": True,
-            "Tf": Tf,
-        }
-        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
-        meshes[-1].mu_static = wp.float32(0.8)
-        meshes[-1].mu_dynamic = wp.float32(0.7)
-        meshes[-1].mass = 0.025
-        meshes[-1].compute_mesh_density = True
-
         # ==============================================================================================================
         # Define initial poses.
         unit_q = wp.quat_identity()
@@ -292,7 +211,7 @@ class Example:
         poses[body_idx, 3:] = unit_q
         # Object
         body_idx += 1
-        object = body_idx
+        object_id = body_idx
         poses[body_idx, :3] = object_y * dirs.up
         poses[body_idx, 3:] = unit_q
         # Gripper base
@@ -314,6 +233,109 @@ class Example:
         self.init_poses = poses
 
         # ==============================================================================================================
+        # Loading of the meshes should be moved somewhere else (e.g the model builder).
+        import trimesh  # noqa: PLC0415
+
+        meshes = []
+
+        # ------------------------------------------------------------------------------------------------------------
+        # Load table 0
+        object = trimesh.creation.box(extents=0.3 * dirs.right + 0.05 * dirs.up + 0.3 * dirs.front)
+        params = {
+            "hydroelastic_modulus": 1e3,
+        }
+        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
+        meshes[-1].mu_static = wp.float32(1.0)
+        meshes[-1].mu_dynamic = wp.float32(0.8)
+        meshes[-1].mass = 1.0
+        meshes[-1].compute_mesh_density = True
+        meshes[-1].hunt_crossley_dissipation = wp.float32(1.0)
+        meshes[-1].body_id = table_0
+        meshes[-1].update_aabb = False
+
+        # ------------------------------------------------------------------------------------------------------------
+        # Load table 2
+        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), wp.quat_identity())
+        # object = trimesh.creation.cylinder(radius=0.2, height=0.01)
+        object = trimesh.creation.box(extents=0.3 * dirs.right + 0.05 * dirs.up + 0.3 * dirs.front)
+        params = {
+            "hydroelastic_modulus": 1e3,
+            "is_visible": True,
+            "Tf": Tf,
+        }
+        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
+        # Realistic values
+        meshes[-1].mu_static = wp.float32(1.0)
+        meshes[-1].mu_dynamic = wp.float32(0.8)
+        meshes[-1].body_id = table_1
+        meshes[-1].update_aabb = False
+        # ------------------------------------------------------------------------------------------------------------
+        # Load Object
+        quat = wp.quat_from_axis_angle(wp.vec3f(0.0, 0.0, 1.0), 0.25 * wp.pi)
+        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), quat)
+        object_path = "./newton/examples/assets/experimental-hydroelastic-assets/graspgen_handwheel.obj"
+        object = trimesh.load(object_path)
+        if not object.is_watertight:
+            print("Wheel is not watertight.")
+        params = {
+            "hydroelastic_modulus": 1e3,
+            "is_visible": True,
+            "Tf": Tf,
+        }
+        meshes.append(hydroelastic_loaders.generate_hard_mesh(object.vertices, object.faces, params))
+        meshes[-1].mu_static = wp.float32(1.0)
+        meshes[-1].mu_dynamic = wp.float32(0.5)
+        meshes[-1].mass = 0.200
+        meshes[-1].compute_mesh_density = True
+        meshes[-1].body_id = object_id
+        # ------------------------------------------------------------------------------------------------------------
+        # Load gripper base
+        object = trimesh.creation.box(extents=0.1 * dirs.right + 0.02 * dirs.up + 0.02 * dirs.front)
+        params = {
+            "hydroelastic_modulus": 5e3,
+        }
+        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
+        meshes[-1].mu_static = wp.float32(0.6)  # wp.float32(5.0)
+        meshes[-1].mu_dynamic = wp.float32(0.575)  # wp.float32(4.9)
+        meshes[-1].mass = 0.05
+        meshes[-1].compute_mesh_density = True
+        meshes[-1].body_id = gripper_base
+        meshes[-1].update_aabb = False
+
+        # ------------------------------------------------------------------------------------------------------------
+        # Robotique 140 finger dims = (0.0078, 0.0655, 0.027)
+        # Load robotiq finger 1
+        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), wp.quat_identity())
+        object = trimesh.creation.box(extents=0.0078 * dirs.right + 0.0655 * dirs.up + 0.027 * dirs.front)
+        # object = object.subdivide_to_size(0.002)
+        params = {
+            "hydroelastic_modulus": 5e3,
+            "is_visible": True,
+            "Tf": Tf,
+        }
+        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
+        meshes[-1].mu_static = wp.float32(0.8)
+        meshes[-1].mu_dynamic = wp.float32(0.7)
+        meshes[-1].mass = 0.025
+        meshes[-1].compute_mesh_density = True
+        meshes[-1].body_id = finger_0
+
+        # Load robotiq finger 2
+        quat = wp.quat_identity()  # wp.quat_from_axis_angle(wp.vec3f(0.0, 1.0, 0.0), 0.5 * np.pi)
+        Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), quat)
+        params = {
+            "hydroelastic_modulus": 5e3,
+            "is_visible": True,
+            "Tf": Tf,
+        }
+        meshes.append(hydroelastic_loaders.generate_mesh(object.vertices, object.faces, params))
+        meshes[-1].mu_static = wp.float32(0.8)
+        meshes[-1].mu_dynamic = wp.float32(0.7)
+        meshes[-1].mass = 0.025
+        meshes[-1].compute_mesh_density = True
+        meshes[-1].body_id = finger_1
+
+        # ==============================================================================================================
         # Setup scene
         scene = newton.ModelBuilder(up_axis=self.up_axis)
 
@@ -330,7 +352,7 @@ class Example:
         scene.add_joint_fixed(parent=-1, child=table_1, parent_xform=xform)
 
         # Add wheel
-        scene.add_joint_free(parent=-1, child=object)
+        scene.add_joint_free(parent=-1, child=object_id)
 
         scene.add_joint_d6(
             parent=-1,
@@ -400,7 +422,12 @@ class Example:
 
         # ==============================================================================================================
         # Set collision pairs.
-        model.collision_pairs = [[table_0, object], [table_1, object], [finger_0, object], [finger_1, object]]
+        model.collision_pairs = [
+            [table_0, object_id],
+            [table_1, object_id],
+            [finger_0, object_id],
+            [finger_1, object_id],
+        ]
 
         return model
 
@@ -416,17 +443,18 @@ class Example:
 
     def simulate(self):
         # self.contacts = self.model.collide(self.state_0, rigid_contact_margin=0.2)
-        for _ in range(self.sim_substeps):
+        for i in range(self.sim_substeps):
             ## Forces could also be cleared inside the compute_contact_forces function.
             ## So, that we can compare the forces generated by collide vs the ones generated by the hydroelastic contact.
             self.state_0.clear_forces()
-            hydroelastic_isosurface.compute_contact_surfaces(
-                self.model, self.state_0, self.contacts, self.body_q_inv_mat
+            hydroelastic_isosurface.batch_compute_contact_surfaces_and_wrenches(
+                self.solver,
+                self.state_0,
+                self.contacts,
+                self.twist_convention,
+                update_contact_pairs=(i % 25 == 0 or i == self.sim_substeps - 1),
             )
             self.assign_control(self.control)
-            hydroelastic_wrenches.compute_contact_forces(
-                self.solver, self.state_0, self.contacts, self.twist_convention
-            )
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
@@ -440,9 +468,6 @@ class Example:
         self.sim_time += self.frame_dt
 
         self.compute_control()
-
-        # Computing contact surface again before rendering.
-        hydroelastic_isosurface.compute_contact_surfaces(self.model, self.state_0, self.contacts, self.body_q_inv_mat)
 
         self.append_to_data_history()
 
@@ -554,12 +579,12 @@ class Example:
         # Render the scene
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
-        self.render_forces()
-        self.render_visuals()
-        self.render_isosurface()
+        # self.render_forces()
+        # self.render_visuals()
+        # self.render_isosurface()
         self.viewer.end_frame()
 
-        self.plot()
+        # self.plot()
         self.frame += 1
 
         if isinstance(self.viewer, newton.viewer.ViewerUSD) and self.frame % 10 == 0:
@@ -569,6 +594,7 @@ class Example:
             )
 
     def append_to_data_history(self):
+        return
         num_isosurfaces = len(self.contacts.isosurface)
         num_bodies = self.model.body_count
         num_data = num_bodies + num_isosurfaces
@@ -717,7 +743,7 @@ class Example:
         )
 
     def render_visuals(self):
-        pass
+        hydroelastic_render_utils.render_tet_meshes(self.viewer, self.model, self.state_0, self.editable_vars)
         # hydroelastic_render_utils.render_visuals(self.viewer, self.state_0, self.visuals,)
 
     def render_isosurface(self):

@@ -78,78 +78,82 @@ def compute_stribeck_friction_coefficient(
 
 
 @wp.kernel
-def compute_wrench(
-    tet_pairs: wp.array(dtype=wp.vec2i),
-    num_polygon_vertices: wp.array(dtype=wp.int32),
-    polygon_vertices: wp.array(dtype=wp.vec3f),
-    polygon_centroids: wp.array(dtype=wp.vec3f),
-    polygon_normals: wp.array(dtype=wp.vec3f),
-    cartesian_to_penetration: wp.array(dtype=wp.vec4f),
-    body_a: wp.int32,
-    body_b: wp.int32,
+def combine_material_properties(
+    body_a_idx: wp.array(dtype=wp.int32),
+    body_b_idx: wp.array(dtype=wp.int32),
+    h: wp.array(dtype=wp.float32),
+    d: wp.array(dtype=wp.float32),
+    mu_static: wp.array(dtype=wp.float32),
+    mu_dynamic: wp.array(dtype=wp.float32),
+    # outputs
+    h_combined: wp.array(dtype=wp.float32),
+    d_combined: wp.array(dtype=wp.float32),
+    mu_static_combined: wp.array(dtype=wp.float32),
+    mu_dynamic_combined: wp.array(dtype=wp.float32),
+):
+    tid = wp.tid()
+    body_a = body_a_idx[tid]
+    body_b = body_b_idx[tid]
+    h_combined[tid] = compute_combined_hydroelastic_modulus(h[body_a], h[body_b])
+    d_combined[tid] = compute_combined_dissipation(h[body_a], h[body_b], d[body_a], d[body_b])
+    mu_static_combined[tid] = compute_combined_friction_coefficient(mu_static[body_a], mu_static[body_b])
+    mu_dynamic_combined[tid] = compute_combined_friction_coefficient(mu_dynamic[body_a], mu_dynamic[body_b])
+
+
+@wp.func
+def compute_wrench_fun_simple(
+    surf_id: wp.int32,
+    pair_idx: wp.int32,
+    element_pairs_found: wp.array2d(dtype=wp.vec2i),
     body_q: wp.array(dtype=wp.transform),
     body_qd: wp.array(dtype=wp.spatial_vector),
-    gradient_a: wp.array(dtype=wp.vec3f),
-    gradient_b: wp.array(dtype=wp.vec3f),
-    hydroelastic_modulus_a: wp.float32,
-    hydroelastic_modulus_b: wp.float32,
-    d_a: wp.float32,  # hunt_crossley_dissipation
-    d_b: wp.float32,  # hunt_crossley_dissipation
-    mu_static_a: wp.float32,
-    mu_static_b: wp.float32,
-    mu_dynamic_a: wp.float32,
-    mu_dynamic_b: wp.float32,
+    body_a: wp.int32,
+    body_b: wp.int32,
+    polygon_vcounts: wp.array2d(dtype=wp.int32),
+    polygon_vertices: wp.array2d(dtype=wp.vec3f),
+    polygon_centroids: wp.array2d(dtype=wp.vec3f),
+    cartesian_to_penetration: wp.array2d(dtype=wp.vec4f),
+    polygon_normals: wp.array2d(dtype=wp.vec3f),
+    grad_p: wp.array2d(dtype=wp.vec3f),
+    h: wp.float32,
+    d: wp.float32,
+    mu_static: wp.float32,
+    mu_dynamic: wp.float32,
+    h_a: wp.float32,  # hydroelastic modulus
     quadrature_weights: wp.array(dtype=wp.float32),
     quadrature_coords: wp.array(dtype=wp.vec3f),
-    soft_vs_soft: wp.array(dtype=wp.int32),
+    soft_vs_soft: wp.bool,
     twist_convention: int,
-    # outputs
-    force: wp.array(dtype=wp.vec3f),
-    torque_a: wp.array(dtype=wp.vec3f),
-    torque_b: wp.array(dtype=wp.vec3f),
-    torque_a_body: wp.array(dtype=wp.vec3f),
-    torque_b_body: wp.array(dtype=wp.vec3f),
-    force_n: wp.array(dtype=wp.vec3f),
-    force_t: wp.array(dtype=wp.vec3f),
+    force_i: wp.vec3f,
+    torque_a_i: wp.vec3f,
+    torque_b_i: wp.vec3f,
+    torque_a_i_body: wp.vec3f,
+    torque_b_i_body: wp.vec3f,
+    force_n_i: wp.vec3f,
+    force_t_i: wp.vec3f,
 ):
-    """Compute wrench forces on the isosurface."""
-    tid = wp.tid()
-
-    if num_polygon_vertices[tid] == 0:
-        return
-
     # Get the tet pair.
-    tet_id_a = tet_pairs[tid][0]
-    tet_id_b = tet_pairs[tid][1]
+    el_id_a = element_pairs_found[surf_id, pair_idx][0]
+    el_id_b = element_pairs_found[surf_id, pair_idx][1]
 
-    # Initialize output variables.
-    force_i = wp.vec3f(0.0, 0.0, 0.0)
-    torque_a_i = wp.vec3f(0.0, 0.0, 0.0)
-    torque_b_i = wp.vec3f(0.0, 0.0, 0.0)
-    torque_a_i_body = wp.vec3f(0.0, 0.0, 0.0)
-    torque_b_i_body = wp.vec3f(0.0, 0.0, 0.0)
-    force_n_i = wp.vec3f(0.0, 0.0, 0.0)
-    force_t_i = wp.vec3f(0.0, 0.0, 0.0)
-
-    mu_static = compute_combined_friction_coefficient(mu_static_a, mu_static_b)
-    mu_dynamic = compute_combined_friction_coefficient(mu_dynamic_a, mu_dynamic_b)
-    h = compute_combined_hydroelastic_modulus(hydroelastic_modulus_a, hydroelastic_modulus_b)
-    d = compute_combined_dissipation(hydroelastic_modulus_a, hydroelastic_modulus_b, d_a, d_b)
+    # TODO: This could be done once when creating the data for the isosurface.
+    # Compute combined parameters.
     num_quadrature_points = quadrature_weights.shape[0]
 
     com_a = wp.vec3f(body_q[body_a][0], body_q[body_a][1], body_q[body_a][2])
     com_b = wp.vec3f(body_q[body_b][0], body_q[body_b][1], body_q[body_b][2])
-    normal = polygon_normals[tid]
+    normal = polygon_normals[surf_id, pair_idx]
 
     # Integrate polygon.
     # For each vertex, we have a triangle.
-    for cp_idx in range(num_polygon_vertices[tid]):
+    # TODO: Rename cp_idx to v_idx.
+    for cp_idx in range(polygon_vcounts[surf_id, pair_idx]):
         # Get triangle vertices.
         index_b = cp_idx
-        index_c = (cp_idx + 1) % num_polygon_vertices[tid]
-        vertex_a = polygon_centroids[tid]
-        vertex_b = polygon_vertices[8 * tid + index_b]
-        vertex_c = polygon_vertices[8 * tid + index_c]
+        index_c = (cp_idx + 1) % polygon_vcounts[surf_id, pair_idx]
+        vertex_a = polygon_centroids[surf_id, pair_idx]
+        vertex_b = polygon_vertices[surf_id, 8 * pair_idx + index_b]
+        vertex_c = polygon_vertices[surf_id, 8 * pair_idx + index_c]
 
         # Compute triangle normal.
         triangle_normal = wp.cross(vertex_b - vertex_a, vertex_c - vertex_a)
@@ -166,14 +170,20 @@ def compute_wrench(
         cos_normals = wp.dot(triangle_normal, normal)
         cos_threshold = wp.cos(30.0 * wp.pi / 180.0)
         if cos_normals < cos_threshold:
-            vertex_b = polygon_vertices[8 * tid + index_c]
-            vertex_c = polygon_vertices[8 * tid + index_b]
+            vertex_b = polygon_vertices[surf_id, 8 * pair_idx + index_c]
+            vertex_c = polygon_vertices[surf_id, 8 * pair_idx + index_b]
             triangle_normal = -triangle_normal
 
             cos_normals = wp.dot(triangle_normal, normal)
             if cos_normals < cos_threshold:
                 # If normals are not aligned after the previous step, it is likely due the triangle being too small.
-                # wp.printf("may day: normals are not aligned: %f, area: %e, tid: %d\n", cos_normals, area, tid)
+                # wp.printf(
+                #     "may day: normals are not aligned: %f, area: %e, surf_id, pair_idx: %d, %d\n",
+                #     cos_normals,
+                #     area,
+                #     surf_id,
+                #     pair_idx,
+                # )
                 continue
 
         # Integrate triangle.
@@ -187,8 +197,8 @@ def compute_wrench(
 
             # Compute iso_pressure.
             homogeneous_position = wp.vec4(R.x, R.y, R.z, 1.0)
-            penetration_extent_a = wp.dot(cartesian_to_penetration[tid], homogeneous_position)
-            pressure_a = hydroelastic_modulus_a * penetration_extent_a
+            penetration_extent_a = wp.dot(cartesian_to_penetration[surf_id, pair_idx], homogeneous_position)
+            pressure_a = h_a * penetration_extent_a
 
             Ra_dot = compute_velocity_at_point(body_q[body_a], body_qd[body_a], R, twist_convention)
             Rb_dot = compute_velocity_at_point(body_q[body_b], body_qd[body_b], R, twist_convention)
@@ -201,13 +211,13 @@ def compute_wrench(
             # The gradient should be positve pointing into the body.
             # Some filtering is already done when creating the isosurface.
             # TODO: Should the gradient be computed at the quadrature point R? Is this a reasonable approximation?
-            field_gradient_a_W = wp.transform_vector(body_q[body_a], gradient_a[tet_id_a])
+            field_gradient_a_W = wp.transform_vector(body_q[body_a], grad_p[body_a, el_id_a])
             cos_theta_a = wp.dot(wp.normalize(field_gradient_a_W), normal)
             if cos_theta_a < 0.0:
                 wp.printf(
                     "gradient a is negative: %f, tet_id_a: %d\n",
                     cos_theta_a,
-                    tet_id_a,
+                    el_id_a,
                 )
 
             g_a = wp.abs(wp.dot(field_gradient_a_W, normal))
@@ -217,19 +227,19 @@ def compute_wrench(
 
             g = g_a
 
-            if soft_vs_soft[0] >= 1:
-                field_gradient_b_W = wp.transform_vector(body_q[body_b], gradient_b[tet_id_b])
+            if soft_vs_soft:
+                field_gradient_b_W = wp.transform_vector(body_q[body_b], grad_p[body_b, el_id_b])
                 cos_theta_b = wp.dot(-wp.normalize(field_gradient_b_W), normal)
                 if cos_theta_b < 0.0:
                     wp.printf(
                         "gradient b is negative: %f, tet_id_b: %d\n",
                         cos_theta_b,
-                        tet_id_b,
+                        el_id_b,
                     )
 
                 g_b = wp.abs(wp.dot(-field_gradient_b_W, normal))
                 if g_b < GRADIENT_EPSILON:
-                    # wp.printf("gradient is too small: %f, %f\n", g_a, g_b)
+                    wp.printf("gradient is too small: %f, %f, surf_id, pair_idx: %d, %d\n", g_a, g_b, surf_id, pair_idx)
                     continue
 
                 # From drake implementation:
@@ -285,28 +295,20 @@ def compute_wrench(
             force_t_i += T_F * area * quadrature_weights[i]
 
             # Compute torques
-            # Not sure if shoud be {R cross T_R} or {(R-com) cross T_R}
-            # It seems that for featherstone, the torque is computed as {R cross T_R} as it uses
-            # the torques in world frame.
             torque_a_i += wp.cross(R, T_R) * area * quadrature_weights[i]
             torque_a_i_body += wp.cross(R - com_a, T_R) * area * quadrature_weights[i]
 
             torque_b_i += wp.cross(R, T_R) * area * quadrature_weights[i]
             torque_b_i_body += wp.cross(R - com_b, T_R) * area * quadrature_weights[i]
 
-    wp.atomic_add(force, 0, force_i)
-    wp.atomic_add(torque_a, 0, torque_a_i)
-    wp.atomic_add(torque_b, 0, torque_b_i)
-    wp.atomic_add(torque_a_body, 0, torque_a_i_body)
-    wp.atomic_add(torque_b_body, 0, torque_b_i_body)
-    wp.atomic_add(force_n, 0, force_n_i)
-    wp.atomic_add(force_t, 0, force_t_i)
+    # wp.printf("force_i inside: %f, %f, %f\n", force_i[0], force_i[1], force_i[2])
+    return force_i, torque_a_i, torque_b_i, torque_a_i_body, torque_b_i_body, force_n_i, force_t_i
 
 
 @wp.kernel
-def add_wrench_to_body_f(
-    body_a: wp.int32,
-    body_b: wp.int32,
+def batch_add_wrench_to_body_f(
+    body_a_idx: wp.array(dtype=wp.int32),
+    body_b_idx: wp.array(dtype=wp.int32),
     force: wp.array(dtype=wp.vec3f),
     torque_a: wp.array(dtype=wp.vec3f),
     torque_b: wp.array(dtype=wp.vec3f),
@@ -314,96 +316,31 @@ def add_wrench_to_body_f(
     # outputs
     body_f: wp.array(dtype=wp.spatial_vector),
 ):
-    if twist_convention == 0:
-        body_f[body_a] += wp.spatial_vector(torque_a[0], force[0])
-        body_f[body_b] -= wp.spatial_vector(torque_b[0], force[0])
-    elif twist_convention == 1:
-        body_f[body_a] -= wp.spatial_vector(torque_a[0], force[0])
-        body_f[body_b] += wp.spatial_vector(torque_b[0], force[0])
-    elif twist_convention == 2:
-        # For mujoco, forces should be applied in the world frame.
-        # See https://github.com/google-deepmind/mujoco/issues/691
-        # https://github.com/google-deepmind/mujoco/discussions/2350#discussioncomment-11819398
-        # and https://github.com/newton-physics/newton/pull/213
-        body_f[body_a] += wp.spatial_vector(torque_a[0], force[0])
-        body_f[body_b] -= wp.spatial_vector(torque_b[0], force[0])
+    isosurface_count = body_a_idx.shape[0]
+    for surf_id in range(isosurface_count):
+        body_a = body_a_idx[surf_id]
+        body_b = body_b_idx[surf_id]
+
+        if twist_convention == 0:
+            body_f[body_a] += wp.spatial_vector(torque_a[surf_id], force[surf_id])
+            body_f[body_b] -= wp.spatial_vector(torque_b[surf_id], force[surf_id])
+        elif twist_convention == 1:
+            body_f[body_a] -= wp.spatial_vector(torque_a[surf_id], force[surf_id])
+            body_f[body_b] += wp.spatial_vector(torque_b[surf_id], force[surf_id])
+        elif twist_convention == 2:
+            # For mujoco, forces should be applied in the world frame.
+            # See https://github.com/google-deepmind/mujoco/issues/691
+            # https://github.com/google-deepmind/mujoco/discussions/2350#discussioncomment-11819398
+            # and https://github.com/newton-physics/newton/pull/213
+            body_f[body_a] += wp.spatial_vector(torque_a[surf_id], force[surf_id])
+            body_f[body_b] -= wp.spatial_vector(torque_b[surf_id], force[surf_id])
+    # for body_id in range(body_f.shape[0]):
+    #     wp.printf("body_f[%d]: %f, %f, %f, %f, %f, %f \n", body_id, body_f[body_id][0], body_f[body_id][1], body_f[body_id][2], body_f[body_id][3], body_f[body_id][4], body_f[body_id][5])
 
 
-def launch_compute_wrench(
-    body_q,
-    body_qd,
-    mesh_a,
-    mesh_b,
-    isosurface,
-    twist_convention,
-):
-    # This kernel loops over contact polygons and internally loops over triangles and quadrature points.
-    wp.launch(
-        compute_wrench,
-        dim=isosurface.geom_pairs.shape[0],
-        inputs=[
-            isosurface.geom_pairs,
-            isosurface.contact_polygon.vertex_counts,
-            isosurface.contact_polygon.vertices,
-            isosurface.contact_polygon.centroids,
-            isosurface.contact_polygon.normals,
-            isosurface.contact_polygon.cartesian_to_penetration,
-            isosurface.body_a,
-            isosurface.body_b,
-            body_q,
-            body_qd,
-            mesh_a.volume_mesh.field_gradient,
-            mesh_b.volume_mesh.field_gradient,
-            mesh_a.hydroelastic_modulus,
-            mesh_b.hydroelastic_modulus,
-            mesh_a.hunt_crossley_dissipation,
-            mesh_b.hunt_crossley_dissipation,
-            mesh_a.mu_static,
-            mesh_b.mu_static,
-            mesh_a.mu_dynamic,
-            mesh_b.mu_dynamic,
-            isosurface.quadrature_weights,
-            isosurface.quadrature_coords,
-            isosurface.sotf_vs_soft_wp,
-            twist_convention,
-        ],
-        outputs=[
-            isosurface.force,
-            isosurface.torque_a,
-            isosurface.torque_b,
-            isosurface.torque_a_body,
-            isosurface.torque_b_body,
-            isosurface.force_n,
-            isosurface.force_t,
-        ],
-    )
-
-
-def compute_isosurface_wrenches(
-    isosurface,
-    body_q,
-    body_qd,
-    hydroelastic_mesh_a,
-    hydroelastic_mesh_b,
-    twist_convention,
-):
-    """Compute wrench forces on the isosurface."""
-    # Should we reset the arrays here?
-    isosurface.force.zero_()
-    isosurface.torque_a.zero_()
-    isosurface.torque_b.zero_()
-    isosurface.torque_a_body.zero_()
-    isosurface.torque_b_body.zero_()
-    isosurface.force_n.zero_()
-    isosurface.force_t.zero_()
-
-    # Compute resulting wrench.
-    launch_compute_wrench(body_q, body_qd, hydroelastic_mesh_a, hydroelastic_mesh_b, isosurface, twist_convention)
-
-
-def launch_add_wrench_to_body_f(
-    body_a,
-    body_b,
+def launch_batch_add_wrench_to_body_f(
+    body_a_idx,
+    body_b_idx,
     force,
     torque_a,
     torque_b,
@@ -411,76 +348,8 @@ def launch_add_wrench_to_body_f(
     body_f,
 ):
     wp.launch(
-        add_wrench_to_body_f,
+        batch_add_wrench_to_body_f,
         dim=1,
-        inputs=[body_a, body_b, force, torque_a, torque_b, twist_convention],
+        inputs=[body_a_idx, body_b_idx, force, torque_a, torque_b, twist_convention],
         outputs=[body_f],
     )
-
-
-def compute_contact_forces(solver, state, contacts, twist_convention=0):
-    if contacts.use_hydroelastic_inside_solver:
-        return
-    with wp.ScopedTimer("Computation of contact forces", print=False):
-        # Integrate over isosurface to compute forces and torques.
-        twist_convention_wp = wp.int32(twist_convention)
-        if twist_convention == 0:  # newton convention
-            for i in range(contacts.num_isosurfaces):
-                compute_isosurface_wrenches(
-                    contacts.isosurface[i],
-                    state.body_q,
-                    state.body_qd,
-                    solver.model.hydro_mesh[contacts.isosurface[i].body_a],
-                    solver.model.hydro_mesh[contacts.isosurface[i].body_b],
-                    twist_convention_wp,
-                )
-
-                launch_add_wrench_to_body_f(
-                    body_a=contacts.isosurface[i].body_a,
-                    body_b=contacts.isosurface[i].body_b,
-                    force=contacts.isosurface[i].force,
-                    torque_a=contacts.isosurface[i].torque_a_body,
-                    torque_b=contacts.isosurface[i].torque_b_body,
-                    twist_convention=twist_convention_wp,
-                    body_f=state.body_f,
-                )
-        elif twist_convention == 1:  # featherstone convention
-            for i in range(contacts.num_isosurfaces):
-                compute_isosurface_wrenches(
-                    contacts.isosurface[i],
-                    state.body_q,
-                    solver.body_v_s,
-                    solver.model.hydro_mesh[contacts.isosurface[i].body_a],
-                    solver.model.hydro_mesh[contacts.isosurface[i].body_b],
-                    twist_convention_wp,
-                )
-
-                launch_add_wrench_to_body_f(
-                    body_a=contacts.isosurface[i].body_a,
-                    body_b=contacts.isosurface[i].body_b,
-                    force=contacts.isosurface[i].force,
-                    torque_a=contacts.isosurface[i].torque_a,
-                    torque_b=contacts.isosurface[i].torque_b,
-                    twist_convention=twist_convention_wp,
-                    body_f=state.body_f,
-                )
-        elif twist_convention == 2:  # mujoco convention
-            for i in range(contacts.num_isosurfaces):
-                compute_isosurface_wrenches(
-                    contacts.isosurface[i],
-                    state.body_q,
-                    state.body_qd,
-                    solver.model.hydro_mesh[contacts.isosurface[i].body_a],
-                    solver.model.hydro_mesh[contacts.isosurface[i].body_b],
-                    twist_convention_wp,
-                )
-
-                launch_add_wrench_to_body_f(
-                    body_a=contacts.isosurface[i].body_a,
-                    body_b=contacts.isosurface[i].body_b,
-                    force=contacts.isosurface[i].force,
-                    torque_a=contacts.isosurface[i].torque_a_body,
-                    torque_b=contacts.isosurface[i].torque_b_body,
-                    twist_convention=twist_convention_wp,
-                    body_f=state.body_f,
-                )
