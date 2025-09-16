@@ -253,48 +253,6 @@ def render_visuals(viewer, state_0, visuals):
     pass
 
 
-def render_isosurfaces(viewer, state_0, contacts, editable_vars):
-    vertex_counts = contacts.isosurface_batch.v_counts.numpy()
-    vertices = contacts.isosurface_batch.vertices.numpy()
-    centroids = contacts.isosurface_batch.centroids.numpy()
-    normals = contacts.isosurface_batch.normals.numpy()
-    centroid_pressure = contacts.isosurface_batch.centroid_pressure.numpy()
-    num_isosurfaces = vertex_counts.shape[0]
-
-    with wp.ScopedTimer("draw_polygon_normals", print=False):
-        # max_polygons_for_rendering = contacts.isosurface[i].geom_pairs.shape[0]
-        max_polygons_for_rendering = 512
-        for i in range(num_isosurfaces):
-            draw_polygon_normals(
-                viewer,
-                f"/isosurface_batch_normals_{i}",
-                max_polygons_for_rendering,
-                vertex_counts[i],
-                centroids[i],
-                normals[i],
-                centroid_pressure[i],
-                np_vertex_offset=editable_vars.np_vertex_offset,
-                render_normals=editable_vars.render_isosurfaces_normals,
-            )
-
-    with wp.ScopedTimer("draw_polygon_edges", print=False):
-        for i in range(num_isosurfaces):
-            # max_polygons_for_rendering = contacts.isosurface[i].geom_pairs.shape[0]
-            max_polygons_for_rendering = 512
-            draw_polygon_edges(
-                viewer,
-                f"/isosurface_batch_edges_{i}",
-                max_polygons_for_rendering,
-                vertex_counts[i],
-                vertices[i],
-                centroids[i],
-                normals[i],
-                centroid_pressure[i],
-                np_vertex_offset=editable_vars.np_vertex_offset,
-                render_edges=editable_vars.render_isosurfaces_edges,
-            )
-
-
 def init_isosurface_data_for_rendering(viewer, contacts, max_polygons_for_rendering=512):
     if hasattr(viewer, "isosurface_data"):
         return
@@ -355,74 +313,12 @@ def render_isosurfaces_batch(viewer, state_0, contacts, editable_vars):
         )
 
 
-def draw_polygon_normals(
-    viewer,
-    isosurface_id,
-    max_polygons_for_rendering,
-    vertex_counts,
-    polygon_centers,
-    polygon_normals,
-    pressure_values,
-    np_vertex_offset,
-    render_normals,
-):
-    lines_name = isosurface_id + "_polygon_normals"
-    points_name = isosurface_id + "_normal_tips"
-
-    normals_exists = False
+def check_if_lines_should_be_drawn(viewer, render_flag, lines_name):
+    lines_exists = False
     if isinstance(viewer, newton.viewer.ViewerGL):
-        normals_exists = lines_name in viewer.lines
+        lines_exists = lines_name in viewer.lines
 
-    if not normals_exists and not render_normals:
-        return
-
-    valid_centers = np.zeros((max_polygons_for_rendering, 3))
-    valid_tips = np.zeros((max_polygons_for_rendering, 3))
-    colors = np.zeros((max_polygons_for_rendering, 3))
-
-    num_points = 0
-    mask = vertex_counts > 0
-    if np.any(mask) and render_normals:
-        num_points = min(sum(mask), max_polygons_for_rendering)
-        valid_centers[0:num_points, :] = polygon_centers[mask][0:num_points] + np_vertex_offset
-        valid_tips[0:num_points, :] = valid_centers[0:num_points, :] + 0.01 * polygon_normals[mask][0:num_points]
-
-        valid_pressure_values = pressure_values[mask]
-        max_pressure = np.max(valid_pressure_values)
-        min_pressure = np.min(valid_pressure_values)
-        for i in range(num_points):
-            new_color = np.array(wp.render.bourke_color_map(min_pressure, max_pressure, valid_pressure_values[i]))
-            colors[i, :] = new_color
-
-    valid_centers_wp = wp.array(valid_centers, dtype=wp.vec3)
-    valid_tips_wp = wp.array(valid_tips, dtype=wp.vec3)
-    colors_wp = wp.array(colors, dtype=wp.vec3)
-    tips_radii_wp = wp.full(shape=(max_polygons_for_rendering,), value=0.00125)
-
-    viewer.log_lines(
-        name=lines_name,
-        starts=valid_centers_wp,
-        ends=valid_tips_wp,
-        colors=colors_wp,
-        width=0.0005,
-        hidden=not render_normals,
-    )
-
-    viewer.log_points(
-        name=points_name,
-        points=valid_tips_wp,
-        radii=tips_radii_wp,
-        colors=colors_wp,
-        hidden=not render_normals,
-    )
-
-
-def check_if_polygon_normals_should_be_drawn(viewer, render_normals, lines_name, points_name):
-    normals_exists = False
-    if isinstance(viewer, newton.viewer.ViewerGL):
-        normals_exists = lines_name in viewer.lines
-
-    if not normals_exists and not render_normals:
+    if not lines_exists and not render_flag:
         return False
 
     return True
@@ -435,8 +331,7 @@ def update_drawing_data_for_polygon_normals_batch(
     render_normals,
 ):
     lines_name = viewer.isosurface_data["normals"]["lines_name"]
-    points_name = viewer.isosurface_data["normals"]["points_name"]
-    if not check_if_polygon_normals_should_be_drawn(viewer, render_normals, lines_name, points_name):
+    if not check_if_lines_should_be_drawn(viewer, render_normals, lines_name):
         return
 
     viewer.isosurface_data["normals"]["starts"].zero_()
@@ -468,7 +363,7 @@ def draw_polygon_normals_batch(
 ):
     lines_name = viewer.isosurface_data["normals"]["lines_name"]
     points_name = viewer.isosurface_data["normals"]["points_name"]
-    if not check_if_polygon_normals_should_be_drawn(viewer, render_normals, lines_name, points_name):
+    if not check_if_lines_should_be_drawn(viewer, render_normals, lines_name):
         return
 
     viewer.log_lines(
@@ -489,17 +384,6 @@ def draw_polygon_normals_batch(
     )
 
 
-def check_if_polygon_edges_should_be_drawn(viewer, render_edges, edges_name):
-    edges_exists = False
-    if isinstance(viewer, newton.viewer.ViewerGL):
-        edges_exists = edges_name in viewer.lines
-
-    if not edges_exists and not render_edges:
-        return False
-
-    return True
-
-
 def update_drawing_data_for_polygon_edges_batch(
     viewer,
     isosurface_batch,
@@ -507,7 +391,7 @@ def update_drawing_data_for_polygon_edges_batch(
     render_edges,
 ):
     edges_name = viewer.isosurface_data["edges"]["lines_name"]
-    if not check_if_polygon_edges_should_be_drawn(viewer, render_edges, edges_name):
+    if not check_if_lines_should_be_drawn(viewer, render_edges, edges_name):
         return
 
     viewer.isosurface_data["edges"]["starts"].zero_()
@@ -538,7 +422,7 @@ def draw_polygon_edges_batch(
     render_edges,
 ):
     edges_name = viewer.isosurface_data["edges"]["lines_name"]
-    if not check_if_polygon_edges_should_be_drawn(viewer, render_edges, edges_name):
+    if not check_if_lines_should_be_drawn(viewer, render_edges, edges_name):
         return
 
     viewer.log_lines(
@@ -548,83 +432,6 @@ def draw_polygon_edges_batch(
         colors=viewer.isosurface_data["edges"]["colors"],
         width=0.0005,
         # hidden=not render_edges,
-    )
-
-
-def draw_polygon_edges(
-    viewer,
-    isosurface_id,
-    max_polygons_for_rendering,
-    vertex_counts,
-    polygon_vertices,
-    polygon_centers,
-    polygon_normals,
-    pressure_values,
-    np_vertex_offset,
-    render_edges,
-):
-    edges_name = isosurface_id + "_polygon_edges"
-
-    edges_exists = False
-    if isinstance(viewer, newton.viewer.ViewerGL):
-        edges_exists = edges_name in viewer.lines
-
-    if not edges_exists and not render_edges:
-        return
-
-    valid_centers = np.zeros((max_polygons_for_rendering, 3))
-
-    valid_edge_starts = np.zeros(((8 + 7) * max_polygons_for_rendering, 3))
-    valid_edge_ends = np.zeros(((8 + 7) * max_polygons_for_rendering, 3))
-    colors = np.zeros(((8 + 7) * max_polygons_for_rendering, 3))
-
-    num_points = 0
-    mask = vertex_counts > 0
-
-    if np.any(mask) and render_edges:
-        num_points = min(sum(mask), max_polygons_for_rendering)
-        # TODO: Print warning if sum(mask) > max_tet_pairs_found.
-        if sum(mask) > max_polygons_for_rendering:
-            print(
-                f"Warning: sum(mask) > max_polygons_for_rendering in draw_polygon_edges. {sum(mask)} > {max_polygons_for_rendering}. Consider increasing max_polygons_for_rendering."
-            )
-        valid_centers[0:num_points, :] = polygon_centers[mask][0:num_points] + np_vertex_offset
-
-        valid_pressure_values = pressure_values[mask]
-        max_pressure = np.max(valid_pressure_values)
-        min_pressure = np.min(valid_pressure_values)
-
-        valid_indices = np.nonzero(vertex_counts)[0]
-
-        # Compute edges
-        for i in range(num_points):
-            # Get the polygon index.
-            polygon_index = valid_indices[i]
-            vertex_count = vertex_counts[polygon_index]
-            # Block of vertices for the polygon.
-            block_start = 8 * polygon_index
-            block_end = block_start + vertex_count
-            valid_polygon_vertices = polygon_vertices[block_start:block_end] + np_vertex_offset
-            # Add edges for the polygon.
-            for j in range(vertex_count):
-                # Edge from center to vertex of polygon.
-                valid_edge_starts[i * 15 + j, :] = valid_centers[i, :]
-                valid_edge_ends[i * 15 + j, :] = valid_polygon_vertices[j, :]
-
-                # Edge from vertex to vertex of polygon.
-                valid_edge_starts[i * 15 + 8 + j, :] = valid_polygon_vertices[j, :]
-                valid_edge_ends[i * 15 + 8 + j, :] = valid_polygon_vertices[(j + 1) % vertex_count, :]
-
-            # Set same color for all edges in the block.
-            new_color = wp.render.bourke_color_map(min_pressure, max_pressure, pressure_values[polygon_index])
-            colors[i * 15 : (i + 1) * 15, :] = np.array(new_color)
-
-    viewer.log_lines(
-        name=edges_name,
-        starts=wp.array(valid_edge_starts, dtype=wp.vec3),
-        ends=wp.array(valid_edge_ends, dtype=wp.vec3),
-        colors=wp.array(colors, dtype=wp.vec3),
-        width=0.0005,
     )
 
 
