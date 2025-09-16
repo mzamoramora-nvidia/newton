@@ -25,8 +25,8 @@ def compute_velocity_at_point(body_q: wp.transform, body_qd: wp.spatial_vector, 
     #       = body_v + wp.cross(body_w, R)
 
     com = wp.transform_get_translation(body_q)
-    body_w = wp.spatial_top(body_qd)  # angular velocity in world frame
-    body_v = wp.spatial_bottom(body_qd)
+    body_v = wp.spatial_top(body_qd)
+    body_w = wp.spatial_bottom(body_qd)  # angular velocity in world frame
 
     R_dot = body_v
     if twist_convention == 0:  # newton convention
@@ -322,18 +322,18 @@ def batch_add_wrench_to_body_f(
         body_b = body_b_idx[surf_id]
 
         if twist_convention == 0:
-            body_f[body_a] += wp.spatial_vector(torque_a[surf_id], force[surf_id])
-            body_f[body_b] -= wp.spatial_vector(torque_b[surf_id], force[surf_id])
+            body_f[body_a] += wp.spatial_vector(force[surf_id], torque_a[surf_id])
+            body_f[body_b] -= wp.spatial_vector(force[surf_id], torque_b[surf_id])
         elif twist_convention == 1:
-            body_f[body_a] -= wp.spatial_vector(torque_a[surf_id], force[surf_id])
-            body_f[body_b] += wp.spatial_vector(torque_b[surf_id], force[surf_id])
+            body_f[body_a] -= wp.spatial_vector(force[surf_id], torque_a[surf_id])
+            body_f[body_b] += wp.spatial_vector(force[surf_id], torque_b[surf_id])
         elif twist_convention == 2:
             # For mujoco, forces should be applied in the world frame.
             # See https://github.com/google-deepmind/mujoco/issues/691
             # https://github.com/google-deepmind/mujoco/discussions/2350#discussioncomment-11819398
             # and https://github.com/newton-physics/newton/pull/213
-            body_f[body_a] += wp.spatial_vector(torque_a[surf_id], force[surf_id])
-            body_f[body_b] -= wp.spatial_vector(torque_b[surf_id], force[surf_id])
+            body_f[body_a] += wp.spatial_vector(force[surf_id], torque_a[surf_id])
+            body_f[body_b] -= wp.spatial_vector(force[surf_id], torque_b[surf_id])
     # for body_id in range(body_f.shape[0]):
     #     wp.printf("body_f[%d]: %f, %f, %f, %f, %f, %f \n", body_id, body_f[body_id][0], body_f[body_id][1], body_f[body_id][2], body_f[body_id][3], body_f[body_id][4], body_f[body_id][5])
 
