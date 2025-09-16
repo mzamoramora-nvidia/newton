@@ -1,4 +1,3 @@
-import numpy as np
 import warp as wp
 
 import newton.viewer
@@ -197,6 +196,7 @@ def compute_tet_mesh_edges(
         j = (i + 1) % len(element)
         line_starts[tid * 6 + i] = v[i]
         line_ends[tid * 6 + i] = v[j]
+
 
 def render_visuals(viewer, state_0, visuals):
     pass

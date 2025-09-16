@@ -49,24 +49,6 @@ wp.config.verbose_warnings = True
 # wp.config.verify_fp = True
 
 
-class EditableVars:
-    def __init__(self):
-        # Drawing vars
-        self.np_vertex_offset = wp.vec3(0.0, 0.2, 0.0)  # [0.0, 0.2, 0.0]
-        self.proxy_of_max_tet_pairs = 80  # 150  # len(self.tet_pairs)
-
-        self.render_isosurfaces_edges = False
-        self.render_isosurfaces_normals = False
-        self.render_tet_mesh_edges = False
-        self.render_forces_flag = True
-        # With a scale of 0.01, an object of 1kg that results in a force of 9.8N, will have an arrow of approx 0.01m = 1cm.
-        # The maximum gripping force of Robotiq 2F-140 is 125N. With a scale of 0.001, the arrow will be 0.125m = 12.5cm.
-        self.force_scale = 0.1  # 0.01
-        # Enabling plotting will make the simulation very slow.
-        # TODO: Figure out a way to replace matplotlib with ImGuiPlot via imgui-bundle.
-        self.plot_flag = False
-
-
 class Example:
     def __init__(self, viewer, verbose=False):
         # setup simulation parameters first
@@ -85,7 +67,7 @@ class Example:
         self.dirs = hydroelastic_utils.get_dirs(self.up_axis)
         self.device = wp.get_device()
         self.use_cuda_graph = True
-        self.editable_vars = EditableVars()
+        self.editable_vars = hydroelastic_types.EditableVars()
         self.editable_vars.np_vertex_offset = 0.5 * self.dirs.up
 
         # Load model

@@ -131,3 +131,21 @@ class Dirs:
     up = np.array([0.0, 0.0, 1.0])
     front = np.array([1.0, 0.0, 0.0])
     right = np.array([0.0, 1.0, 0.0])
+
+
+class EditableVars:
+    def __init__(self):
+        # Drawing vars
+        self.np_vertex_offset = np.array([0.0, 0.0, 0.5])
+
+        self.render_isosurfaces_edges = False
+        self.render_isosurfaces_normals = False
+        self.render_tet_mesh_edges = False
+        self.render_forces_flag = True
+
+        # With a scale of 0.01, an object of 1kg that results in a force of 9.8N, will have an arrow of approx 0.01m = 1cm.
+        # The maximum gripping force of Robotiq 2F-140 is 125N. With a scale of 0.001, the arrow will be 0.125m = 12.5cm.
+        self.force_scale = 0.1
+        # Enabling plotting will make the simulation very slow.
+        # TODO: Figure out a way to replace matplotlib with ImGuiPlot via imgui-bundle.
+        self.plot_flag = False

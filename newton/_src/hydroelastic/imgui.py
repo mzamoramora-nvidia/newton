@@ -103,10 +103,6 @@ class HydroelasticImGuiManager:
                 self.example.sim_substeps = value
                 self.example.sim_dt = self.example.frame_dt / self.example.sim_substeps
 
-        changed, value = imgui.input_int("proxy_of_max_tet_pairs", editable_vars.proxy_of_max_tet_pairs)
-        if changed:
-            editable_vars.proxy_of_max_tet_pairs = value
-
         imgui.set_next_item_open(True, imgui.Cond_.appearing)
         if imgui.collapsing_header("render_isosurfaces"):
             _, editable_vars.render_isosurfaces_edges = imgui.checkbox(
