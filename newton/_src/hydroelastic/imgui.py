@@ -130,43 +130,53 @@ class HydroelasticImGuiManager:
         if changed:
             editable_vars.force_scale = value
 
+        imgui.separator()
+        _, editable_vars.imgui_isosurfaces_flag = imgui.checkbox(
+            "imgui_isosurfaces_flag", editable_vars.imgui_isosurfaces_flag
+        )
+
     def imgui_isosurfaces(self, imgui):
         # Isosurfaces info
         if self.example is None:
             return
 
-        if not hasattr(self.example.contacts, "isosurface"):
+        if not hasattr(self.example.contacts, "isosurface_batch"):
             # print("example.contacts.isosurface not found")
             return
 
-        if self.example.contacts.isosurface is None:
+        if not self.example.editable_vars.imgui_isosurfaces_flag:
             return
 
-        isosurfaces = self.example.contacts.isosurface
+        isosurfaces = self.example.contacts.isosurface_batch
+
+        num_isosurfaces = isosurfaces.force.shape[0]
+        body_a_idx = isosurfaces.body_a_idx.numpy()
+        body_b_idx = isosurfaces.body_b_idx.numpy()
+        force = isosurfaces.force.numpy()
+        torque_a = isosurfaces.torque_a.numpy()
+        torque_b = isosurfaces.torque_b.numpy()
+        torque_a_body = isosurfaces.torque_a_body.numpy()
+        torque_b_body = isosurfaces.torque_b_body.numpy()
+        force_n = isosurfaces.force_n.numpy()
+        force_t = isosurfaces.force_t.numpy()
 
         header_flags = 0
-        for i in range(len(isosurfaces)):
-            body_a = isosurfaces[i].body_a
-            body_b = isosurfaces[i].body_b
+        for i in range(num_isosurfaces):
+            body_a = body_a_idx[i]
+            body_b = body_b_idx[i]
             isosurface_header_expanded = imgui.collapsing_header(f"Isosurfaces-{body_a}-{body_b}", flags=header_flags)
             if isosurface_header_expanded:
-                imgui.text(f"max_tet_pairs_found: {isosurfaces[i].max_tet_pairs_found}")
+                v_counts = isosurfaces.v_counts.numpy()[i, :]
+                num_element_pairs = np.sum(v_counts > 0)
+                imgui.text(f"num_element_pairs: {num_element_pairs}")
 
-                force = isosurfaces[i].force.numpy()[0, :]
-                torque_a = isosurfaces[i].torque_a.numpy()[0, :]
-                torque_b = isosurfaces[i].torque_b.numpy()[0, :]
-                torque_a_body = isosurfaces[i].torque_a_body.numpy()[0, :]
-                torque_b_body = isosurfaces[i].torque_b_body.numpy()[0, :]
-                force_n = isosurfaces[i].force_n.numpy()[0, :]
-                force_t = isosurfaces[i].force_t.numpy()[0, :]
-
-                self.imgui_np_vec3(imgui, "force        ", force)
-                self.imgui_np_vec3(imgui, "torque_a     ", torque_a)
-                self.imgui_np_vec3(imgui, "torque_b     ", torque_b)
-                self.imgui_np_vec3(imgui, "torque_a_body", torque_a_body)
-                self.imgui_np_vec3(imgui, "torque_b_body", torque_b_body)
-                self.imgui_np_vec3(imgui, "force_n      ", force_n)
-                self.imgui_np_vec3(imgui, "force_t      ", force_t)
+                self.imgui_np_vec3(imgui, "force        ", force[i, :])
+                self.imgui_np_vec3(imgui, "torque_a     ", torque_a[i, :])
+                self.imgui_np_vec3(imgui, "torque_b     ", torque_b[i, :])
+                self.imgui_np_vec3(imgui, "torque_a_body", torque_a_body[i, :])
+                self.imgui_np_vec3(imgui, "torque_b_body", torque_b_body[i, :])
+                self.imgui_np_vec3(imgui, "force_n      ", force_n[i, :])
+                self.imgui_np_vec3(imgui, "force_t      ", force_t[i, :])
 
             imgui.separator()
 

@@ -143,6 +143,8 @@ class EditableVars:
         self.render_tet_mesh_edges = False
         self.render_forces_flag = True
 
+        self.imgui_isosurfaces_flag = False
+
         # With a scale of 0.01, an object of 1kg that results in a force of 9.8N, will have an arrow of approx 0.01m = 1cm.
         # The maximum gripping force of Robotiq 2F-140 is 125N. With a scale of 0.001, the arrow will be 0.125m = 12.5cm.
         self.force_scale = 0.1
