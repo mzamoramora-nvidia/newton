@@ -158,7 +158,7 @@ class Example:
             self.viewer.stage.SetFramesPerSecond(self.fps)
 
         hydroelastic_render_utils.init_isosurface_data_for_rendering(
-            self.viewer, self.contacts, max_polygons_for_rendering=1024
+            self.viewer, self.contacts, max_polygons_for_rendering=512
         )
 
         # ==============================================================================================================
