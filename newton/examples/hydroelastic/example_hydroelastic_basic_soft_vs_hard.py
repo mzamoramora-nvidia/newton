@@ -299,7 +299,6 @@ class Example:
         # Render the scene
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
-        # self.render_forces()
         # self.render_visuals()
         self.render_isosurface()
         self.viewer.end_frame()
