@@ -11,7 +11,6 @@ from newton._src.hydroelastic.make_fields import (
 from newton._src.hydroelastic.tetrahedralizer import tetrahedralize
 from newton._src.hydroelastic.types import (
     HydroelasticObject,
-    Isosurface,
 )
 from newton._src.hydroelastic.utils import (
     compute_aabb_elements,
@@ -531,29 +530,6 @@ def add_robot(builder, up_axis):
 
     xform = wp.transform(wp.vec3(0), wp.quat_identity())
     builder.add_builder(articulation_builder, xform, separate_collision_group=False)
-
-
-def init_isosurfaces(collision_pairs, isosurfaces, meshes, max_geom_pairs=-1, device=None):
-    geom_pairs_count = 0
-    if isinstance(max_geom_pairs, int):
-        max_geom_pairs = [max_geom_pairs] * len(collision_pairs)
-    for i, c in enumerate(collision_pairs):
-        body_a = c[0]
-        body_b = c[1]
-        num_elements_a = meshes[body_a].mesh.elements_count
-        num_elements_b = meshes[body_b].mesh.elements_count
-
-        l = [(x, y) for x in range(num_elements_a) for y in range(num_elements_b)]
-        query_mesh_a = num_elements_a > num_elements_b
-        isosurfaces.append(
-            Isosurface(body_a, body_b, l, meshes[body_b].is_soft, max_geom_pairs[i], query_mesh_a, device)
-        )
-        geom_pairs_count += len(l)
-        print(
-            f"{isosurfaces[-1].label} -> list of geom pairs N: {len(l)}. num_elements_a: {num_elements_a}, num_elements_b: {num_elements_b}"
-        )
-
-    return len(isosurfaces)
 
 
 def init_hydro_batch(hydro_objects, hydro_batch):
