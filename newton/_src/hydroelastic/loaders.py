@@ -550,18 +550,22 @@ def init_hydro_batch(hydro_objects, hydro_batch):
     indices = np.zeros((meshes_count, max_indices_count), dtype=np.int32)
     elements_count = np.zeros((meshes_count), dtype=np.int32)
     elements_stride = np.zeros((meshes_count), dtype=np.int32)
+
     is_soft = np.zeros((meshes_count), dtype=np.bool)
+
     # Per-vertex fields.
     field = np.zeros((meshes_count, max_points_count), dtype=np.float32)
     # Per-element fields gradient.
     field_gradient = np.zeros((meshes_count, max_elements_count, 3), dtype=np.float32)
     default_tet_transform_inv = np.zeros((meshes_count, max_elements_count, 4, 4), dtype=np.float32)
+
     normals = np.zeros((meshes_count, max_elements_count, 3), dtype=np.float32)
 
     h = np.zeros((meshes_count), dtype=np.float32)
     d = np.zeros((meshes_count), dtype=np.float32)
     mu_static = np.zeros((meshes_count), dtype=np.float32)
     mu_dynamic = np.zeros((meshes_count), dtype=np.float32)
+
     bvh_ids = np.zeros((meshes_count), dtype=np.uint64)
 
     for i, object in enumerate(hydro_objects):
@@ -588,54 +592,30 @@ def init_hydro_batch(hydro_objects, hydro_batch):
         d[i] = object.hunt_crossley_dissipation
         mu_static[i] = object.mu_static
         mu_dynamic[i] = object.mu_dynamic
+
         bvh_ids[i] = object.bvh.id
 
     # Initialize the mesh batch.
     hydro_batch.max_elements_count = wp.int32(max_elements_count)
-    hydro_batch.default_points = wp.zeros((meshes_count, max_points_count), dtype=wp.vec3f)
-    hydro_batch.indices = wp.zeros((meshes_count, max_indices_count), dtype=wp.int32)
-    hydro_batch.elements_count = wp.zeros((meshes_count), dtype=wp.int32)
-    hydro_batch.elements_stride = wp.zeros((meshes_count), dtype=wp.int32)
+    hydro_batch.default_points = wp.array(default_points, dtype=wp.vec3f)
+    hydro_batch.indices = wp.array(indices, dtype=wp.int32)
+    hydro_batch.elements_count = wp.array(elements_count, dtype=wp.int32)
+    hydro_batch.elements_stride = wp.array(elements_stride, dtype=wp.int32)
 
-    hydro_batch.is_soft = wp.zeros((meshes_count), dtype=wp.bool)
+    hydro_batch.is_soft = wp.array(is_soft, dtype=wp.bool)
 
-    hydro_batch.field = wp.zeros((meshes_count, max_points_count), dtype=wp.float32)
-    hydro_batch.field_gradient = wp.zeros((meshes_count, max_elements_count), dtype=wp.vec3f)
-    hydro_batch.default_tet_transform_inv = wp.zeros((meshes_count, max_elements_count), dtype=wp.mat44)
+    hydro_batch.field = wp.array(field, dtype=wp.float32)
+    hydro_batch.field_gradient = wp.array(field_gradient, dtype=wp.vec3f)
+    hydro_batch.default_tet_transform_inv = wp.array(default_tet_transform_inv, dtype=wp.mat44)
 
-    hydro_batch.normals = wp.zeros((meshes_count, max_elements_count), dtype=wp.vec3f)
+    hydro_batch.normals = wp.array(normals, dtype=wp.vec3f)
 
-    hydro_batch.h = wp.zeros((meshes_count), dtype=wp.float32)
-    hydro_batch.d = wp.zeros((meshes_count), dtype=wp.float32)
-    hydro_batch.mu_static = wp.zeros((meshes_count), dtype=wp.float32)
-    hydro_batch.mu_dynamic = wp.zeros((meshes_count), dtype=wp.float32)
+    hydro_batch.h = wp.array(h, dtype=wp.float32)
+    hydro_batch.d = wp.array(d, dtype=wp.float32)
+    hydro_batch.mu_static = wp.array(mu_static, dtype=wp.float32)
+    hydro_batch.mu_dynamic = wp.array(mu_dynamic, dtype=wp.float32)
 
-    hydro_batch.bvh_ids = wp.zeros((meshes_count), dtype=wp.uint64)
-
-    # Convert numpy arrays to wp arrays.
-    # TODO: Remove the assigne and use the wp arrays directly.
-    # Assigning the numpy arrays to the wp arrays just as sanity check to make sure that
-    # the dimensions are correct.
-    hydro_batch.default_points.assign(wp.array(default_points, dtype=wp.vec3f))
-    hydro_batch.indices.assign(wp.array(indices, dtype=wp.int32))
-    hydro_batch.elements_count.assign(wp.array(elements_count, dtype=wp.int32))
-    hydro_batch.elements_stride.assign(wp.array(elements_stride, dtype=wp.int32))
-
-    hydro_batch.is_soft.assign(wp.array(is_soft, dtype=wp.bool))
-
-    hydro_batch.field.assign(wp.array(field, dtype=wp.float32))
-    hydro_batch.field_gradient.assign(wp.array(field_gradient, dtype=wp.vec3f))
-    # TODO: Double check if the dimensions are correct.
-    hydro_batch.default_tet_transform_inv.assign(wp.array(default_tet_transform_inv, dtype=wp.mat44))
-
-    hydro_batch.normals.assign(wp.array(normals, dtype=wp.vec3f))
-
-    hydro_batch.h.assign(wp.array(h, dtype=wp.float32))
-    hydro_batch.d.assign(wp.array(d, dtype=wp.float32))
-    hydro_batch.mu_static.assign(wp.array(mu_static, dtype=wp.float32))
-    hydro_batch.mu_dynamic.assign(wp.array(mu_dynamic, dtype=wp.float32))
-
-    hydro_batch.bvh_ids.assign(wp.array(bvh_ids, dtype=wp.uint64))
+    hydro_batch.bvh_ids = wp.array(bvh_ids, dtype=wp.uint64)
 
 
 def init_isosurface_batch(isosurface_batch, collision_pairs, hydro_batch, max_element_pairs=-1):
