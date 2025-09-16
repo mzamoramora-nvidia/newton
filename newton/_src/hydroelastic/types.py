@@ -62,20 +62,20 @@ class HydroelasticObject:
 @wp.struct
 class HydroelasticBatch:
     max_elements_count: wp.int32
-    default_points: wp.array(dtype=wp.vec3f)
-    indices: wp.array(dtype=wp.int32)
+    default_points: wp.array2d(dtype=wp.vec3f)
+    indices: wp.array2d(dtype=wp.int32)
     elements_count: wp.array(dtype=wp.int32)
     elements_stride: wp.array(dtype=wp.int32)
 
     is_soft: wp.array(dtype=wp.bool)
 
     # Only used for soft meshes (Tetrahedral meshes).
-    field: wp.array(dtype=wp.float32)
-    field_gradient: wp.array(dtype=wp.vec3f)
-    default_tet_transform_inv: wp.array(dtype=wp.mat44)
+    field: wp.array2d(dtype=wp.float32)
+    field_gradient: wp.array2d(dtype=wp.vec3f)
+    default_tet_transform_inv: wp.array2d(dtype=wp.mat44)
 
     # Only used for rigid meshes (Triangular meshes).
-    normals: wp.array(dtype=wp.vec3f)
+    normals: wp.array2d(dtype=wp.vec3f)
 
     # Material properties
     h: wp.array(dtype=wp.float32)
@@ -86,25 +86,21 @@ class HydroelasticBatch:
     # Bvh
     bvh_ids: wp.array(dtype=wp.uint64)
 
-    # The folllowing fields are experimental or for debugging purposes.
-    edges: wp.array(dtype=wp.vec2i)
-    is_on_surface: wp.array(dtype=wp.bool)
-
 
 @wp.struct
 class IsosurfaceBatch:
     max_element_pairs: wp.int32
-    element_pairs: wp.array(dtype=wp.vec2i)
+    element_pairs: wp.array2d(dtype=wp.vec2i)
     body_a_idx: wp.array(dtype=wp.int32)
     body_b_idx: wp.array(dtype=wp.int32)
 
     ## Contact polygon data
-    v_counts: wp.array(dtype=wp.int32)
-    vertices: wp.array(dtype=wp.vec3f)
-    centroids: wp.array(dtype=wp.vec3f)
-    cartesian_to_penetration: wp.array(dtype=wp.vec4f)
-    normals: wp.array(dtype=wp.vec3f)
-    centroid_pressure: wp.array(dtype=wp.float32)
+    v_counts: wp.array2d(dtype=wp.int32)
+    vertices: wp.array2d(dtype=wp.vec3f)
+    centroids: wp.array2d(dtype=wp.vec3f)
+    cartesian_to_penetration: wp.array2d(dtype=wp.vec4f)
+    normals: wp.array2d(dtype=wp.vec3f)
+    centroid_pressure: wp.array2d(dtype=wp.float32)
 
     # Combined material properties
     # Hydroelastic modulus
