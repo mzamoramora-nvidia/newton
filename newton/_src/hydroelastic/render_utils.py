@@ -140,6 +140,42 @@ def get_isosurface_edges_data(
 
 
 @wp.kernel
+def get_isosurface_wrenches_data(
+    body_q: wp.array(dtype=wp.transform),
+    body_a_idx: wp.array(dtype=wp.int32),
+    force_n: wp.array(dtype=wp.vec3),
+    force_t: wp.array(dtype=wp.vec3),
+    torque_a_body: wp.array(dtype=wp.vec3),
+    force_scale: wp.float32,
+    vertex_offset: wp.vec3,
+    # Outputs.
+    starts: wp.array(dtype=wp.vec3),
+    tips: wp.array(dtype=wp.vec3),
+    colors: wp.array(dtype=wp.vec3),
+):
+    surf_id = wp.tid()
+    body_idx = body_a_idx[surf_id]
+
+    # wrench_pos = wp.transform_point(body_q[body_a], vertex_offset)
+    wrench_pos = vertex_offset + wp.transform_get_translation(body_q[body_idx])
+
+    offset = wp.int32(surf_id * 3)
+    starts[offset] = wrench_pos
+    tips[offset] = wrench_pos + force_scale * force_n[surf_id]
+    colors[offset] = wp.vec3(0.90, 0.10, 0.10)
+
+    offset += 1
+    starts[offset] = wrench_pos
+    tips[offset] = wrench_pos + force_scale * force_t[surf_id]
+    colors[offset] = wp.vec3(0.10, 0.90, 0.00)
+
+    offset += 1
+    starts[offset] = wrench_pos
+    tips[offset] = wrench_pos + force_scale * torque_a_body[surf_id]
+    colors[offset] = wp.vec3(0.10, 0.10, 0.90)
+
+
+@wp.kernel
 def compute_tet_mesh_edges(
     body_q: wp.array(dtype=wp.transform),
     body_id: wp.int32,
@@ -260,6 +296,7 @@ def init_isosurface_data_for_rendering(viewer, contacts, max_polygons_for_render
     num_isosurfaces = contacts.isosurface_batch.v_counts.shape[0]
     normals_size = num_isosurfaces * max_polygons_for_rendering
     edges_size = num_isosurfaces * max_polygons_for_rendering * 16
+    wrenches_size = num_isosurfaces * 3
 
     viewer.isosurface_data = {}
     # Normals
@@ -277,6 +314,15 @@ def init_isosurface_data_for_rendering(viewer, contacts, max_polygons_for_render
     viewer.isosurface_data["edges"]["starts"] = wp.zeros(edges_size, dtype=wp.vec3)
     viewer.isosurface_data["edges"]["ends"] = wp.zeros(edges_size, dtype=wp.vec3)
     viewer.isosurface_data["edges"]["colors"] = wp.zeros(edges_size, dtype=wp.vec3)
+
+    # Wrenches
+    viewer.isosurface_data["wrenches"] = {}
+    viewer.isosurface_data["wrenches"]["lines_name"] = "/isosurface_batch_wrenches"
+    viewer.isosurface_data["wrenches"]["points_name"] = "/isosurface_batch_wrenches_tips"
+    viewer.isosurface_data["wrenches"]["starts"] = wp.zeros(wrenches_size, dtype=wp.vec3)
+    viewer.isosurface_data["wrenches"]["tips"] = wp.zeros(wrenches_size, dtype=wp.vec3)
+    viewer.isosurface_data["wrenches"]["colors"] = wp.zeros(wrenches_size, dtype=wp.vec3)
+    viewer.isosurface_data["wrenches"]["radii"] = wp.full(wrenches_size, value=0.004, dtype=wp.float32)
 
 
 def render_isosurfaces_batch(viewer, state_0, contacts, editable_vars):
@@ -296,6 +342,8 @@ def render_isosurfaces_batch(viewer, state_0, contacts, editable_vars):
         editable_vars.render_isosurfaces_edges,
     )
 
+    update_drawing_data_for_wrenches_batch(viewer, state_0, contacts.isosurface_batch, editable_vars)
+
     if editable_vars.render_isosurfaces_normals or editable_vars.render_isosurfaces_edges:
         wp.synchronize()
 
@@ -311,6 +359,9 @@ def render_isosurfaces_batch(viewer, state_0, contacts, editable_vars):
             viewer,
             editable_vars.render_isosurfaces_edges,
         )
+
+    with wp.ScopedTimer("draw_wrenches", print=False):
+        draw_wrenches_batch(viewer, editable_vars)
 
 
 def check_if_lines_should_be_drawn(viewer, render_flag, lines_name):
@@ -432,6 +483,64 @@ def draw_polygon_edges_batch(
         colors=viewer.isosurface_data["edges"]["colors"],
         width=0.0005,
         # hidden=not render_edges,
+    )
+
+
+def update_drawing_data_for_wrenches_batch(viewer, state_0, isosurface_batch, editable_vars):
+    render_wrenches = editable_vars.render_forces_flag
+    wrenches_name = viewer.isosurface_data["wrenches"]["lines_name"]
+    if not check_if_lines_should_be_drawn(viewer, render_wrenches, wrenches_name):
+        return
+
+    viewer.isosurface_data["wrenches"]["starts"].zero_()
+    viewer.isosurface_data["wrenches"]["tips"].zero_()
+    viewer.isosurface_data["wrenches"]["colors"].zero_()
+
+    if render_wrenches:
+        vertex_offset = wp.vec3(editable_vars.np_vertex_offset)
+        force_scale = wp.float32(editable_vars.force_scale)
+        wp.launch(
+            get_isosurface_wrenches_data,
+            dim=isosurface_batch.centroids.shape[0],
+            inputs=[
+                state_0.body_q,
+                isosurface_batch.body_a_idx,
+                isosurface_batch.force_n,
+                isosurface_batch.force_t,
+                isosurface_batch.torque_a_body,
+                force_scale,
+                vertex_offset,
+            ],
+            outputs=[
+                viewer.isosurface_data["wrenches"]["starts"],
+                viewer.isosurface_data["wrenches"]["tips"],
+                viewer.isosurface_data["wrenches"]["colors"],
+            ],
+        )
+
+
+def draw_wrenches_batch(viewer, editable_vars):
+    render_wrenches = editable_vars.render_forces_flag
+    wrenches_name = viewer.isosurface_data["wrenches"]["lines_name"]
+    points_name = viewer.isosurface_data["wrenches"]["points_name"]
+    if not check_if_lines_should_be_drawn(viewer, render_wrenches, wrenches_name):
+        return
+
+    viewer.log_lines(
+        name=wrenches_name,
+        starts=viewer.isosurface_data["wrenches"]["starts"],
+        ends=viewer.isosurface_data["wrenches"]["tips"],
+        colors=viewer.isosurface_data["wrenches"]["colors"],
+        width=0.002,
+        hidden=not render_wrenches,
+    )
+
+    viewer.log_points(
+        name=points_name,
+        points=viewer.isosurface_data["wrenches"]["tips"],
+        radii=viewer.isosurface_data["wrenches"]["radii"],
+        colors=viewer.isosurface_data["wrenches"]["colors"],
+        hidden=not render_wrenches,
     )
 
 
