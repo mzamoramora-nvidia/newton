@@ -38,6 +38,7 @@ import newton._src.hydroelastic.loaders as hydroelastic_loaders
 import newton._src.hydroelastic.render_utils as hydroelastic_render_utils
 import newton._src.hydroelastic.types as hydroelastic_types
 import newton._src.hydroelastic.utils as hydroelastic_utils
+import newton._src.hydroelastic.plot_utils as hydroelastic_plot_utils
 import newton.examples
 import newton.utils
 
@@ -424,7 +425,7 @@ class Example:
 
         self.compute_control()
 
-        # self.append_to_data_history()
+        self.append_to_data_history()
         # print(self.sim_time)
 
     def assign_control(self, control):
@@ -523,43 +524,14 @@ class Example:
         self.render_isosurface()
         self.viewer.end_frame()
 
-        # self.plot()
+        #self.plot()
         self.frame += 1
 
     def append_to_data_history(self):
-        return
-        num_isosurfaces = len(self.contacts.isosurface)
-        num_bodies = self.model.body_count
-        num_data = num_bodies + num_isosurfaces
-        np_data = np.zeros((num_data, 9))
-        for i in range(num_isosurfaces):
-            torque = self.contacts.isosurface[i].torque_a_body.numpy()[0, :]
-            force_n = self.contacts.isosurface[i].force_n.numpy()[0, :]
-            force_t = self.contacts.isosurface[i].force_t.numpy()[0, :]
-            np_data[i, 0:3] = torque
-            np_data[i, 3:6] = force_n
-            np_data[i, 6:9] = force_t
+        if not self.editable_vars.plot_flag:
+            return
 
-        body_q_np = self.state_0.body_q.numpy()
-        body_qd_np = self.state_0.body_qd.numpy()
-        if self.twist_convention == 1:
-            body_qd_np = self.solver.body_v_s.numpy()
-        for i in range(num_bodies):
-            com = body_q_np[i, 0:3]
-            omega = body_qd_np[i, 0:3]
-            vs = body_qd_np[i, 3:6]
-            p_com = vs
-            if self.twist_convention == 1:
-                p_com += wp.cross(omega, com)
-            elif self.twist_convention == 2:
-                quat = wp.quat(body_q_np[i, 3:7])
-                Tf = wp.transform(wp.vec3f(0.0, 0.0, 0.0), quat)
-                omega = np.array(wp.transform_vector(Tf, wp.vec3f(omega)))
-                # omega = body_q_np[i, 3:7]
-            np_data[num_isosurfaces + i, 0:3] = omega
-            np_data[num_isosurfaces + i, 3:6] = p_com
-
-        self.data_history.append(np_data)
+        hydroelastic_plot_utils.append_to_data_history(self.data_history, self.state_0, self.solver, self.contacts, self.twist_convention)
 
     def plot_with_legend(self, t, data, ax, subplot_id):
         legend_title = f"min: {np.min(data):.2E}\nmax: {np.max(data):.2E}\nl: {data[-1]:.2E}"
