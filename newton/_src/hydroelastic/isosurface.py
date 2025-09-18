@@ -1241,18 +1241,18 @@ def compute_soft_soft_fun_batch(
 
     # Normalizing plane equation.
     plane_equation = (1.0 / normal_magnitude) * plane_equation
-    plane_normal = wp.vec3(plane_equation.x, plane_equation.y, plane_equation.z)
-    warn_degenerate_plane(plane_normal, pair_idx)
+    cp_normals[surf_id, pair_idx] = wp.vec3(plane_equation.x, plane_equation.y, plane_equation.z)
+    warn_degenerate_plane(cp_normals[surf_id, pair_idx], pair_idx)
 
     # Transform the pressure gradient to the world frame.
     grad_p_a_W = wp.transform_vector(body_q[body_a], grad_p[body_a, tet_idx_a])
     grad_p_b_W = -wp.transform_vector(body_q[body_b], grad_p[body_b, tet_idx_b])
 
     # Check if the plane normal is aligned with the pressure gradient.
-    if not is_normal_along_pressure_gradient(grad_p_a_W, plane_normal, body_a, pair_idx):
+    if not is_normal_along_pressure_gradient(grad_p_a_W, cp_normals[surf_id, pair_idx], body_a, pair_idx):
         return False
 
-    if not is_normal_along_pressure_gradient(grad_p_b_W, plane_normal, body_b, pair_idx):
+    if not is_normal_along_pressure_gradient(grad_p_b_W, cp_normals[surf_id, pair_idx], body_b, pair_idx):
         return False
 
     # Build initial polygon from plane-tetrahedron intersection
@@ -1271,19 +1271,17 @@ def compute_soft_soft_fun_batch(
         return False
 
     # Compute centroid of the final polygon.
-    centroid = compute_polygon_centroid(cp_vertices, cp_vcounts, surf_id, pair_idx)
+    cp_centroids[surf_id, pair_idx] = compute_polygon_centroid(cp_vertices, cp_vcounts, surf_id, pair_idx)
 
     # Compute pressure at the centroid.
-    c_homogeneous = wp.vec4(centroid.x, centroid.y, centroid.z, 1.0)
+    c_homogeneous = wp.vec4(
+        cp_centroids[surf_id, pair_idx].x, cp_centroids[surf_id, pair_idx].y, cp_centroids[surf_id, pair_idx].z, 1.0
+    )
     penetration_extent_a = wp.dot(homogeneous_to_penetration_map_a, c_homogeneous)
-    pressure_a = h_a * penetration_extent_a
+    centroid_pressure[surf_id, pair_idx] = h_a * penetration_extent_a
     warn_potential_overflow_for_pressure(h_a, penetration_extent_a, pair_idx)
-    warn_degenerate_pressure(pressure_a, pair_idx)
+    warn_degenerate_pressure(centroid_pressure[surf_id, pair_idx], pair_idx)
 
-    # Store results.
-    cp_centroids[surf_id, pair_idx] = centroid
-    cp_normals[surf_id, pair_idx] = plane_normal
-    centroid_pressure[surf_id, pair_idx] = pressure_a
     cp_penetration[surf_id, pair_idx] = homogeneous_to_penetration_map_a
 
     return True
@@ -1310,7 +1308,7 @@ def compute_soft_hard_fun_batch(
     cp_vcounts: wp.array(dtype=wp.int32, ndim=2),
     cp_vertices: wp.array(dtype=wp.vec3f, ndim=2),
     cp_centroids: wp.array(dtype=wp.vec3f, ndim=2),
-    cp_penetration: wp.array(dtype=wp.vec4f, ndim=2),
+    homogeneous_to_penetration_map: wp.array(dtype=wp.vec4f, ndim=2),
     cp_normals: wp.array(dtype=wp.vec3f, ndim=2),
     centroid_pressure: wp.array(dtype=wp.float32, ndim=2),
 ):
@@ -1357,7 +1355,7 @@ def compute_soft_hard_fun_batch(
         return False
 
     # Compute polygon centroid
-    centroid = compute_polygon_centroid(cp_vertices, cp_vcounts, surf_id, pair_idx)
+    cp_centroids[surf_id, pair_idx] = compute_polygon_centroid(cp_vertices, cp_vcounts, surf_id, pair_idx)
 
     # Build pressure field vectors.
     # Equivalent to lines 355-361 in mesh_intersection.cc:
@@ -1374,22 +1372,22 @@ def compute_soft_hard_fun_batch(
         p_a_vec[i] = p[body_a, elements[body_a, 4 * tet_id + i]]
 
     inv_mat = default_tet_transform_inv[body_a][tet_id] * body_q_inv_mat_a
-    homogeneous_to_penetration_map = p_a_vec * inv_mat
+    # homogeneous_to_penetration_map = p_a_vec * inv_mat
+    homogeneous_to_penetration_map[surf_id, pair_idx] = p_a_vec * inv_mat
 
     # Compute pressure at centroid
     # Equivalent to lines 369-370 in mesh_intersection.cc:
     # const Vector3<T> grad_e_MN_M = volume_field_M.EvaluateGradient(tet_index);
     # Note: In our implementation, pressure is computed as modulus * penetration
-    c_homogeneous = wp.vec4(centroid.x, centroid.y, centroid.z, 1.0)
-    penetration_extent_a = wp.dot(homogeneous_to_penetration_map, c_homogeneous)
-    pressure_a = h_a * penetration_extent_a
+    c_homogeneous = wp.vec4(
+        cp_centroids[surf_id, pair_idx].x, cp_centroids[surf_id, pair_idx].y, cp_centroids[surf_id, pair_idx].z, 1.0
+    )
+    penetration_extent_a = wp.dot(homogeneous_to_penetration_map[surf_id, pair_idx], c_homogeneous)
+    centroid_pressure[surf_id, pair_idx] = h_a * penetration_extent_a
     warn_potential_overflow_for_pressure(h_a, penetration_extent_a, pair_idx)
 
     # Store results
-    cp_centroids[surf_id, pair_idx] = centroid
     cp_normals[surf_id, pair_idx] = hard_normal_W  # Normal (from hard surface)
-    cp_penetration[surf_id, pair_idx] = homogeneous_to_penetration_map
-    centroid_pressure[surf_id, pair_idx] = pressure_a
 
     return True
 
