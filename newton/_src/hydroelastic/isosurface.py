@@ -292,29 +292,25 @@ def plane_tetrahedron_intersection(
 
     # Find edges that cross the plane and compute intersections
     for i in range(6):
-        edge = tetrahedron_edges[i]
-        vertex_a_idx = edge.x
-        vertex_b_idx = edge.y
+        vertex_a_idx = tetrahedron_edges[i, 0]
+        vertex_b_idx = tetrahedron_edges[i, 1]
 
         # Check if edge crosses plane (vertices on different sides)
         if vertex_signs[vertex_a_idx] != vertex_signs[vertex_b_idx]:
-            vertex_a_position = tet_vertices[vertex_a_idx]
-            vertex_b_position = tet_vertices[vertex_b_idx]
-
             if wp.static(VERBOSE):
                 if vertex_count >= MAX_POLYGON_VERTICES:
                     wp.printf("Warning: Polygon vertex count exceeds maximum allowed.")
 
             if vertex_signs[vertex_a_idx] >= 0:
                 polygon_vertices[surf_id, offset + vertex_count] = compute_edge_plane_intersection(
-                    plane_equation, vertex_a_position, vertex_b_position
+                    plane_equation, tet_vertices[vertex_a_idx], tet_vertices[vertex_b_idx]
                 )
             else:
                 polygon_vertices[surf_id, offset + vertex_count] = compute_edge_plane_intersection(
-                    plane_equation, vertex_b_position, vertex_a_position
+                    plane_equation, tet_vertices[vertex_b_idx], tet_vertices[vertex_a_idx]
                 )
 
-            edge_flags |= ((1 << edge.x) | (1 << edge.y)) << (4 * vertex_count)
+            edge_flags |= ((1 << tetrahedron_edges[i, 0]) | (1 << tetrahedron_edges[i, 1])) << (4 * vertex_count)
             vertex_count += 1
 
     if vertex_count > 3:
@@ -721,7 +717,7 @@ def batch_compute_contact_surface_and_wrenches_from_bvh(
             vidx_query = elements[body_a, element_stride * tid + i]
             p_query_W = wp.transform_point(body_q[body_id_query], points[body_a, vidx_query])
         else:
-            vidx_query = elements[body_b][element_stride * tid + i]
+            vidx_query = elements[body_b, element_stride * tid + i]
             p_query_W = wp.transform_point(body_q[body_id_query], points[body_b, vidx_query])
 
         p_query_rel = p_query_W - wp.transform_get_translation(body_q[body_id_bvh])
@@ -1233,10 +1229,10 @@ def compute_soft_soft_fun_batch(
     max_modulus = wp.max(h_a, h_b)
     scale_factor_a = max_modulus / h_b
     scale_factor_b = max_modulus / h_a
-    weighted_field_a = homogeneous_to_penetration_map_a * scale_factor_a
-    weighted_field_b = homogeneous_to_penetration_map_b * scale_factor_b
 
-    plane_equation = weighted_field_a - weighted_field_b
+    plane_equation = (
+        homogeneous_to_penetration_map_a * scale_factor_a - homogeneous_to_penetration_map_b * scale_factor_b
+    )
     normal_magnitude = wp.length(wp.vec3(plane_equation.x, plane_equation.y, plane_equation.z))
 
     # Normalizing plane equation.
@@ -1312,11 +1308,11 @@ def compute_soft_hard_fun_batch(
     cp_normals: wp.array(dtype=wp.vec3f, ndim=2),
     centroid_pressure: wp.array(dtype=wp.float32, ndim=2),
 ):
-    if tet_triangle_pairs[surf_id][pair_idx][0] == -1 or tet_triangle_pairs[surf_id][pair_idx][1] == -1:
+    if tet_triangle_pairs[surf_id, pair_idx][0] == -1 or tet_triangle_pairs[surf_id, pair_idx][1] == -1:
         return False
 
-    tet_id = tet_triangle_pairs[surf_id][pair_idx][0]
-    tri_id = tet_triangle_pairs[surf_id][pair_idx][1]
+    tet_id = tet_triangle_pairs[surf_id, pair_idx][0]
+    tri_id = tet_triangle_pairs[surf_id, pair_idx][1]
 
     # Check face normal alignment if requested
     # Equivalent to lines 332-337 in mesh_intersection.cc:
@@ -1328,10 +1324,10 @@ def compute_soft_hard_fun_batch(
     # }
 
     # Transform field gradient to world space
-    soft_grad_W = wp.transform_vector(body_q[body_a], grad_p[body_a][tet_id])
+    soft_grad_W = wp.transform_vector(body_q[body_a], grad_p[body_a, tet_id])
 
     # Transform triangle normal to world space
-    hard_normal_W = wp.transform_vector(body_q[body_b], tri_normals[body_b][tri_id])
+    hard_normal_W = wp.transform_vector(body_q[body_b], tri_normals[body_b, tri_id])
 
     if not is_normal_along_pressure_gradient(soft_grad_W, hard_normal_W, body_a, pair_idx):
         return False
@@ -1343,9 +1339,8 @@ def compute_soft_hard_fun_batch(
     #                                     surface_N, X_MN);
     # if (polygon_vertices_M.size() < 3) return;
 
-    offset = MAX_POLYGON_VERTICES * pair_idx
     for i in range(3):
-        cp_vertices[surf_id, offset + i] = tri_vpos_b_W[i]
+        cp_vertices[surf_id, MAX_POLYGON_VERTICES * pair_idx + i] = tri_vpos_b_W[i]
 
     cp_vcounts[surf_id, pair_idx] = 3
     clip_polygon_with_tetrahedron(tet_vpos_a_W, cp_vertices, cp_vcounts, surf_id, pair_idx)
@@ -1371,7 +1366,7 @@ def compute_soft_hard_fun_batch(
     for i in range(4):
         p_a_vec[i] = p[body_a, elements[body_a, 4 * tet_id + i]]
 
-    inv_mat = default_tet_transform_inv[body_a][tet_id] * body_q_inv_mat_a
+    inv_mat = default_tet_transform_inv[body_a, tet_id] * body_q_inv_mat_a
     # homogeneous_to_penetration_map = p_a_vec * inv_mat
     homogeneous_to_penetration_map[surf_id, pair_idx] = p_a_vec * inv_mat
 
