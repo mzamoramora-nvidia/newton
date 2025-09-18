@@ -223,7 +223,9 @@ def compute_edge_plane_intersection(plane_equation: wp.vec4, edge_start: wp.vec3
 
 
 @wp.func
-def ensure_polygon_is_convex(edge_flags: wp.int32, polygon_vertices: wp.array(dtype=wp.vec3f)):
+def ensure_polygon_is_convex(
+    edge_flags: wp.int32, polygon_vertices: wp.array2d(dtype=wp.vec3f), surf_id: wp.int32, offset: wp.int32
+):
     """
     Ensure a polygon is convex.
     """
@@ -236,15 +238,20 @@ def ensure_polygon_is_convex(edge_flags: wp.int32, polygon_vertices: wp.array(dt
         if (a & b) == 0:
             swap_idx = (ib + 1) & 3
 
-            tmp = polygon_vertices[ib]
-            polygon_vertices[ib] = polygon_vertices[swap_idx]
-            polygon_vertices[swap_idx] = tmp
+            tmp = polygon_vertices[surf_id, offset + ib]
+            polygon_vertices[surf_id, offset + ib] = polygon_vertices[surf_id, offset + swap_idx]
+            polygon_vertices[surf_id, offset + swap_idx] = tmp
             return
 
 
 @wp.func
 def plane_tetrahedron_intersection(
-    plane_equation: wp.vec4, tet_vertices: mat43h, polygon_vertices: wp.array(dtype=wp.vec3f)
+    plane_equation: wp.vec4,
+    tet_vertices: mat43h,
+    polygon_vertices: wp.array2d(dtype=wp.vec3f),
+    cp_vcounts: wp.array2d(dtype=wp.int32),
+    surf_id: wp.int32,
+    pair_idx: wp.int32,
 ):
     """
     Build polygon from intersection of plane with tetrahedron.
@@ -261,8 +268,9 @@ def plane_tetrahedron_intersection(
         Tuple of (polygon_vertices, vertex_count)
     """
     # TODO: Find a better way to initialize the polygon vertices.
+    offset = MAX_POLYGON_VERTICES * pair_idx
     for i in range(MAX_POLYGON_VERTICES):
-        polygon_vertices[i] = wp.vec3f(0.0, 0.0, 0.0)
+        polygon_vertices[surf_id, offset + i] = wp.vec3f(0.0, 0.0, 0.0)
     vertex_count = 0
 
     # Determine which vertices are on positive side of the plane
@@ -298,11 +306,11 @@ def plane_tetrahedron_intersection(
                     wp.printf("Warning: Polygon vertex count exceeds maximum allowed.")
 
             if vertex_signs[vertex_a_idx] >= 0:
-                polygon_vertices[vertex_count] = compute_edge_plane_intersection(
+                polygon_vertices[surf_id, offset + vertex_count] = compute_edge_plane_intersection(
                     plane_equation, vertex_a_position, vertex_b_position
                 )
             else:
-                polygon_vertices[vertex_count] = compute_edge_plane_intersection(
+                polygon_vertices[surf_id, offset + vertex_count] = compute_edge_plane_intersection(
                     plane_equation, vertex_b_position, vertex_a_position
                 )
 
@@ -310,16 +318,19 @@ def plane_tetrahedron_intersection(
             vertex_count += 1
 
     if vertex_count > 3:
-        ensure_polygon_is_convex(edge_flags, polygon_vertices)
+        ensure_polygon_is_convex(edge_flags, polygon_vertices, surf_id, offset)
 
-    return vertex_count
+    # Update the vertex count for this surface.
+    cp_vcounts[surf_id, pair_idx] = vertex_count
 
 
 @wp.func
 def clip_polygon_with_plane(
     clipping_plane: wp.vec4,
-    polygon: wp.array(dtype=wp.vec3f),
-    vertex_count: int,
+    polygon: wp.array2d(dtype=wp.vec3f),
+    vcounts: wp.array2d(dtype=wp.int32),
+    surf_id: wp.int32,
+    pair_idx: wp.int32,
 ):
     """
     Clip polygon with a plane using Sutherland-Hodgman algorithm.
@@ -332,6 +343,7 @@ def clip_polygon_with_plane(
     Returns:
         Tuple of (clipped_polygon, clipped_vertex_count)
     """
+    vertex_count = vcounts[surf_id, pair_idx]
     if vertex_count == 0:
         return
 
@@ -340,11 +352,11 @@ def clip_polygon_with_plane(
     clipped_vertex_count = wp.int32(0)
 
     # Sutherland-Hodgman clipping algorithm
-    previous_vertex = polygon[vertex_count - 1]
+    previous_vertex = polygon[surf_id, MAX_POLYGON_VERTICES * pair_idx + vertex_count - 1]
     previous_inside = compute_signed_distance_to_plane(clipping_plane, previous_vertex) >= 0.0
 
     for i in range(vertex_count):
-        current_vertex = polygon[i]
+        current_vertex = polygon[surf_id, MAX_POLYGON_VERTICES * pair_idx + i]
         current_inside = compute_signed_distance_to_plane(clipping_plane, current_vertex) >= 0.0
 
         if current_inside:
@@ -376,16 +388,18 @@ def clip_polygon_with_plane(
 
     # Copy clipped polygon back to input polygon.
     for i in range(clipped_vertex_count):
-        polygon[i] = clipped_polygon[i]
+        polygon[surf_id, MAX_POLYGON_VERTICES * pair_idx + i] = clipped_polygon[i]
 
-    return clipped_vertex_count
+    vcounts[surf_id, pair_idx] = clipped_vertex_count
 
 
 @wp.func
 def clip_polygon_with_tetrahedron(
     tet_vertices: mat43h,
-    polygon: wp.array(dtype=wp.vec3f),
-    vertex_count: int,
+    polygon: wp.array2d(dtype=wp.vec3f),
+    vcounts: wp.array2d(dtype=wp.int32),
+    surf_id: wp.int32,
+    pair_idx: wp.int32,
 ):
     """
     Clip polygon with all faces of a tetrahedron.
@@ -416,7 +430,7 @@ def clip_polygon_with_tetrahedron(
 
     # Clip polygon with each tetrahedron face
     for face_idx in range(4):
-        if vertex_count == 0:
+        if vcounts[surf_id, pair_idx] == 0:
             break
 
         face = tetrahedron_faces[face_idx]
@@ -431,13 +445,16 @@ def clip_polygon_with_tetrahedron(
         face_plane_equation = wp.vec4(face_normal.x, face_normal.y, face_normal.z, plane_distance)
 
         # Clip polygon with this face
-        vertex_count = clip_polygon_with_plane(face_plane_equation, polygon, vertex_count)
-
-    return vertex_count
+        clip_polygon_with_plane(face_plane_equation, polygon, vcounts, surf_id, pair_idx)
 
 
 @wp.func
-def compute_polygon_centroid(polygon_vertices: wp.array(dtype=wp.vec3f), vertex_count: int):
+def compute_polygon_centroid(
+    polygon_vertices: wp.array2d(dtype=wp.vec3f),
+    vcounts: wp.array2d(dtype=wp.int32),
+    surf_id: wp.int32,
+    pair_idx: wp.int32,
+):
     """
     Compute centroid of a polygon.
 
@@ -452,20 +469,21 @@ def compute_polygon_centroid(polygon_vertices: wp.array(dtype=wp.vec3f), vertex_
     Returns:
         Centroid position as wp.vec3
     """
+    offset = MAX_POLYGON_VERTICES * pair_idx
     # See https://math.stackexchange.com/questions/90463/how-can-i-calculate-the-centroid-of-polygon
     mean_vertex = wp.vec3(0.0, 0.0, 0.0)
 
-    for i in range(vertex_count):
-        mean_vertex += polygon_vertices[i]
+    for i in range(vcounts[surf_id, pair_idx]):
+        mean_vertex += polygon_vertices[surf_id, offset + i]
 
-    mean_vertex = mean_vertex * (1.0 / wp.float32(vertex_count))
+    mean_vertex = mean_vertex * (1.0 / wp.float32(vcounts[surf_id, pair_idx]))
 
     centroid = wp.vec3(0.0, 0.0, 0.0)
     total_area = wp.float32(0.0)
-    for i in range(vertex_count):
+    for i in range(vcounts[surf_id, pair_idx]):
         vertex_a = mean_vertex
-        vertex_b = polygon_vertices[i]
-        vertex_c = polygon_vertices[(i + 1) % vertex_count]
+        vertex_b = polygon_vertices[surf_id, offset + i]
+        vertex_c = polygon_vertices[surf_id, offset + (i + 1) % vcounts[surf_id, pair_idx]]
         triangle_area = 0.5 * wp.length(wp.cross(vertex_b - vertex_a, vertex_c - vertex_a))
         triangle_centroid = (vertex_a + vertex_b + vertex_c) / 3.0
         centroid += triangle_centroid * triangle_area
@@ -1208,31 +1226,23 @@ def compute_soft_soft_fun_batch(
     if not is_normal_along_pressure_gradient(grad_p_b_W, plane_normal, body_b, pair_idx):
         return False
 
-    # Create local array for the polygon vertices.
-    # cp_v = wp.zeros(shape=(MAX_POLYGON_VERTICES,), dtype=wp.vec3f)
-    # cp_v = mat83h(0.0)
-    offset_ptr = wp.static(wp.uint64(VEC3F_BYTE_SIZE_)) * wp.uint64(
-        surf_id * cp_vertices.shape[1] + MAX_POLYGON_VERTICES * pair_idx
-    )
-    cp_v = wp.array(ptr=cp_vertices.ptr + offset_ptr, shape=(MAX_POLYGON_VERTICES,), dtype=wp.vec3f)
-
     # Build initial polygon from plane-tetrahedron intersection
     # Clip polygon with first tetrahedron
-    cp_vcounts[surf_id, pair_idx] = plane_tetrahedron_intersection(plane_equation, tet_vpos_a_W, cp_v)
+    plane_tetrahedron_intersection(plane_equation, tet_vpos_a_W, cp_vertices, cp_vcounts, surf_id, pair_idx)
 
     # Return if the polygon is empty.
     if cp_vcounts[surf_id, pair_idx] == 0:
         return False
 
     # Clip polygon with second tetrahedron
-    cp_vcounts[surf_id, pair_idx] = clip_polygon_with_tetrahedron(tet_vpos_b_W, cp_v, cp_vcounts[surf_id, pair_idx])
+    clip_polygon_with_tetrahedron(tet_vpos_b_W, cp_vertices, cp_vcounts, surf_id, pair_idx)
 
     # Return if the polygon is empty.
     if cp_vcounts[surf_id, pair_idx] == 0:
         return False
 
     # Compute centroid of the final polygon.
-    centroid = compute_polygon_centroid(cp_v, cp_vcounts[surf_id, pair_idx])
+    centroid = compute_polygon_centroid(cp_vertices, cp_vcounts, surf_id, pair_idx)
 
     # Compute pressure at the centroid.
     c_homogeneous = wp.vec4(centroid.x, centroid.y, centroid.z, 1.0)
@@ -1242,8 +1252,6 @@ def compute_soft_soft_fun_batch(
     warn_degenerate_pressure(pressure_a, pair_idx)
 
     # Store results.
-    for i in range(MAX_POLYGON_VERTICES):
-        cp_vertices[surf_id, MAX_POLYGON_VERTICES * pair_idx + i] = cp_v[i]
     cp_centroids[surf_id, pair_idx] = centroid
     cp_normals[surf_id, pair_idx] = plane_normal
     centroid_pressure[surf_id, pair_idx] = pressure_a
@@ -1308,33 +1316,19 @@ def compute_soft_hard_fun_batch(
     #                                     surface_N, X_MN);
     # if (polygon_vertices_M.size() < 3) return;
 
-    ## TODO: Find a better way to initialize the polygon vertices.
-    # ptr = cp_vertices.ptr + wp.uint64(8 * pair_idx * VEC3F_BYTE_SIZE_)
-    # polygon_vertices = wp.array(ptr=ptr, shape=(8,), dtype=wp.vec3f)
-    offset_ptr = wp.uint64(VEC3F_BYTE_SIZE_) * wp.uint64(
-        surf_id * cp_vertices.shape[1] + MAX_POLYGON_VERTICES * pair_idx
-    )
-    polygon_vertices = wp.array(
-        ptr=cp_vertices.ptr + offset_ptr,
-        shape=(MAX_POLYGON_VERTICES,),
-        dtype=wp.vec3f,
-    )
-
-    # polygon_vertices = mat83h(0.0)
+    offset = MAX_POLYGON_VERTICES * pair_idx
     for i in range(3):
-        polygon_vertices[i] = tri_vpos_b_W[i]
+        cp_vertices[surf_id, offset + i] = tri_vpos_b_W[i]
 
     cp_vcounts[surf_id, pair_idx] = 3
-    cp_vcounts[surf_id, pair_idx] = clip_polygon_with_tetrahedron(
-        tet_vpos_a_W, polygon_vertices, cp_vcounts[surf_id][pair_idx]
-    )
+    clip_polygon_with_tetrahedron(tet_vpos_a_W, cp_vertices, cp_vcounts, surf_id, pair_idx)
 
     if cp_vcounts[surf_id, pair_idx] < 3:
         cp_vcounts[surf_id, pair_idx] = 0
         return False
 
     # Compute polygon centroid
-    centroid = compute_polygon_centroid(polygon_vertices, cp_vcounts[surf_id, pair_idx])
+    centroid = compute_polygon_centroid(cp_vertices, cp_vcounts, surf_id, pair_idx)
 
     # Build pressure field vectors.
     # Equivalent to lines 355-361 in mesh_intersection.cc:
@@ -1359,8 +1353,6 @@ def compute_soft_hard_fun_batch(
     warn_potential_overflow_for_pressure(h_a, penetration_extent_a, pair_idx)
 
     # Store results
-    for i in range(cp_vcounts[surf_id, pair_idx]):
-        cp_vertices[surf_id, MAX_POLYGON_VERTICES * pair_idx + i] = polygon_vertices[i]
     cp_centroids[surf_id, pair_idx] = centroid
     cp_normals[surf_id, pair_idx] = hard_normal_W  # Normal (from hard surface)
     cp_penetration[surf_id, pair_idx] = homogeneous_to_penetration_map
