@@ -11,6 +11,7 @@ vec4h = wp.types.vector(length=4, dtype=hydroelastic_type)
 mat33h = wp.types.matrix(shape=(3, 3), dtype=hydroelastic_type)
 mat44h = wp.types.matrix(shape=(4, 4), dtype=hydroelastic_type)
 mat43h = wp.types.matrix(shape=(4, 3), dtype=hydroelastic_type)
+mat83h = wp.types.matrix(shape=(8, 3), dtype=hydroelastic_type)
 
 
 @wp.struct

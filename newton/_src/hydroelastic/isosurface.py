@@ -1201,10 +1201,12 @@ def compute_soft_soft_fun_batch(
         return False
 
     # Create local array for the polygon vertices.
-    cp_v = wp.zeros(shape=(MAX_POLYGON_VERTICES,), dtype=wp.vec3f)
-    ## Array pointing to block of memory for the vertices of the current contact polygon.
-    # ptr = cp_vertices.ptr + wp.uint64(MAX_POLYGON_VERTICES * pair_idx * VEC3F_BYTE_SIZE_)
-    # cp_v = wp.array(ptr=ptr, shape=(MAX_POLYGON_VERTICES,), dtype=wp.vec3f)
+    # cp_v = wp.zeros(shape=(MAX_POLYGON_VERTICES,), dtype=wp.vec3f)
+    # cp_v = mat83h(0.0)
+    offset_ptr = wp.static(wp.uint64(VEC3F_BYTE_SIZE_)) * wp.uint64(
+        surf_id * cp_vertices.shape[1] + MAX_POLYGON_VERTICES * pair_idx
+    )
+    cp_v = wp.array(ptr=cp_vertices.ptr + offset_ptr, shape=(MAX_POLYGON_VERTICES,), dtype=wp.vec3f)
 
     # Build initial polygon from plane-tetrahedron intersection
     # Clip polygon with first tetrahedron
@@ -1232,7 +1234,7 @@ def compute_soft_soft_fun_batch(
     warn_degenerate_pressure(pressure_a, pair_idx)
 
     # Store results.
-    for i in range(cp_vcounts[surf_id, pair_idx]):
+    for i in range(MAX_POLYGON_VERTICES):
         cp_vertices[surf_id, MAX_POLYGON_VERTICES * pair_idx + i] = cp_v[i]
     cp_centroids[surf_id, pair_idx] = centroid
     cp_normals[surf_id, pair_idx] = plane_normal
@@ -1301,8 +1303,12 @@ def compute_soft_hard_fun_batch(
     ## TODO: Find a better way to initialize the polygon vertices.
     # ptr = cp_vertices.ptr + wp.uint64(8 * pair_idx * VEC3F_BYTE_SIZE_)
     # polygon_vertices = wp.array(ptr=ptr, shape=(8,), dtype=wp.vec3f)
+    offset_ptr = wp.uint64(VEC3F_BYTE_SIZE_) * wp.uint64(
+        surf_id * cp_vertices.shape[1] + MAX_POLYGON_VERTICES * pair_idx
+    )
+    polygon_vertices = wp.array(ptr=cp_vertices.ptr + offset_ptr, shape=(MAX_POLYGON_VERTICES,), dtype=wp.vec3f,)
 
-    polygon_vertices = wp.zeros(shape=(MAX_POLYGON_VERTICES,), dtype=wp.vec3f)
+    # polygon_vertices = mat83h(0.0)
     for i in range(3):
         polygon_vertices[i] = tri_vpos_b_W[i]
 

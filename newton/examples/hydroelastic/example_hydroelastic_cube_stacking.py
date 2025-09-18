@@ -35,10 +35,10 @@ import newton
 import newton._src.hydroelastic.imgui as hydroelastic_imgui
 import newton._src.hydroelastic.isosurface as hydroelastic_isosurface
 import newton._src.hydroelastic.loaders as hydroelastic_loaders
+import newton._src.hydroelastic.plot_utils as hydroelastic_plot_utils
 import newton._src.hydroelastic.render_utils as hydroelastic_render_utils
 import newton._src.hydroelastic.types as hydroelastic_types
 import newton._src.hydroelastic.utils as hydroelastic_utils
-import newton._src.hydroelastic.plot_utils as hydroelastic_plot_utils
 import newton.examples
 import newton.utils
 
@@ -524,14 +524,16 @@ class Example:
         self.render_isosurface()
         self.viewer.end_frame()
 
-        #self.plot()
+        # self.plot()
         self.frame += 1
 
     def append_to_data_history(self):
         if not self.editable_vars.plot_flag:
             return
 
-        hydroelastic_plot_utils.append_to_data_history(self.data_history, self.state_0, self.solver, self.contacts, self.twist_convention)
+        hydroelastic_plot_utils.append_to_data_history(
+            self.data_history, self.state_0, self.solver, self.contacts, self.twist_convention
+        )
 
     def plot_with_legend(self, t, data, ax, subplot_id):
         legend_title = f"min: {np.min(data):.2E}\nmax: {np.max(data):.2E}\nl: {data[-1]:.2E}"
