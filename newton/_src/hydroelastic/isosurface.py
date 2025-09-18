@@ -498,22 +498,6 @@ def compute_polygon_centroid(
 
 
 @wp.func
-def compute_polygon_area(polygon_vertices: wp.array(dtype=wp.vec3f), vertex_count: wp.int32, centroid: wp.vec3):
-    """
-    Compute area of a polygon.
-    """
-
-    area = wp.float32(0.0)
-    for i in range(vertex_count):
-        vertex_a = centroid
-        vertex_b = polygon_vertices[i]
-        vertex_c = polygon_vertices[(i + 1) % vertex_count]
-        area += wp.length(wp.cross(vertex_b - vertex_a, vertex_c - vertex_a))
-
-    return 0.5 * area
-
-
-@wp.func
 def is_normal_along_pressure_gradient(grad_p_W: wp.vec3, normal: wp.vec3, body_id: wp.int32, tid: wp.int32):
     # Equivalent to IsFaceNormalAlongPressureGradient in mesh_intersection.cc from Drake.
     if wp.length_sq(grad_p_W) < PLANE_NORMAL_THRESHOLD:
