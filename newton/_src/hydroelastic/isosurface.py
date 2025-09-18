@@ -30,7 +30,6 @@ Key components:
 
 import warp as wp
 
-from newton._src.hydroelastic.types import mat43h
 from newton._src.hydroelastic.utils import compute_body_q_inv_mat
 from newton._src.hydroelastic.wrenches import (
     compute_wrench_fun_simple,
@@ -72,28 +71,6 @@ NORMAL_ALONG_PRESSURE_GRADIENT_THRESHOLD = 0.4 * wp.pi  # 5.0 * wp.pi / 8.0
 VEC3F_BYTE_SIZE_ = wp.types.type_size_in_bytes(wp.vec3f)
 INT32_BYTE_SIZE_ = wp.types.type_size_in_bytes(wp.int32)
 
-
-@wp.func
-def get_element_bounding_box(v: mat43h, v_count: wp.int32):
-    """
-    Compute axis-aligned bounding box of a tetrahedron.
-
-    Args:
-        tetrahedron_elements: Indices of the four tetrahedron vertices
-        vertex_positions: Array of vertex positions
-
-    Returns:
-        Tuple of (min_bounds, max_bounds) defining the bounding box
-    """
-    min_bounds = v[0]
-    max_bounds = v[0]
-
-    # Find min/max bounds across all vertices
-    for i in range(1, v_count):
-        min_bounds = wp.min(min_bounds, v[i])
-        max_bounds = wp.max(max_bounds, v[i])
-
-    return min_bounds, max_bounds
 
 
 @wp.func
@@ -248,7 +225,11 @@ def ensure_polygon_is_convex(
 @wp.func
 def plane_tetrahedron_intersection(
     plane_equation: wp.vec4,
-    tet_vertices: mat43h,
+    points: wp.array2d(dtype=wp.vec3f),
+    elements: wp.array2d(dtype=wp.int32),
+    body_q: wp.array(dtype=wp.transform),
+    body_id: wp.int32,
+    tet_idx: wp.int32,
     polygon_vertices: wp.array2d(dtype=wp.vec3f),
     cp_vcounts: wp.array2d(dtype=wp.int32),
     surf_id: wp.int32,
@@ -277,7 +258,8 @@ def plane_tetrahedron_intersection(
     # Determine which vertices are on positive side of the plane
     vertex_signs = wp.vector(False, length=4, dtype=bool)
     for i in range(4):
-        vertex_signs[i] = compute_signed_distance_to_plane(plane_equation, tet_vertices[i]) >= 0.0
+        tet_vertex = wp.transform_point(body_q[body_id], points[body_id, elements[body_id, 4 * tet_idx + i]])
+        vertex_signs[i] = compute_signed_distance_to_plane(plane_equation, tet_vertex) >= 0.0
 
     # Define tetrahedron edges as pairs of vertex indices
     # tetrahedron_edges = wp.matrix(0, shape=(6, 2), dtype=wp.int32)
@@ -293,6 +275,8 @@ def plane_tetrahedron_intersection(
 
     vertex_a_idx = wp.int32(0)
     vertex_b_idx = wp.int32(0)
+    vertex_a = wp.vec3f(0.0, 0.0, 0.0)
+    vertex_b = wp.vec3f(0.0, 0.0, 0.0)
     # Find edges that cross the plane and compute intersections
     for i in range(6):
         # Hardcoded edge indices - no matrix allocation needed
@@ -315,6 +299,9 @@ def plane_tetrahedron_intersection(
             vertex_a_idx = 2
             vertex_b_idx = 3
 
+        vertex_a = wp.transform_point(body_q[body_id], points[body_id, elements[body_id, 4 * tet_idx + vertex_a_idx]])
+        vertex_b = wp.transform_point(body_q[body_id], points[body_id, elements[body_id, 4 * tet_idx + vertex_b_idx]])
+
         # Check if edge crosses plane (vertices on different sides)
         if vertex_signs[vertex_a_idx] != vertex_signs[vertex_b_idx]:
             if wp.static(VERBOSE):
@@ -323,11 +310,11 @@ def plane_tetrahedron_intersection(
 
             if vertex_signs[vertex_a_idx] >= 0:
                 polygon_vertices[surf_id, offset + vertex_count] = compute_edge_plane_intersection(
-                    plane_equation, tet_vertices[vertex_a_idx], tet_vertices[vertex_b_idx]
+                    plane_equation, vertex_a, vertex_b
                 )
             else:
                 polygon_vertices[surf_id, offset + vertex_count] = compute_edge_plane_intersection(
-                    plane_equation, tet_vertices[vertex_b_idx], tet_vertices[vertex_a_idx]
+                    plane_equation, vertex_b, vertex_a
                 )
 
             edge_flags |= ((1 << vertex_a_idx) | (1 << vertex_b_idx)) << (4 * vertex_count)
@@ -411,7 +398,11 @@ def clip_polygon_with_plane(
 
 @wp.func
 def clip_polygon_with_tetrahedron(
-    tet_vertices: mat43h,
+    points: wp.array2d(dtype=wp.vec3f),
+    elements: wp.array2d(dtype=wp.int32),
+    body_q: wp.array(dtype=wp.transform),
+    body_id: wp.int32,
+    tet_id: wp.int32,
     polygon: wp.array2d(dtype=wp.vec3f),
     vcounts: wp.array2d(dtype=wp.int32),
     surf_id: wp.int32,
@@ -434,7 +425,10 @@ def clip_polygon_with_tetrahedron(
         Tuple of (clipped_polygon, clipped_vertex_count)
     """
 
-    face = wp.vec3i(0)
+    # face = wp.vec3i(0)
+    face_vertex_0 = wp.vec3f(0.0, 0.0, 0.0)
+    face_vertex_1 = wp.vec3f(0.0, 0.0, 0.0)
+    face_vertex_2 = wp.vec3f(0.0, 0.0, 0.0)
 
     # Clip polygon with each tetrahedron face
     for face_idx in range(4):
@@ -443,19 +437,23 @@ def clip_polygon_with_tetrahedron(
 
         # Hardcoded face indices - no matrix allocation needed
         if face_idx == 0:
-            face = wp.vec3i(0, 1, 2)
+            face_vertex_0 = wp.transform_point(body_q[body_id], points[body_id, elements[body_id, 4 * tet_id + 0]])
+            face_vertex_1 = wp.transform_point(body_q[body_id], points[body_id, elements[body_id, 4 * tet_id + 1]])
+            face_vertex_2 = wp.transform_point(body_q[body_id], points[body_id, elements[body_id, 4 * tet_id + 2]])
         elif face_idx == 1:
-            face = wp.vec3i(0, 3, 1)
+            face_vertex_0 = wp.transform_point(body_q[body_id], points[body_id, elements[body_id, 4 * tet_id + 0]])
+            face_vertex_1 = wp.transform_point(body_q[body_id], points[body_id, elements[body_id, 4 * tet_id + 3]])
+            face_vertex_2 = wp.transform_point(body_q[body_id], points[body_id, elements[body_id, 4 * tet_id + 1]])
         elif face_idx == 2:
-            face = wp.vec3i(0, 2, 3)
+            face_vertex_0 = wp.transform_point(body_q[body_id], points[body_id, elements[body_id, 4 * tet_id + 0]])
+            face_vertex_1 = wp.transform_point(body_q[body_id], points[body_id, elements[body_id, 4 * tet_id + 2]])
+            face_vertex_2 = wp.transform_point(body_q[body_id], points[body_id, elements[body_id, 4 * tet_id + 3]])
         else:  # face_idx == 3
-            face = wp.vec3i(1, 3, 2)
+            face_vertex_0 = wp.transform_point(body_q[body_id], points[body_id, elements[body_id, 4 * tet_id + 1]])
+            face_vertex_1 = wp.transform_point(body_q[body_id], points[body_id, elements[body_id, 4 * tet_id + 3]])
+            face_vertex_2 = wp.transform_point(body_q[body_id], points[body_id, elements[body_id, 4 * tet_id + 2]])
 
         # Compute face plane equation
-        face_vertex_0 = tet_vertices[face.x]
-        face_vertex_1 = tet_vertices[face.y]
-        face_vertex_2 = tet_vertices[face.z]
-
         face_normal = wp.normalize(wp.cross(face_vertex_1 - face_vertex_0, face_vertex_2 - face_vertex_0))
         plane_distance = -wp.dot(face_normal, face_vertex_0)
         face_plane_equation = wp.vec4(face_normal.x, face_normal.y, face_normal.z, plane_distance)
@@ -651,11 +649,6 @@ def batch_compute_contact_surface_and_wrenches_from_bvh(
 
     # ==============================================================================================================
     # Initialize variables for the contact surface computation.
-    el_a_vpos_W = mat43h(0.0)  # element vertex positions in world frame
-    el_b_vpos_W = mat43h(0.0)
-
-    # body_q_inv_mat_a = wp.transform_to_matrix(wp.transform_inverse(body_q[body_a]))
-    # body_q_inv_mat_b = wp.transform_to_matrix(wp.transform_inverse(body_q[body_b]))
 
     # Initialize variables to accumulate the contact wrenches of multiple element pairs.
     force_i = wp.vec3f(0.0, 0.0, 0.0)
@@ -748,25 +741,25 @@ def batch_compute_contact_surface_and_wrenches_from_bvh(
         for i in range(4):
             if i < element_a_stride:
                 vidx = elements[body_a, element_a_stride * el_a_idx + i]
-                el_a_vpos_W[i] = wp.transform_point(body_q[body_a], points[body_a, vidx])
+                el_a_vpos_W = wp.transform_point(body_q[body_a], points[body_a, vidx])
 
                 if i == 0:
-                    min_bounds_a = el_a_vpos_W[i]
-                    max_bounds_a = el_a_vpos_W[i]
+                    min_bounds_a = el_a_vpos_W
+                    max_bounds_a = el_a_vpos_W
                 else:
-                    min_bounds_a = wp.min(min_bounds_a, el_a_vpos_W[i])
-                    max_bounds_a = wp.max(max_bounds_a, el_a_vpos_W[i])
+                    min_bounds_a = wp.min(min_bounds_a, el_a_vpos_W)
+                    max_bounds_a = wp.max(max_bounds_a, el_a_vpos_W)
 
             if i < element_b_stride:
                 vidx = elements[body_b, element_b_stride * el_b_idx + i]
-                el_b_vpos_W[i] = wp.transform_point(body_q[body_b], points[body_b, vidx])
+                el_b_vpos_W = wp.transform_point(body_q[body_b], points[body_b, vidx])
 
                 if i == 0:
-                    min_bounds_b = el_b_vpos_W[i]
-                    max_bounds_b = el_b_vpos_W[i]
+                    min_bounds_b = el_b_vpos_W
+                    max_bounds_b = el_b_vpos_W
                 else:
-                    min_bounds_b = wp.min(min_bounds_b, el_b_vpos_W[i])
-                    max_bounds_b = wp.max(max_bounds_b, el_b_vpos_W[i])
+                    min_bounds_b = wp.min(min_bounds_b, el_b_vpos_W)
+                    max_bounds_b = wp.max(max_bounds_b, el_b_vpos_W)
 
         if not check_bounding_boxes_overlap(min_bounds_a, max_bounds_a, min_bounds_b, max_bounds_b):
             # wp.printf("missed: tid, tet_idx_a, tet_idx_b: %d, %d, %d\n", tid, el_a_idx, el_b_idx)
@@ -783,8 +776,7 @@ def batch_compute_contact_surface_and_wrenches_from_bvh(
                 body_q,
                 body_a,
                 body_b,
-                el_a_vpos_W,
-                el_b_vpos_W,
+                points,
                 elements,
                 default_tet_transform_inv,
                 p,
@@ -811,8 +803,7 @@ def batch_compute_contact_surface_and_wrenches_from_bvh(
                 body_q,
                 body_a,
                 body_b,
-                el_a_vpos_W,
-                el_b_vpos_W,
+                points,
                 elements,
                 default_tet_transform_inv,
                 p,
@@ -952,11 +943,6 @@ def batch_compute_contact_surface_and_wrenches_from_pairs(
 
     # ==============================================================================================================
     # Initialize variables for the contact surface computation.
-    el_a_vpos_W = mat43h(0.0)  # element vertex positions in world frame
-    el_b_vpos_W = mat43h(0.0)
-    # vidx = wp.int32(0)
-    # body_q_inv_mat_a = wp.transform_to_matrix(wp.transform_inverse(body_q[body_a]))
-    # body_q_inv_mat_b = wp.transform_to_matrix(wp.transform_inverse(body_q[body_b]))
 
     # Initialize variables to accumulate the contact wrenches of multiple element pairs.
     force_i = wp.vec3f(0.0, 0.0, 0.0)
@@ -994,25 +980,25 @@ def batch_compute_contact_surface_and_wrenches_from_pairs(
         for i in range(4):
             if i < element_a_stride:
                 vidx = elements[body_a, el_a_offset + i]
-                el_a_vpos_W[i] = wp.transform_point(body_q[body_a], points[body_a, vidx])
+                el_a_vpos_W = wp.transform_point(body_q[body_a], points[body_a, vidx])
 
                 if i == 0:
-                    min_bounds_a = el_a_vpos_W[i]
-                    max_bounds_a = el_a_vpos_W[i]
+                    min_bounds_a = el_a_vpos_W
+                    max_bounds_a = el_a_vpos_W
                 else:
-                    min_bounds_a = wp.min(min_bounds_a, el_a_vpos_W[i])
-                    max_bounds_a = wp.max(max_bounds_a, el_a_vpos_W[i])
+                    min_bounds_a = wp.min(min_bounds_a, el_a_vpos_W)
+                    max_bounds_a = wp.max(max_bounds_a, el_a_vpos_W)
 
             if i < element_b_stride:
                 vidx = elements[body_b, el_b_offset + i]
-                el_b_vpos_W[i] = wp.transform_point(body_q[body_b], points[body_b, vidx])
+                el_b_vpos_W = wp.transform_point(body_q[body_b], points[body_b, vidx])
 
                 if i == 0:
-                    min_bounds_b = el_b_vpos_W[i]
-                    max_bounds_b = el_b_vpos_W[i]
+                    min_bounds_b = el_b_vpos_W
+                    max_bounds_b = el_b_vpos_W
                 else:
-                    min_bounds_b = wp.min(min_bounds_b, el_b_vpos_W[i])
-                    max_bounds_b = wp.max(max_bounds_b, el_b_vpos_W[i])
+                    min_bounds_b = wp.min(min_bounds_b, el_b_vpos_W)
+                    max_bounds_b = wp.max(max_bounds_b, el_b_vpos_W)
 
         # Early exit: Check bounding box overlap
         if not check_bounding_boxes_overlap(min_bounds_a, max_bounds_a, min_bounds_b, max_bounds_b):
@@ -1031,8 +1017,7 @@ def batch_compute_contact_surface_and_wrenches_from_pairs(
                 body_q,
                 body_a,
                 body_b,
-                el_a_vpos_W,
-                el_b_vpos_W,
+                points,
                 elements,
                 default_tet_transform_inv,
                 p,
@@ -1060,8 +1045,7 @@ def batch_compute_contact_surface_and_wrenches_from_pairs(
                 body_q,
                 body_a,
                 body_b,
-                el_a_vpos_W,
-                el_b_vpos_W,
+                points,
                 elements,
                 default_tet_transform_inv,
                 p,
@@ -1145,8 +1129,7 @@ def compute_soft_soft_fun_batch(
     body_q: wp.array(dtype=wp.transform),
     body_a: wp.int32,
     body_b: wp.int32,
-    tet_vpos_a_W: mat43h,
-    tet_vpos_b_W: mat43h,
+    points: wp.array2d(dtype=wp.vec3f),
     elements: wp.array2d(dtype=wp.int32),
     default_tet_transform_inv: wp.array(dtype=wp.mat44, ndim=2),
     p: wp.array(dtype=wp.float32, ndim=2),
@@ -1211,14 +1194,18 @@ def compute_soft_soft_fun_batch(
 
     # Build initial polygon from plane-tetrahedron intersection
     # Clip polygon with first tetrahedron
-    plane_tetrahedron_intersection(plane_equation, tet_vpos_a_W, cp_vertices, cp_vcounts, surf_id, pair_idx)
+    plane_tetrahedron_intersection(
+        plane_equation, points, elements, body_q, body_a, tet_idx_a, cp_vertices, cp_vcounts, surf_id, pair_idx
+    )
 
     # Return if the polygon is empty.
     if cp_vcounts[surf_id, pair_idx] == 0:
         return False
 
     # Clip polygon with second tetrahedron
-    clip_polygon_with_tetrahedron(tet_vpos_b_W, cp_vertices, cp_vcounts, surf_id, pair_idx)
+    clip_polygon_with_tetrahedron(
+        points, elements, body_q, body_b, tet_idx_b, cp_vertices, cp_vcounts, surf_id, pair_idx
+    )
 
     # Return if the polygon is empty.
     if cp_vcounts[surf_id, pair_idx] == 0:
@@ -1249,8 +1236,7 @@ def compute_soft_hard_fun_batch(
     body_q: wp.array(dtype=wp.transform),
     body_a: wp.int32,
     body_b: wp.int32,
-    tet_vpos_a_W: mat43h,
-    tri_vpos_b_W: mat43h,
+    points: wp.array2d(dtype=wp.vec3f),
     elements: wp.array2d(dtype=wp.int32),
     default_tet_transform_inv: wp.array(dtype=wp.mat44, ndim=2),
     p: wp.array(dtype=wp.float32, ndim=2),
@@ -1298,10 +1284,13 @@ def compute_soft_hard_fun_batch(
     # if (polygon_vertices_M.size() < 3) return;
 
     for i in range(3):
-        cp_vertices[surf_id, MAX_POLYGON_VERTICES * pair_idx + i] = tri_vpos_b_W[i]
+        # cp_vertices[surf_id, MAX_POLYGON_VERTICES * pair_idx + i] = tri_vpos_b_W[i]
+        cp_vertices[surf_id, MAX_POLYGON_VERTICES * pair_idx + i] = wp.transform_vector(
+            body_q[body_b], points[body_b, elements[body_b, 3 * tri_id + i]]
+        )
 
     cp_vcounts[surf_id, pair_idx] = 3
-    clip_polygon_with_tetrahedron(tet_vpos_a_W, cp_vertices, cp_vcounts, surf_id, pair_idx)
+    clip_polygon_with_tetrahedron(points, elements, body_q, body_a, tet_id, cp_vertices, cp_vcounts, surf_id, pair_idx)
 
     if cp_vcounts[surf_id, pair_idx] < 3:
         cp_vcounts[surf_id, pair_idx] = 0
