@@ -710,6 +710,9 @@ def batch_compute_contact_surface_and_wrenches_from_bvh(
         vidx_query = elements[body_b, element_stride * tid]
 
     # Get element bounds for the querying mesh.
+    min_bounds_query = wp.vec3(0.0)
+    max_bounds_query = wp.vec3(0.0)
+
     for i in range(4):
         if i == element_stride:
             break
@@ -738,6 +741,10 @@ def batch_compute_contact_surface_and_wrenches_from_bvh(
 
     # Initialize loop variables.
     pair_idx = wp.int32(0)
+    min_bounds_a = wp.vec3(0.0)
+    max_bounds_a = wp.vec3(0.0)
+    min_bounds_b = wp.vec3(0.0)
+    max_bounds_b = wp.vec3(0.0)
 
     # Loop over pairs of elements.
     while wp.bvh_query_next(query, bvh_element):
@@ -1010,6 +1017,10 @@ def batch_compute_contact_surface_and_wrenches_from_pairs(
     # Initialize loop variables.
     counter = wp.int32(0)
     pair_idx = wp.int32(0)
+    min_bounds_a = wp.vec3(0.0)
+    max_bounds_a = wp.vec3(0.0)
+    min_bounds_b = wp.vec3(0.0)
+    max_bounds_b = wp.vec3(0.0)
 
     # Loop over pairs of elements.
     while counter < el_max_pairs:
