@@ -694,20 +694,26 @@ def batch_compute_contact_surface_and_wrenches_from_bvh(
 
     # Initialize variables to query the BVH.
     # tet or triangle vertex positions in world frame
-    tet_vpos_query_W = mat43h(0.0)
 
     body_id_query = body_a
     body_id_bvh = body_b
     element_stride = element_a_stride
     el_max_pairs = wp.int32(element_pairs.shape[1] / elements_count_a)
+    vidx_query = elements[body_a, element_stride * tid]
+    v_pos_query = wp.vec3(0.0)
 
     if not query_with_mesh_a:
         body_id_query = body_b
         body_id_bvh = body_a
         element_stride = element_b_stride
         el_max_pairs = wp.int32(element_pairs.shape[1] / elements_count_b)
+        vidx_query = elements[body_b, element_stride * tid]
 
-    for i in range(element_stride):
+    # Get element bounds for the querying mesh.
+    for i in range(4):
+        if i == element_stride:
+            break
+
         if query_with_mesh_a:
             vidx_query = elements[body_a, element_stride * tid + i]
             p_query_W = wp.transform_point(body_q[body_id_query], points[body_a, vidx_query])
@@ -716,14 +722,17 @@ def batch_compute_contact_surface_and_wrenches_from_bvh(
             p_query_W = wp.transform_point(body_q[body_id_query], points[body_b, vidx_query])
 
         p_query_rel = p_query_W - wp.transform_get_translation(body_q[body_id_bvh])
-        tet_vpos_query_W[i] = wp.quat_rotate_inv(wp.transform_get_rotation(body_q[body_id_bvh]), p_query_rel)
+        v_pos_query = wp.quat_rotate_inv(wp.transform_get_rotation(body_q[body_id_bvh]), p_query_rel)
 
-    min_bounds_query, max_bounds_query = get_element_bounding_box(tet_vpos_query_W, element_stride)
-    lower = wp.vec3(min_bounds_query.x, min_bounds_query.y, min_bounds_query.z)
-    upper = wp.vec3(max_bounds_query.x, max_bounds_query.y, max_bounds_query.z)
+        if i == 0:
+            min_bounds_query = v_pos_query
+            max_bounds_query = v_pos_query
+        else:
+            min_bounds_query = wp.min(min_bounds_query, v_pos_query)
+            max_bounds_query = wp.max(max_bounds_query, v_pos_query)
 
     # Setup BVH query with the AABB of the querying mesh.
-    query = wp.bvh_query_aabb(bvh_id, lower, upper)
+    query = wp.bvh_query_aabb(bvh_id, min_bounds_query, max_bounds_query)
     bvh_element = wp.int32(0)
     bvh_counter = wp.int32(0)
 
