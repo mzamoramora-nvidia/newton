@@ -87,6 +87,8 @@ class HydroelasticBatch:
     # Bvh
     bvh_ids: wp.array(dtype=wp.uint64)
 
+    body_q_inv_mat: wp.array(dtype=wp.mat44)
+
 
 @wp.struct
 class IsosurfaceBatch:

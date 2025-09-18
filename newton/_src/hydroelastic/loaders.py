@@ -532,7 +532,7 @@ def add_robot(builder, up_axis):
     builder.add_builder(articulation_builder, xform, separate_collision_group=False)
 
 
-def init_hydro_batch(hydro_objects, hydro_batch):
+def init_hydro_batch(hydro_objects, hydro_batch, body_q):
     # mesh_batch = HydroelasticBatch()
 
     # This assumes that each mesh is associated with a different body.
@@ -617,6 +617,8 @@ def init_hydro_batch(hydro_objects, hydro_batch):
 
     hydro_batch.bvh_ids = wp.array(bvh_ids, dtype=wp.uint64)
 
+    hydro_batch.body_q_inv_mat = wp.zeros(body_q.shape[0], dtype=wp.mat44)
+
 
 def init_isosurface_batch(isosurface_batch, collision_pairs, hydro_batch, max_element_pairs=-1):
     isosurface_count = len(collision_pairs)
@@ -665,7 +667,6 @@ def init_isosurface_batch(isosurface_batch, collision_pairs, hydro_batch, max_el
     isosurface_batch.torque_b_body = wp.zeros((isosurface_count), dtype=wp.vec3f)
     isosurface_batch.force_n = wp.zeros((isosurface_count), dtype=wp.vec3f)
     isosurface_batch.force_t = wp.zeros((isosurface_count), dtype=wp.vec3f)
-
     # ================================================================================================================
     # TODO: Collision pairs should represent mesh ids, not body ids.
     # For now, it works as each mesh is associated with a different body.
