@@ -764,17 +764,28 @@ def batch_compute_contact_surface_and_wrenches_from_bvh(
         bvh_counter += 1
         element_pairs[surf_id, pair_idx] = wp.vec2i(el_a_idx, el_b_idx)
 
-        for i in range(element_a_stride):
-            vidx_a[i] = elements[body_a, element_a_stride * el_a_idx + i]
-            el_a_vpos_W[i] = wp.transform_point(body_q[body_a], points[body_a, vidx_a[i]])
+        for i in range(4):
+            if i < element_a_stride:
+                vidx_a[i] = elements[body_a, element_a_stride * el_a_idx + i]
+                el_a_vpos_W[i] = wp.transform_point(body_q[body_a], points[body_a, vidx_a[i]])
 
-        for i in range(element_b_stride):
-            vidx_b[i] = elements[body_b, element_b_stride * el_b_idx + i]
-            el_b_vpos_W[i] = wp.transform_point(body_q[body_b], points[body_b, vidx_b[i]])
+                if i == 0:
+                    min_bounds_a = el_a_vpos_W[i]
+                    max_bounds_a = el_a_vpos_W[i]
+                else:
+                    min_bounds_a = wp.min(min_bounds_a, el_a_vpos_W[i])
+                    max_bounds_a = wp.max(max_bounds_a, el_a_vpos_W[i])
 
-        # Early exit: Check bounding box overlap
-        min_bounds_a, max_bounds_a = get_element_bounding_box(el_a_vpos_W, element_a_stride)
-        min_bounds_b, max_bounds_b = get_element_bounding_box(el_b_vpos_W, element_b_stride)
+            if i < element_b_stride:
+                vidx_b[i] = elements[body_b, element_b_stride * el_b_idx + i]
+                el_b_vpos_W[i] = wp.transform_point(body_q[body_b], points[body_b, vidx_b[i]])
+
+                if i == 0:
+                    min_bounds_b = el_b_vpos_W[i]
+                    max_bounds_b = el_b_vpos_W[i]
+                else:
+                    min_bounds_b = wp.min(min_bounds_b, el_b_vpos_W[i])
+                    max_bounds_b = wp.max(max_bounds_b, el_b_vpos_W[i])
 
         if not check_bounding_boxes_overlap(min_bounds_a, max_bounds_a, min_bounds_b, max_bounds_b):
             # wp.printf("missed: tid, tet_idx_a, tet_idx_b: %d, %d, %d\n", tid, el_a_idx, el_b_idx)
@@ -1009,21 +1020,33 @@ def batch_compute_contact_surface_and_wrenches_from_pairs(
         if element_pairs[surf_id, pair_idx][0] == -1 or element_pairs[surf_id, pair_idx][1] == -1:
             break
 
-        el_a_idx = element_pairs[surf_id, pair_idx][0]
-        el_b_idx = element_pairs[surf_id, pair_idx][1]
+        el_a_offset = element_a_stride * element_pairs[surf_id, pair_idx][0]
+        el_b_offset = element_b_stride * element_pairs[surf_id, pair_idx][1]
 
-        for i in range(element_a_stride):
-            vidx_a[i] = elements[body_a, element_a_stride * el_a_idx + i]
-            el_a_vpos_W[i] = wp.transform_point(body_q[body_a], points[body_a, vidx_a[i]])
+        for i in range(4):
+            if i < element_a_stride:
+                vidx_a[i] = elements[body_a, el_a_offset + i]
+                el_a_vpos_W[i] = wp.transform_point(body_q[body_a], points[body_a, vidx_a[i]])
 
-        for i in range(element_b_stride):
-            vidx_b[i] = elements[body_b, element_b_stride * el_b_idx + i]
-            el_b_vpos_W[i] = wp.transform_point(body_q[body_b], points[body_b, vidx_b[i]])
+                if i == 0:
+                    min_bounds_a = el_a_vpos_W[i]
+                    max_bounds_a = el_a_vpos_W[i]
+                else:
+                    min_bounds_a = wp.min(min_bounds_a, el_a_vpos_W[i])
+                    max_bounds_a = wp.max(max_bounds_a, el_a_vpos_W[i])
+
+            if i < element_b_stride:
+                vidx_b[i] = elements[body_b, el_b_offset + i]
+                el_b_vpos_W[i] = wp.transform_point(body_q[body_b], points[body_b, vidx_b[i]])
+
+                if i == 0:
+                    min_bounds_b = el_b_vpos_W[i]
+                    max_bounds_b = el_b_vpos_W[i]
+                else:
+                    min_bounds_b = wp.min(min_bounds_b, el_b_vpos_W[i])
+                    max_bounds_b = wp.max(max_bounds_b, el_b_vpos_W[i])
 
         # Early exit: Check bounding box overlap
-        min_bounds_a, max_bounds_a = get_element_bounding_box(el_a_vpos_W, element_a_stride)
-        min_bounds_b, max_bounds_b = get_element_bounding_box(el_b_vpos_W, element_b_stride)
-
         if not check_bounding_boxes_overlap(min_bounds_a, max_bounds_a, min_bounds_b, max_bounds_b):
             # wp.printf("missed: tid, tet_idx_a, tet_idx_b: %d, %d, %d\n", tid, el_a_idx, el_b_idx)
             counter += 1
