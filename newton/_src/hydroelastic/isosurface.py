@@ -36,6 +36,8 @@ from newton._src.hydroelastic.wrenches import (
     launch_batch_add_wrench_to_body_f,
 )
 
+VERBOSE = False
+
 MAX_POLYGON_VERTICES = 8
 
 # Numerical thresholds used throughout the hydroelastic contact computation
@@ -291,8 +293,9 @@ def plane_tetrahedron_intersection(
             vertex_a_position = tet_vertices[vertex_a_idx]
             vertex_b_position = tet_vertices[vertex_b_idx]
 
-            if vertex_count >= MAX_POLYGON_VERTICES:
-                wp.printf("Warning: Polygon vertex count exceeds maximum allowed.")
+            if wp.static(VERBOSE):
+                if vertex_count >= MAX_POLYGON_VERTICES:
+                    wp.printf("Warning: Polygon vertex count exceeds maximum allowed.")
 
             if vertex_signs[vertex_a_idx] >= 0:
                 polygon_vertices[vertex_count] = compute_edge_plane_intersection(
@@ -512,12 +515,13 @@ def is_normal_along_pressure_gradient(grad_p_W: wp.vec3, normal: wp.vec3, body_i
 def warn_potential_overflow_for_pressure(h: wp.float32, penetration_extent: wp.float32, tid: wp.int32):
     FLT_MAX = 3.4028234663852886e38
     if wp.abs(h) > wp.abs(wp.float32(FLT_MAX) / wp.abs(penetration_extent)):
-        wp.printf(
-            "Potential overflow: Thread %d: Penetration extent: %f, hydroelastic modulus: %f\n",
-            tid,
-            penetration_extent,
-            h,
-        )
+        if wp.static(VERBOSE):
+            wp.printf(
+                "Potential overflow: Thread %d: Penetration extent: %f, hydroelastic modulus: %f\n",
+                tid,
+                penetration_extent,
+                h,
+            )
         return True
 
     return False
@@ -526,10 +530,12 @@ def warn_potential_overflow_for_pressure(h: wp.float32, penetration_extent: wp.f
 @wp.func
 def warn_degenerate_pressure(pressure: wp.float32, tid: wp.int32):
     if wp.isnan(pressure):
-        wp.printf("Warning: Pressure is NaN for pair %d. Pressure: %f\n", tid, pressure)
+        if wp.static(VERBOSE):
+            wp.printf("Warning: Pressure is NaN for pair %d. Pressure: %f\n", tid, pressure)
         return True
     if wp.isinf(pressure):
-        wp.printf("Warning: Pressure is infinite for pair %d. Pressure: %f\n", tid, pressure)
+        if wp.static(VERBOSE):
+            wp.printf("Warning: Pressure is infinite for pair %d. Pressure: %f\n", tid, pressure)
         return True
 
     # if pressure < 0.0:
@@ -542,10 +548,12 @@ def warn_degenerate_pressure(pressure: wp.float32, tid: wp.int32):
 @wp.func
 def warn_degenerate_plane(plane_normal: wp.vec3, tid: wp.int32):
     if wp.isnan(plane_normal):
-        wp.printf("Warning: Plane normal is NaN for pair %d. Plane normal: %f\n", tid, plane_normal)
+        if wp.static(VERBOSE):
+            wp.printf("Warning: Plane normal is NaN for pair %d. Plane normal: %f\n", tid, plane_normal)
         return True
     if wp.isinf(plane_normal):
-        wp.printf("Warning: Plane normal is infinite for pair %d. Plane normal: %f\n", tid, plane_normal)
+        if wp.static(VERBOSE):
+            wp.printf("Warning: Plane normal is infinite for pair %d. Plane normal: %f\n", tid, plane_normal)
         return True
 
     return False
@@ -1306,7 +1314,11 @@ def compute_soft_hard_fun_batch(
     offset_ptr = wp.uint64(VEC3F_BYTE_SIZE_) * wp.uint64(
         surf_id * cp_vertices.shape[1] + MAX_POLYGON_VERTICES * pair_idx
     )
-    polygon_vertices = wp.array(ptr=cp_vertices.ptr + offset_ptr, shape=(MAX_POLYGON_VERTICES,), dtype=wp.vec3f,)
+    polygon_vertices = wp.array(
+        ptr=cp_vertices.ptr + offset_ptr,
+        shape=(MAX_POLYGON_VERTICES,),
+        dtype=wp.vec3f,
+    )
 
     # polygon_vertices = mat83h(0.0)
     for i in range(3):
