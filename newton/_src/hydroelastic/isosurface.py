@@ -676,8 +676,8 @@ def batch_compute_contact_surface_and_wrenches_from_bvh(
     # Initialize variables for the contact surface computation.
     el_a_vpos_W = mat43h(0.0)  # element vertex positions in world frame
     el_b_vpos_W = mat43h(0.0)
-    vidx_a = wp.vec4i(0)
-    vidx_b = wp.vec4i(0)
+    vidx = wp.int32(0)
+
     body_q_inv_mat_a = wp.transform_to_matrix(wp.transform_inverse(body_q[body_a]))
     body_q_inv_mat_b = wp.transform_to_matrix(wp.transform_inverse(body_q[body_b]))
 
@@ -766,8 +766,8 @@ def batch_compute_contact_surface_and_wrenches_from_bvh(
 
         for i in range(4):
             if i < element_a_stride:
-                vidx_a[i] = elements[body_a, element_a_stride * el_a_idx + i]
-                el_a_vpos_W[i] = wp.transform_point(body_q[body_a], points[body_a, vidx_a[i]])
+                vidx = elements[body_a, element_a_stride * el_a_idx + i]
+                el_a_vpos_W[i] = wp.transform_point(body_q[body_a], points[body_a, vidx])
 
                 if i == 0:
                     min_bounds_a = el_a_vpos_W[i]
@@ -777,8 +777,8 @@ def batch_compute_contact_surface_and_wrenches_from_bvh(
                     max_bounds_a = wp.max(max_bounds_a, el_a_vpos_W[i])
 
             if i < element_b_stride:
-                vidx_b[i] = elements[body_b, element_b_stride * el_b_idx + i]
-                el_b_vpos_W[i] = wp.transform_point(body_q[body_b], points[body_b, vidx_b[i]])
+                vidx = elements[body_b, element_b_stride * el_b_idx + i]
+                el_b_vpos_W[i] = wp.transform_point(body_q[body_b], points[body_b, vidx])
 
                 if i == 0:
                     min_bounds_b = el_b_vpos_W[i]
@@ -804,8 +804,7 @@ def batch_compute_contact_surface_and_wrenches_from_bvh(
                 body_b,
                 el_a_vpos_W,
                 el_b_vpos_W,
-                vidx_a,
-                vidx_b,
+                elements,
                 default_tet_transform_inv,
                 p,
                 grad_p,
@@ -834,7 +833,7 @@ def batch_compute_contact_surface_and_wrenches_from_bvh(
                 body_b,
                 el_a_vpos_W,
                 el_b_vpos_W,
-                vidx_a,
+                elements,
                 default_tet_transform_inv,
                 p,
                 grad_p,
@@ -989,8 +988,7 @@ def batch_compute_contact_surface_and_wrenches_from_pairs(
     # Initialize variables for the contact surface computation.
     el_a_vpos_W = mat43h(0.0)  # element vertex positions in world frame
     el_b_vpos_W = mat43h(0.0)
-    vidx_a = wp.vec4i(0)
-    vidx_b = wp.vec4i(0)
+    vidx = wp.int32(0)
     body_q_inv_mat_a = wp.transform_to_matrix(wp.transform_inverse(body_q[body_a]))
     body_q_inv_mat_b = wp.transform_to_matrix(wp.transform_inverse(body_q[body_b]))
 
@@ -1025,8 +1023,8 @@ def batch_compute_contact_surface_and_wrenches_from_pairs(
 
         for i in range(4):
             if i < element_a_stride:
-                vidx_a[i] = elements[body_a, el_a_offset + i]
-                el_a_vpos_W[i] = wp.transform_point(body_q[body_a], points[body_a, vidx_a[i]])
+                vidx = elements[body_a, el_a_offset + i]
+                el_a_vpos_W[i] = wp.transform_point(body_q[body_a], points[body_a, vidx])
 
                 if i == 0:
                     min_bounds_a = el_a_vpos_W[i]
@@ -1036,8 +1034,8 @@ def batch_compute_contact_surface_and_wrenches_from_pairs(
                     max_bounds_a = wp.max(max_bounds_a, el_a_vpos_W[i])
 
             if i < element_b_stride:
-                vidx_b[i] = elements[body_b, el_b_offset + i]
-                el_b_vpos_W[i] = wp.transform_point(body_q[body_b], points[body_b, vidx_b[i]])
+                vidx = elements[body_b, el_b_offset + i]
+                el_b_vpos_W[i] = wp.transform_point(body_q[body_b], points[body_b, vidx])
 
                 if i == 0:
                     min_bounds_b = el_b_vpos_W[i]
@@ -1065,8 +1063,7 @@ def batch_compute_contact_surface_and_wrenches_from_pairs(
                 body_b,
                 el_a_vpos_W,
                 el_b_vpos_W,
-                vidx_a,
-                vidx_b,
+                elements,
                 default_tet_transform_inv,
                 p,
                 grad_p,
@@ -1096,7 +1093,7 @@ def batch_compute_contact_surface_and_wrenches_from_pairs(
                 body_b,
                 el_a_vpos_W,
                 el_b_vpos_W,
-                vidx_a,
+                elements,
                 default_tet_transform_inv,
                 p,
                 grad_p,
@@ -1181,8 +1178,7 @@ def compute_soft_soft_fun_batch(
     body_b: wp.int32,
     tet_vpos_a_W: mat43h,
     tet_vpos_b_W: mat43h,
-    vidx_a: wp.vec4i,
-    vidx_b: wp.vec4i,
+    elements: wp.array2d(dtype=wp.int32),
     default_tet_transform_inv: wp.array(dtype=wp.mat44, ndim=2),
     p: wp.array(dtype=wp.float32, ndim=2),
     grad_p: wp.array(dtype=wp.vec3f, ndim=2),
@@ -1206,8 +1202,14 @@ def compute_soft_soft_fun_batch(
 
     # Build pressure field vectors.
     # TODO: Consider building the field vectors when loading the meshes.
-    p_a_vec = wp.vec4(p[body_a, vidx_a[0]], p[body_a, vidx_a[1]], p[body_a, vidx_a[2]], p[body_a, vidx_a[3]])
-    p_b_vec = wp.vec4(p[body_b, vidx_b[0]], p[body_b, vidx_b[1]], p[body_b, vidx_b[2]], p[body_b, vidx_b[3]])
+    # p_a_vec = wp.vec4(p[body_a, vidx_a[0]], p[body_a, vidx_a[1]], p[body_a, vidx_a[2]], p[body_a, vidx_a[3]])
+    # p_b_vec = wp.vec4(p[body_b, vidx_b[0]], p[body_b, vidx_b[1]], p[body_b, vidx_b[2]], p[body_b, vidx_b[3]])
+
+    p_a_vec = wp.vec4(0.0)
+    p_b_vec = wp.vec4(0.0)
+    for i in range(4):
+        p_a_vec[i] = p[body_a, elements[body_a, 4 * tet_idx_a + i]]
+        p_b_vec[i] = p[body_b, elements[body_b, 4 * tet_idx_b + i]]
 
     inv_mat_a = default_tet_transform_inv[body_a, tet_idx_a] * body_q_inv_mat_a
     inv_mat_b = default_tet_transform_inv[body_b, tet_idx_b] * body_q_inv_mat_b
@@ -1286,7 +1288,7 @@ def compute_soft_hard_fun_batch(
     body_b: wp.int32,
     tet_vpos_a_W: mat43h,
     tri_vpos_b_W: mat43h,
-    vidx_a: wp.vec4i,
+    elements: wp.array2d(dtype=wp.int32),
     default_tet_transform_inv: wp.array(dtype=wp.mat44, ndim=2),
     p: wp.array(dtype=wp.float32, ndim=2),
     grad_p: wp.array(dtype=wp.vec3f, ndim=2),
@@ -1355,7 +1357,11 @@ def compute_soft_hard_fun_batch(
     #   polygon_vertex_indices_.push_back(builder_M->AddVertex(
     #       p_MV, volume_field_M.EvaluateCartesian(tet_index, p_MV)));
     # }
-    p_a_vec = wp.vec4(p[body_a][vidx_a[0]], p[body_a][vidx_a[1]], p[body_a][vidx_a[2]], p[body_a][vidx_a[3]])
+    # p_a_vec = wp.vec4(p[body_a][vidx_a[0]], p[body_a][vidx_a[1]], p[body_a][vidx_a[2]], p[body_a][vidx_a[3]])
+    p_a_vec = wp.vec4(0.0)
+    for i in range(4):
+        p_a_vec[i] = p[body_a, elements[body_a, 4 * tet_id + i]]
+
     inv_mat = default_tet_transform_inv[body_a][tet_id] * body_q_inv_mat_a
     homogeneous_to_penetration_map = p_a_vec * inv_mat
 
