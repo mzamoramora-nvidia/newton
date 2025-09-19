@@ -74,6 +74,7 @@ class Example:
         self.use_cuda_graph = True
         self.editable_vars = hydroelastic_types.EditableVars()
         self.editable_vars.np_vertex_offset = 0.2 * self.dirs.up
+        self.editable_vars.render_isosurfaces_edges = True
 
         # Load model
         self.model = self.load_model()
