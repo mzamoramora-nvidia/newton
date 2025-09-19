@@ -1545,8 +1545,33 @@ def batch_compute_contact_surfaces_and_wrenches(solver, state, contacts, twist_c
             outputs=[solver.model.hydro_batch.body_q_inv_mat],
         )
 
-        if twist_convention == 0:  # newton convention
-            print("Newton convention not supported yet")
+        if twist_convention == 0 or twist_convention == 2:  # newton convention or mujoco convention
+            if update_contact_pairs:
+                launch_batch_compute_contact_polygons_and_wrenches_from_bvh(
+                    state.body_q,
+                    state.body_qd,
+                    solver.model.hydro_batch,
+                    contacts.isosurface_batch,
+                    twist_convention,
+                )
+            else:
+                launch_batch_compute_contact_polygons_and_wrenches_from_pairs(
+                    state.body_q,
+                    state.body_qd,
+                    solver.model.hydro_batch,
+                    contacts.isosurface_batch,
+                    twist_convention,
+                )
+
+            launch_batch_add_wrench_to_body_f(
+                body_a_idx=contacts.isosurface_batch.body_a_idx,
+                body_b_idx=contacts.isosurface_batch.body_b_idx,
+                force=contacts.isosurface_batch.force,
+                torque_a=contacts.isosurface_batch.torque_a_body,
+                torque_b=contacts.isosurface_batch.torque_b_body,
+                twist_convention=twist_convention,
+                body_f=state.body_f,
+            )
         elif twist_convention == 1:  # featherstone convention
             if update_contact_pairs:
                 launch_batch_compute_contact_polygons_and_wrenches_from_bvh(
@@ -1574,8 +1599,5 @@ def batch_compute_contact_surfaces_and_wrenches(solver, state, contacts, twist_c
                 twist_convention=twist_convention,
                 body_f=state.body_f,
             )
-
-        elif twist_convention == 2:  # mujoco convention
-            print("Mujoco convention not supported yet")
         else:
             raise ValueError("Invalid twist convention")
