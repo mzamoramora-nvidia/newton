@@ -72,7 +72,6 @@ VEC3F_BYTE_SIZE_ = wp.types.type_size_in_bytes(wp.vec3f)
 INT32_BYTE_SIZE_ = wp.types.type_size_in_bytes(wp.int32)
 
 
-
 @wp.func
 def check_bounding_boxes_overlap(
     min_bounds_a: wp.vec3, max_bounds_a: wp.vec3, min_bounds_b: wp.vec3, max_bounds_b: wp.vec3
@@ -1285,7 +1284,7 @@ def compute_soft_hard_fun_batch(
 
     for i in range(3):
         # cp_vertices[surf_id, MAX_POLYGON_VERTICES * pair_idx + i] = tri_vpos_b_W[i]
-        cp_vertices[surf_id, MAX_POLYGON_VERTICES * pair_idx + i] = wp.transform_vector(
+        cp_vertices[surf_id, MAX_POLYGON_VERTICES * pair_idx + i] = wp.transform_point(
             body_q[body_b], points[body_b, elements[body_b, 3 * tri_id + i]]
         )
 
