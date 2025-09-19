@@ -115,7 +115,7 @@ class Example:
         # ==============================================================================================================
         # Setup hydroelastic batch
         self.model.hydro_batch = hydroelastic_types.HydroelasticBatch()
-        hydroelastic_loaders.init_hydro_batch(self.model.hydro_mesh, self.model.hydro_batch)
+        hydroelastic_loaders.init_hydro_batch(self.model.hydro_mesh, self.model.hydro_batch, self.state_0.body_q)
 
         # ==============================================================================================================
         # Setup isosurface batch
