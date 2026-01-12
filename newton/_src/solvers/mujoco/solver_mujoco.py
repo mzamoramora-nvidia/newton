@@ -625,7 +625,7 @@ class SolverMuJoCo(SolverBase):
         builder.add_custom_attribute(
             ModelBuilder.CustomAttribute(
                 name="tendon_joint",
-                frequency="tendon",
+                frequency="tendon_joint",
                 dtype=wp.int32,
                 default=-1,
                 namespace="mujoco",
@@ -635,10 +635,11 @@ class SolverMuJoCo(SolverBase):
         builder.add_custom_attribute(
             ModelBuilder.CustomAttribute(
                 name="tendon_coef",
-                frequency="tendon",
+                frequency="tendon_joint",
                 dtype=wp.float32,
                 default=0.0,
                 namespace="mujoco",
+                references="joint",  # Offset by joint count during merge
             )
         )
 
