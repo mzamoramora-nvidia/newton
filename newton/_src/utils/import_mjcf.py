@@ -1327,12 +1327,12 @@ def parse_mjcf(
             for attr in builder_custom_attr_tendon:
                 tendon_values[attr.key] = tendon_attrs.get(attr.key, attr.default)
 
-            builder.add_custom_values(**tendon_values)            
+            builder.add_custom_values(**tendon_values)
 
             if verbose:
                 joint_names_str = ", ".join(f"{builder.joint_key[j]}*{c}" for j, c in joint_entries)
                 print(f"Parsed fixed tendon: {tendon_name} ({joint_names_str})")
-    
+
     # -----------------
     # parse actuators
 

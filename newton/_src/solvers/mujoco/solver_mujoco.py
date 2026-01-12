@@ -655,8 +655,6 @@ class SolverMuJoCo(SolverBase):
             )
         )
 
-
-
     def _init_pairs(self, model: Model, spec, shape_mapping: dict[int, str], template_world: int) -> None:
         """
         Initialize MuJoCo contact pairs from custom attributes.
@@ -918,7 +916,7 @@ class SolverMuJoCo(SolverBase):
                     )
                     continue
 
-                t.wrap_joint(joint_name, coef) 
+                t.wrap_joint(joint_name, coef)
 
     def __init__(
         self,
