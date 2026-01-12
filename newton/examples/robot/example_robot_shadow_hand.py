@@ -85,7 +85,7 @@ class Example:
         self.device = wp.get_device()
 
         # Path to Shadow Hand asset (requires mujoco_menagerie)
-        #shadow_hand_dir = "/home/adenzler/git/mujoco_menagerie/shadow_hand"
+        # shadow_hand_dir = "/home/adenzler/git/mujoco_menagerie/shadow_hand"
         shadow_hand_dir = "/home/mzamoramora/build_playground/mujoco_menagerie/shadow_hand"
         shadow_hand_path = f"{shadow_hand_dir}/scene_left.xml"
 
