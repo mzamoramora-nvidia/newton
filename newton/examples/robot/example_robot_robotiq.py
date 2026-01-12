@@ -87,7 +87,7 @@ class Example:
         # Path to Shadow Hand asset (requires mujoco_menagerie)
         # shadow_hand_dir = "/home/adenzler/git/mujoco_menagerie/shadow_hand"
         shadow_hand_dir = "/home/mzamoramora/build_playground/mujoco_menagerie/robotiq_2f85"
-        shadow_hand_path = f"{shadow_hand_dir}/scene.xml"
+        shadow_hand_path = f"{shadow_hand_dir}/2f85.xml"
 
         # Use MuJoCo to resolve includes and flatten the XML
         # This is needed because Newton's MJCF parser doesn't handle <include> tags
