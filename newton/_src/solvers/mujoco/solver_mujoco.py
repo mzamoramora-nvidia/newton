@@ -590,6 +590,8 @@ class SolverMuJoCo(SolverBase):
                 mjcf_attribute_name="solimpfriction",
             )
         )
+
+        # TODO: springlength probably needs special handling.
         builder.add_custom_attribute(
             ModelBuilder.CustomAttribute(
                 name="tendon_springlength",
@@ -874,6 +876,7 @@ class SolverMuJoCo(SolverBase):
                 t.solref_friction = tendon_solref_friction.numpy()[i].tolist()
             if tendon_solimp_friction is not None:
                 t.solimp_friction = tendon_solimp_friction.numpy()[i].tolist()
+            # TODO: Fixed tendon springlength is not supported yet.
             if tendon_springlength is not None:
                 t.springlength = tendon_springlength.numpy()[i].tolist()
 
