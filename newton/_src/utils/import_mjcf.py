@@ -1259,7 +1259,7 @@ def parse_mjcf(
     builder_custom_attr_tendon: list[ModelBuilder.CustomAttribute] = [
         attr
         for attr in builder.custom_attributes.values()
-        if attr.frequency is None
+        if isinstance(attr.frequency_key, str)
         and attr.name.startswith("tendon_")
         and attr.name not in ("tendon_world", "tendon_joint_adr", "tendon_joint_num", "tendon_joint", "tendon_coef")
     ]
