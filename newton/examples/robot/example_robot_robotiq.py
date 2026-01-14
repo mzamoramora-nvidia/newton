@@ -89,8 +89,8 @@ class Example:
         shadow_hand_dir = "/home/mzamoramora/build_playground/mujoco_menagerie/robotiq_2f85"
         shadow_hand_path = f"{shadow_hand_dir}/2f85.xml"
 
-        # When loading from the mujoco_menagerie/robotiq_2f85_v4 folder, the resulting inertias that are computed by Newton result in 
-        # small negative values (-2e-20), which lead to a parsing error being triggered by the mujoco spec. 
+        # When loading from the mujoco_menagerie/robotiq_2f85_v4 folder, the resulting inertias that are computed by Newton result in
+        # small negative values (-2e-20), which lead to a parsing error being triggered by the mujoco spec.
         # Setting ignore_inertial_definitions=False when adding the mjcf model does not trigger the parsing error.
         # However, the meshes are not shown in the viewer.
         # The main difference between the two models is that v4 sets coef=0.485 in the joints of the fixed tendon to make sure
