@@ -143,6 +143,8 @@ class Example:
             shadow_hand.joint_target_kd[i] = 2
             shadow_hand.joint_target_pos[i] = 0.5
 
+        shadow_hand.custom_attributes["mujoco:tendon_coef"].values = [0.485, 0.485]
+
         # Create main builder and replicate for multi-world
         builder = newton.ModelBuilder()
         builder.replicate(shadow_hand, self.num_worlds)
