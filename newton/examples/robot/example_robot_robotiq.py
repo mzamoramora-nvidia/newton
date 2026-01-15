@@ -84,10 +84,9 @@ class Example:
 
         self.device = wp.get_device()
 
-        # Path to Shadow Hand asset (requires mujoco_menagerie)
-        # shadow_hand_dir = "/home/adenzler/git/mujoco_menagerie/shadow_hand"
-        shadow_hand_dir = "/home/mzamoramora/build_playground/mujoco_menagerie/robotiq_2f85"
-        shadow_hand_path = f"{shadow_hand_dir}/2f85.xml"
+        # Path to Robotiq 2f85 gripper asset (requires mujoco_menagerie)
+        robotiq_2f85_dir = "/home/mzamoramora/build_playground/mujoco_menagerie/robotiq_2f85"
+        robotiq_2f85_path = f"{robotiq_2f85_dir}/2f85.xml"
 
         # When loading from the mujoco_menagerie/robotiq_2f85_v4 folder, the resulting inertias that are computed by Newton result in
         # small negative values (-2e-20), which lead to a parsing error being triggered by the mujoco spec.
@@ -99,29 +98,29 @@ class Example:
         # Use MuJoCo to resolve includes and flatten the XML
         # This is needed because Newton's MJCF parser doesn't handle <include> tags
         print("Resolving MJCF includes...")
-        mj_spec = mujoco.MjSpec.from_file(shadow_hand_path)
+        mj_spec = mujoco.MjSpec.from_file(robotiq_2f85_path)
         flattened_xml = mj_spec.to_xml()
 
         # Save flattened XML to the asset directory so relative mesh paths resolve correctly
-        flattened_path = f"{shadow_hand_dir}/_flattened_for_newton.xml"
+        flattened_path = f"{robotiq_2f85_dir}/_flattened_for_newton.xml"
         with open(flattened_path, "w") as f:
             f.write(flattened_xml)
 
         # Build the Shadow Hand model
-        shadow_hand = newton.ModelBuilder()
-        newton.solvers.SolverMuJoCo.register_custom_attributes(shadow_hand)
+        robotiq_2f85 = newton.ModelBuilder()
+        newton.solvers.SolverMuJoCo.register_custom_attributes(robotiq_2f85)
 
-        shadow_hand.add_mjcf(flattened_path, verbose=True)
+        robotiq_2f85.add_mjcf(flattened_path, verbose=True)
 
         # Clean up the temp file
         os.remove(flattened_path)
 
         # Store joints per world for the kernel
-        self.joints_per_world = shadow_hand.joint_count
+        self.joints_per_world = robotiq_2f85.joint_count
 
         # Get tendon info and extract the first joint of each tendon
-        tendon_joint_adr = shadow_hand.custom_attributes["mujoco:tendon_joint_adr"].values or {}
-        tendon_joint_vals = shadow_hand.custom_attributes["mujoco:tendon_joint"].values or {}
+        tendon_joint_adr = robotiq_2f85.custom_attributes["mujoco:tendon_joint_adr"].values or {}
+        tendon_joint_vals = robotiq_2f85.custom_attributes["mujoco:tendon_joint"].values or {}
         self.tendons_per_world = len(tendon_joint_adr)
 
         # Get the first joint index for each tendon (we'll animate this one, tendon couples the rest)
@@ -130,7 +129,7 @@ class Example:
             adr = tendon_joint_adr[i]
             first_joint = tendon_joint_vals[adr]
             tendon_first_joints.append(first_joint)
-            joint_name = shadow_hand.joint_key[first_joint]
+            joint_name = robotiq_2f85.joint_key[first_joint]
             print(f"Tendon {i}: first joint = {joint_name} (idx {first_joint})")
 
         self.tendon_first_joints_template = tendon_first_joints
@@ -138,16 +137,16 @@ class Example:
         print(f"\nParsed {self.tendons_per_world} fixed tendons")
 
         # Set joint targets and joint drive gains
-        for i in range(shadow_hand.joint_dof_count):
-            shadow_hand.joint_target_ke[i] = 50
-            shadow_hand.joint_target_kd[i] = 2
-            shadow_hand.joint_target_pos[i] = 0.5
+        for i in range(robotiq_2f85.joint_dof_count):
+            robotiq_2f85.joint_target_ke[i] = 2.0
+            robotiq_2f85.joint_target_kd[i] = 1.0
+            robotiq_2f85.joint_target_pos[i] = 0.0
 
-        shadow_hand.custom_attributes["mujoco:tendon_coef"].values = [0.485, 0.485]
+        robotiq_2f85.custom_attributes["mujoco:tendon_coef"].values = [0.485, 0.485]
 
         # Create main builder and replicate for multi-world
         builder = newton.ModelBuilder()
-        builder.replicate(shadow_hand, self.num_worlds)
+        builder.replicate(robotiq_2f85, self.num_worlds)
 
         builder.add_ground_plane()
 
