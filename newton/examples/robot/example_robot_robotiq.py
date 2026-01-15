@@ -91,6 +91,27 @@ class Example:
         # Clean up the temp file
         os.remove(flattened_path)
 
+        #===============================================
+        # Overriding values instead of creating a new asset.
+        #===============================================      
+        # solreflimit is converted to joint_limit_ke and joint_limit_kd.
+        # so, we need to override the values here.
+        robotiq_2f85.joint_limit_ke[:] = [1000.0] * robotiq_2f85.joint_dof_count
+        robotiq_2f85.joint_limit_ke[2] = 2500.0
+        robotiq_2f85.joint_limit_ke[6] = 2500.0
+
+        robotiq_2f85.joint_limit_kd[:] = [100.0] * robotiq_2f85.joint_dof_count
+
+        #===============================================      
+        # Override tendon coefficients as in 2f85_v4.xml to make sure the finger tips can touch each other when closing.
+        robotiq_2f85.custom_attributes["mujoco:tendon_coef"].values = [0.485, 0.485]
+
+        # Stiffness, damping and spring ref for couplers (indexes 1 and 5)
+        robotiq_2f85.custom_attributes["mujoco:dof_passive_stiffness"].values = {1: float(2.0), 5: float(2.0)}
+        robotiq_2f85.custom_attributes["mujoco:dof_passive_damping"].values = {1: float(0.3), 5: float(0.3)}
+        robotiq_2f85.custom_attributes["mujoco:dof_springref"].values = {1: float(30.0), 5: float(30.0)}
+        #===============================================
+
         # Store joints per world for the kernel
         self.joints_per_world = robotiq_2f85.joint_count
 
@@ -113,16 +134,13 @@ class Example:
         print(f"\nParsed {self.tendons_per_world} fixed tendons")
 
         # The actuated joint are right_driver_joint and left_driver_joint
-        # and have dof indexes 0 and 4.  The code below is setting gains even for passive joints.
+        # and have dof indexes 0 and 4.
         # TODO: Check that we are parsing the joint params (armature, stiffness, etc) correctly.
 
-        # Set joint targets and joint drive gains
-        for i in range(robotiq_2f85.joint_dof_count):
-            robotiq_2f85.joint_target_ke[i] = 2.0
+        for i in [0, 4]:
+            robotiq_2f85.joint_target_ke[i] = 20.0
             robotiq_2f85.joint_target_kd[i] = 1.0
-            robotiq_2f85.joint_target_pos[i] = 0.0
-
-        robotiq_2f85.custom_attributes["mujoco:tendon_coef"].values = [0.485, 0.485]
+            robotiq_2f85.joint_target_pos[i] = 0.0    
 
         # Create main builder and replicate for multi-world
         builder = newton.ModelBuilder()
