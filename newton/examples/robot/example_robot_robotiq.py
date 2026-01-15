@@ -39,43 +39,13 @@ import newton
 import newton.examples
 
 
-@wp.kernel
-def move_tendon_joints(
-    tendon_joint_indices: wp.array(dtype=wp.int32),  # Indices of joints in tendons (one per tendon)
-    joint_qd_start: wp.array(dtype=wp.int32),
-    joint_limit_lower: wp.array(dtype=wp.float32),
-    joint_limit_upper: wp.array(dtype=wp.float32),
-    sim_time: wp.array(dtype=wp.float32),
-    sim_dt: float,
-    tendons_per_world: int,
-    joints_per_world: int,
-    # outputs
-    joint_target_pos: wp.array(dtype=wp.float32),
-):
-    world_id = wp.tid()
-    t = sim_time[world_id]
-
-    # Only animate the first joint of each tendon (the tendon will couple to the second)
-    for i in range(tendons_per_world):
-        tendon_idx = world_id * tendons_per_world + i
-        joint_idx = tendon_joint_indices[tendon_idx]
-        di = joint_qd_start[joint_idx]
-
-        # Create a wave pattern - each finger moves with a phase offset
-        target = wp.sin(t * 2.0 + float(i) * 0.5) * 0.4 + 0.6
-        joint_target_pos[di] = wp.clamp(target, joint_limit_lower[di], joint_limit_upper[di])
-
-    # update the sim time
-    sim_time[world_id] += sim_dt
-
-
 class Example:
     def __init__(self, viewer, num_worlds=4):
-        self.fps = 50
+        self.fps = 100
         self.frame_dt = 1.0 / self.fps
 
         self.sim_time = 0.0
-        self.sim_substeps = 8
+        self.sim_substeps = 10
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.num_worlds = num_worlds
@@ -110,7 +80,13 @@ class Example:
         robotiq_2f85 = newton.ModelBuilder()
         newton.solvers.SolverMuJoCo.register_custom_attributes(robotiq_2f85)
 
-        robotiq_2f85.add_mjcf(flattened_path, verbose=True)
+        quat = wp.quat_from_axis_angle(wp.vec3(0, 1, 0), wp.pi) * wp.quat_from_axis_angle(wp.vec3(0, 0, 1), wp.pi / 2)
+        xform = wp.transform(wp.vec3(0, 0, 0.5), quat)
+        robotiq_2f85.add_mjcf(
+            flattened_path,
+            xform=xform,
+            verbose=True,
+        )
 
         # Clean up the temp file
         os.remove(flattened_path)
@@ -136,6 +112,10 @@ class Example:
 
         print(f"\nParsed {self.tendons_per_world} fixed tendons")
 
+        # The actuated joint are right_driver_joint and left_driver_joint
+        # and have dof indexes 0 and 4.  The code below is setting gains even for passive joints.
+        # TODO: Check that we are parsing the joint params (armature, stiffness, etc) correctly.
+
         # Set joint targets and joint drive gains
         for i in range(robotiq_2f85.joint_dof_count):
             robotiq_2f85.joint_target_ke[i] = 2.0
@@ -153,8 +133,6 @@ class Example:
         self.model = builder.finalize()
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.model)
-
-        self.world_time = wp.zeros(self.num_worlds, dtype=wp.float32)
 
         # Build array of first joint indices for each tendon across all worlds
         # Joint indices get offset by joints_per_world for each world during replicate
@@ -187,7 +165,13 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
+
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.contacts = self.model.collide(self.state_0)
+
+        self.target_pos = 0.0
+        self.joint_target_pos = wp.zeros_like(self.control.joint_target_pos)
+        wp.copy(self.joint_target_pos, self.control.joint_target_pos)
 
         self.viewer.set_model(self.model)
 
@@ -208,28 +192,15 @@ class Example:
             # apply forces to the model for picking, wind, etc
             self.viewer.apply_forces(self.state_0)
 
-            wp.launch(
-                move_tendon_joints,
-                dim=self.num_worlds,
-                inputs=[
-                    self.tendon_joint_indices,
-                    self.model.joint_qd_start,
-                    self.model.joint_limit_lower,
-                    self.model.joint_limit_upper,
-                    self.world_time,
-                    self.sim_dt,
-                    self.tendons_per_world,
-                    self.joints_per_world,
-                ],
-                outputs=[self.control.joint_target_pos],
-            )
-
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             # swap states
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
+        # Set new targets (self.joint_target_pos) acquired from GUI
+        wp.copy(self.control.joint_target_pos, self.joint_target_pos)
+
         if self.graph:
             wp.capture_launch(self.graph)
         else:
@@ -247,7 +218,22 @@ class Example:
         # Basic sanity check - bodies should not have NaN positions
         body_q = self.state_0.body_q.numpy()
         assert not np.any(np.isnan(body_q)), "Body positions contain NaN values"
-        print("Shadow hand simulation completed successfully")
+        print("Gripper simulation completed successfully")
+
+    def gui(self, imgui):
+        imgui.text("Gripper target")
+
+        changed, value = imgui.slider_float("target_pos", self.target_pos, 0.0, 0.8, format="%.3f")
+        if changed:
+            self.target_pos = value
+            # The actuated joint are right_driver_joint and left_driver_joint
+            # and have dof indexes 0 and 4.
+            # We set the same target for both joints for all worlds.
+            joint_target_pos = self.joint_target_pos.reshape((self.num_worlds, -1)).numpy()
+            joint_target_pos[:, 0] = value
+            joint_target_pos[:, 4] = value
+            # print(joint_target_pos)
+            wp.copy(self.joint_target_pos, wp.array(joint_target_pos.flatten(), dtype=wp.float32))
 
 
 if __name__ == "__main__":
