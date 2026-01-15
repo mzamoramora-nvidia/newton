@@ -81,7 +81,7 @@ class Example:
         newton.solvers.SolverMuJoCo.register_custom_attributes(robotiq_2f85)
 
         quat = wp.quat_from_axis_angle(wp.vec3(0, 1, 0), wp.pi) * wp.quat_from_axis_angle(wp.vec3(0, 0, 1), wp.pi / 2)
-        xform = wp.transform(wp.vec3(0, 0, 0.5), quat)
+        xform = wp.transform(wp.vec3(0, 0, 0.385), quat)
         robotiq_2f85.add_mjcf(
             flattened_path,
             xform=xform,
@@ -96,7 +96,7 @@ class Example:
         #===============================================      
         # solreflimit is converted to joint_limit_ke and joint_limit_kd.
         # so, we need to override the values here.
-        robotiq_2f85.joint_limit_ke[:] = [1000.0] * robotiq_2f85.joint_dof_count
+        robotiq_2f85.joint_limit_ke[:] = [10000.0] * robotiq_2f85.joint_dof_count
         robotiq_2f85.joint_limit_ke[2] = 2500.0
         robotiq_2f85.joint_limit_ke[6] = 2500.0
 
@@ -141,6 +141,15 @@ class Example:
             robotiq_2f85.joint_target_ke[i] = 20.0
             robotiq_2f85.joint_target_kd[i] = 1.0
             robotiq_2f85.joint_target_pos[i] = 0.0    
+
+
+
+        self.table_height = 0.2
+        self.cube_size = 0.05
+        robotiq_2f85.add_shape_box(body=-1, xform=wp.transform(wp.vec3(0, 0, 0.5*self.table_height)), hx=0.2, hy=0.2, hz=0.5*self.table_height)
+        cube_body = robotiq_2f85.add_body(xform=wp.transform(wp.vec3(0, 0, self.table_height+0.5*self.cube_size)))
+        robotiq_2f85.add_shape_box(body=cube_body, hx=0.5*self.cube_size, hy=0.5*self.cube_size, hz=0.5*self.cube_size)
+
 
         # Create main builder and replicate for multi-world
         builder = newton.ModelBuilder()
