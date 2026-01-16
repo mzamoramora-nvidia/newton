@@ -47,7 +47,6 @@ class Example:
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.collide_substeps = False
 
-
         self.num_worlds = num_worlds
         self.viewer = viewer
 
@@ -82,10 +81,9 @@ class Example:
         self.model = builder.finalize()
         self.process_worlds_tendon_info()
 
-
         # Create collision pipeline and set rigid contact max.
         self.model.rigid_contact_max = self.rigid_contact_max
-        self.collision_pipeline = newton.examples.create_collision_pipeline(self.model, args)        
+        self.collision_pipeline = newton.examples.create_collision_pipeline(self.model, args)
 
         # Create solver
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.model)
@@ -109,7 +107,7 @@ class Example:
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
-        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)    
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
         # Initialize joint target positions.
@@ -239,7 +237,7 @@ class Example:
 
         # Kp 1000 for pos dofs, Kp 20 for rot dofs.
         robotiq_2f85.joint_target_ke[:6] = [1000.0] * 3 + [20.0] * 3
-        robotiq_2f85.joint_target_kd[:6] = [10.0] * 3 + [1.0] * 3
+        robotiq_2f85.joint_target_kd[:6] = [100.0] * 3 + [5.0] * 3
         robotiq_2f85.joint_limit_upper[:6] = self.base_limit_upper[:6]
         robotiq_2f85.joint_limit_lower[:6] = self.base_limit_lower[:6]
 
