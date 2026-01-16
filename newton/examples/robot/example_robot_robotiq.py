@@ -53,7 +53,7 @@ class Example:
 
         # self.viewer._paused = True
 
-        self.use_hydro = False
+        self.use_hydro = True
         self.shape_config_hydro = newton.ModelBuilder.ShapeConfig(
             k_hydro=1e11,
             sdf_max_resolution=64,
@@ -107,7 +107,6 @@ class Example:
             self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
                 self.model,
                 reduce_contacts=True,
-                rigid_contact_max_per_pair=100,
                 broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
                 sdf_hydroelastic_config=sdf_hydroelastic_config,
             )
