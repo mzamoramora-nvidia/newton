@@ -63,6 +63,9 @@ class Example:
 
         self.gripper_target_pos = 0.0
 
+        self.table_size = [0.4, 0.4, 0.2]
+        self.box_size = [0.05, 0.05, 0.05]
+
         # Build the robotiq 2f85 gripper model
         robotiq_2f85 = self.build_robotiq_2f85()
         self.process_single_tendon_info(robotiq_2f85)
@@ -236,20 +239,20 @@ class Example:
 
         # ===============================================
         # Add table and cube.
-        self.table_height = 0.2
-        self.cube_size = 0.05
 
         robotiq_2f85.add_shape_box(
             body=-1,
-            xform=wp.transform(wp.vec3(0, 0, 0.5 * self.table_height)),
-            hx=0.2,
-            hy=0.2,
-            hz=0.5 * self.table_height,
+            xform=wp.transform(wp.vec3(0, 0, 0.5 * self.table_size[2])),
+            hx=0.5 * self.table_size[0],
+            hy=0.5 * self.table_size[1],
+            hz=0.5 * self.table_size[2],
         )
 
-        cube_body = robotiq_2f85.add_body(xform=wp.transform(wp.vec3(0, 0, self.table_height + 0.5 * self.cube_size)))
+        cube_body = robotiq_2f85.add_body(
+            xform=wp.transform(wp.vec3(0, 0, self.table_size[2] + 0.5 * self.box_size[2]))
+        )
         robotiq_2f85.add_shape_box(
-            body=cube_body, hx=0.5 * self.cube_size, hy=0.5 * self.cube_size, hz=0.5 * self.cube_size
+            body=cube_body, hx=0.5 * self.box_size[0], hy=0.5 * self.box_size[1], hz=0.5 * self.box_size[2]
         )
 
         return robotiq_2f85
