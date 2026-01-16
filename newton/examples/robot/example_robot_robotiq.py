@@ -54,6 +54,8 @@ class Example:
 
         self.device = wp.get_device()
 
+        self.viewer._paused = True
+
         # Path to Robotiq 2f85 gripper asset (requires mujoco_menagerie)
         robotiq_2f85_dir = "/home/mzamoramora/build_playground/mujoco_menagerie/robotiq_2f85"
         robotiq_2f85_path = f"{robotiq_2f85_dir}/2f85.xml"
@@ -67,6 +69,7 @@ class Example:
 
         # Use MuJoCo to resolve includes and flatten the XML
         # This is needed because Newton's MJCF parser doesn't handle <include> tags
+        # TODO: The robotiq model does not have <include> tags, so we could use add_mjcf directly without resolving includes.
         print("Resolving MJCF includes...")
         mj_spec = mujoco.MjSpec.from_file(robotiq_2f85_path)
         flattened_xml = mj_spec.to_xml()
@@ -80,37 +83,51 @@ class Example:
         robotiq_2f85 = newton.ModelBuilder()
         newton.solvers.SolverMuJoCo.register_custom_attributes(robotiq_2f85)
 
+        base_joint_str = "px,py,pz, rx, ry, rz"
+        self.base_joint_dofs = len(base_joint_str.split(","))
+
         quat = wp.quat_from_axis_angle(wp.vec3(0, 1, 0), wp.pi) * wp.quat_from_axis_angle(wp.vec3(0, 0, 1), wp.pi / 2)
         xform = wp.transform(wp.vec3(0, 0, 0.385), quat)
+        xform = wp.transform(wp.vec3(0, 0, 0.0), wp.quat_identity())
         robotiq_2f85.add_mjcf(
             flattened_path,
             xform=xform,
-            verbose=True,
+            base_joint=base_joint_str,
+            # verbose=True,
         )
 
         # Clean up the temp file
         os.remove(flattened_path)
 
-        #===============================================
+        # ===============================================
         # Overriding values instead of creating a new asset.
-        #===============================================      
+        # ===============================================
         # solreflimit is converted to joint_limit_ke and joint_limit_kd.
         # so, we need to override the values here.
-        robotiq_2f85.joint_limit_ke[:] = [10000.0] * robotiq_2f85.joint_dof_count
-        robotiq_2f85.joint_limit_ke[2] = 2500.0
-        robotiq_2f85.joint_limit_ke[6] = 2500.0
+        robotiq_2f85.joint_limit_ke[self.base_joint_dofs : self.base_joint_dofs + 8] = [10000.0] * 8
+        robotiq_2f85.joint_limit_ke[self.base_joint_dofs + 2] = 2500.0
+        robotiq_2f85.joint_limit_ke[self.base_joint_dofs + 6] = 2500.0
 
-        robotiq_2f85.joint_limit_kd[:] = [100.0] * robotiq_2f85.joint_dof_count
+        robotiq_2f85.joint_limit_kd[self.base_joint_dofs : self.base_joint_dofs + 8] = [100.0] * 8
 
-        #===============================================      
+        # ===============================================
         # Override tendon coefficients as in 2f85_v4.xml to make sure the finger tips can touch each other when closing.
         robotiq_2f85.custom_attributes["mujoco:tendon_coef"].values = [0.485, 0.485]
 
         # Stiffness, damping and spring ref for couplers (indexes 1 and 5)
-        robotiq_2f85.custom_attributes["mujoco:dof_passive_stiffness"].values = {1: float(2.0), 5: float(2.0)}
-        robotiq_2f85.custom_attributes["mujoco:dof_passive_damping"].values = {1: float(0.3), 5: float(0.3)}
-        robotiq_2f85.custom_attributes["mujoco:dof_springref"].values = {1: float(30.0), 5: float(30.0)}
-        #===============================================
+        robotiq_2f85.custom_attributes["mujoco:dof_passive_stiffness"].values = {
+            self.base_joint_dofs + 1: float(2.0),
+            self.base_joint_dofs + 5: float(2.0),
+        }
+        robotiq_2f85.custom_attributes["mujoco:dof_passive_damping"].values = {
+            self.base_joint_dofs + 1: float(0.3),
+            self.base_joint_dofs + 5: float(0.3),
+        }
+        robotiq_2f85.custom_attributes["mujoco:dof_springref"].values = {
+            self.base_joint_dofs + 1: float(30.0),
+            self.base_joint_dofs + 5: float(30.0),
+        }
+        # ===============================================
 
         # Store joints per world for the kernel
         self.joints_per_world = robotiq_2f85.joint_count
@@ -133,23 +150,49 @@ class Example:
 
         print(f"\nParsed {self.tendons_per_world} fixed tendons")
 
-        # The actuated joint are right_driver_joint and left_driver_joint
+        # ===============================================
+        # Setting joint targets gains and positions.
+        # ===============================================
+
+        # Base joint. z axis.
+        robotiq_2f85.joint_q[2] = 0.5
+        robotiq_2f85.joint_target_ke[2] = 1000.0
+        robotiq_2f85.joint_target_kd[2] = 10.0
+        robotiq_2f85.joint_target_pos[2] = 0.5
+
+        # Base joint. rot around y axis.
+        robotiq_2f85.joint_q[4] = np.pi
+        robotiq_2f85.joint_target_ke[4] = 1000.0
+        robotiq_2f85.joint_target_kd[4] = 10.0
+        robotiq_2f85.joint_target_pos[4] = np.pi
+
+        # Base joint. rot around z axis.
+        robotiq_2f85.joint_q[5] = 0.5 * np.pi
+        robotiq_2f85.joint_target_ke[5] = 1000.0
+        robotiq_2f85.joint_target_kd[5] = 10.0
+        robotiq_2f85.joint_target_pos[5] = 0.5 * np.pi
+
+        # The actuated joints in the gripper are right_driver_joint and left_driver_joint
         # and have dof indexes 0 and 4.
         # TODO: Check that we are parsing the joint params (armature, stiffness, etc) correctly.
-
         for i in [0, 4]:
-            robotiq_2f85.joint_target_ke[i] = 20.0
-            robotiq_2f85.joint_target_kd[i] = 1.0
-            robotiq_2f85.joint_target_pos[i] = 0.0    
-
-
+            robotiq_2f85.joint_target_ke[self.base_joint_dofs + i] = 20.0
+            robotiq_2f85.joint_target_kd[self.base_joint_dofs + i] = 1.0
+            robotiq_2f85.joint_target_pos[self.base_joint_dofs + i] = 0.0
 
         self.table_height = 0.2
         self.cube_size = 0.05
-        robotiq_2f85.add_shape_box(body=-1, xform=wp.transform(wp.vec3(0, 0, 0.5*self.table_height)), hx=0.2, hy=0.2, hz=0.5*self.table_height)
-        cube_body = robotiq_2f85.add_body(xform=wp.transform(wp.vec3(0, 0, self.table_height+0.5*self.cube_size)))
-        robotiq_2f85.add_shape_box(body=cube_body, hx=0.5*self.cube_size, hy=0.5*self.cube_size, hz=0.5*self.cube_size)
-
+        robotiq_2f85.add_shape_box(
+            body=-1,
+            xform=wp.transform(wp.vec3(0, 0, 0.5 * self.table_height)),
+            hx=0.2,
+            hy=0.2,
+            hz=0.5 * self.table_height,
+        )
+        cube_body = robotiq_2f85.add_body(xform=wp.transform(wp.vec3(0, 0, self.table_height + 0.5 * self.cube_size)))
+        robotiq_2f85.add_shape_box(
+            body=cube_body, hx=0.5 * self.cube_size, hy=0.5 * self.cube_size, hz=0.5 * self.cube_size
+        )
 
         # Create main builder and replicate for multi-world
         builder = newton.ModelBuilder()
@@ -196,7 +239,9 @@ class Example:
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.contacts = self.model.collide(self.state_0)
 
-        self.target_pos = 0.0
+        self.base_target_pos = 0.5
+        self.gripper_target_pos = 0.0
+
         self.joint_target_pos = wp.zeros_like(self.control.joint_target_pos)
         wp.copy(self.joint_target_pos, self.control.joint_target_pos)
 
@@ -248,17 +293,27 @@ class Example:
         print("Gripper simulation completed successfully")
 
     def gui(self, imgui):
+        imgui.text("Base target")
+
+        changed, value = imgui.slider_float("base_target_pos", self.base_target_pos, 0.0, 0.8, format="%.3f")
+        if changed:
+            self.base_target_pos = value
+            joint_target_pos = self.joint_target_pos.reshape((self.num_worlds, -1)).numpy()
+            # Z axis of the base joint.
+            joint_target_pos[:, 2] = value
+            wp.copy(self.joint_target_pos, wp.array(joint_target_pos.flatten(), dtype=wp.float32))
+
         imgui.text("Gripper target")
 
-        changed, value = imgui.slider_float("target_pos", self.target_pos, 0.0, 0.8, format="%.3f")
+        changed, value = imgui.slider_float("gripper_target_pos", self.gripper_target_pos, 0.0, 0.8, format="%.3f")
         if changed:
-            self.target_pos = value
+            self.gripper_target_pos = value
             # The actuated joint are right_driver_joint and left_driver_joint
             # and have dof indexes 0 and 4.
             # We set the same target for both joints for all worlds.
             joint_target_pos = self.joint_target_pos.reshape((self.num_worlds, -1)).numpy()
-            joint_target_pos[:, 0] = value
-            joint_target_pos[:, 4] = value
+            joint_target_pos[:, self.base_joint_dofs + 0] = value
+            joint_target_pos[:, self.base_joint_dofs + 4] = value
             # print(joint_target_pos)
             wp.copy(self.joint_target_pos, wp.array(joint_target_pos.flatten(), dtype=wp.float32))
 

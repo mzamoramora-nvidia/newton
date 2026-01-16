@@ -715,7 +715,7 @@ def parse_mjcf(
             elif len(linear_axes) == 1 and len(angular_axes) == 0:
                 joint_type = JointType.PRISMATIC
 
-        if len(freejoint_tags) > 0 and parent == -1 and (base_joint is not None or floating is not None):
+        if len(freejoint_tags) == 0 and parent == -1 and (base_joint is not None or floating is not None):
             joint_pos = joint_pos[0] if len(joint_pos) > 0 else wp.vec3(0.0, 0.0, 0.0)
             _xform = wp.transform(body_pos_for_joints + joint_pos, body_ori_for_joints)
 
