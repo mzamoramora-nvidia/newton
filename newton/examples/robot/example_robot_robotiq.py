@@ -29,14 +29,13 @@
 #
 ###########################################################################
 
-import os
 
-import mujoco
 import numpy as np
 import warp as wp
 
 import newton
 import newton.examples
+from newton._src.utils.download_assets import download_git_folder
 
 
 class Example:
@@ -56,9 +55,11 @@ class Example:
 
         self.viewer._paused = True
 
-        # Path to Robotiq 2f85 gripper asset (requires mujoco_menagerie)
-        robotiq_2f85_dir = "/home/mzamoramora/build_playground/mujoco_menagerie/robotiq_2f85"
-        robotiq_2f85_path = f"{robotiq_2f85_dir}/2f85.xml"
+        repo_url = "https://github.com/google-deepmind/mujoco_menagerie.git"
+        print(f"Downloading nut/bolt assets from {repo_url}...")
+        asset_path = download_git_folder(repo_url, "robotiq_2f85")
+        print(f"Assets downloaded to: {asset_path}")
+        robotiq_2f85_path = f"{asset_path}/2f85.xml"
 
         # When loading from the mujoco_menagerie/robotiq_2f85_v4 folder, the resulting inertias that are computed by Newton result in
         # small negative values (-2e-20), which lead to a parsing error being triggered by the mujoco spec.
@@ -67,19 +68,7 @@ class Example:
         # The main difference between the two models is that v4 sets coef=0.485 in the joints of the fixed tendon to make sure
         # that the finger tips can touch each other when closing.
 
-        # Use MuJoCo to resolve includes and flatten the XML
-        # This is needed because Newton's MJCF parser doesn't handle <include> tags
-        # TODO: The robotiq model does not have <include> tags, so we could use add_mjcf directly without resolving includes.
-        print("Resolving MJCF includes...")
-        mj_spec = mujoco.MjSpec.from_file(robotiq_2f85_path)
-        flattened_xml = mj_spec.to_xml()
-
-        # Save flattened XML to the asset directory so relative mesh paths resolve correctly
-        flattened_path = f"{robotiq_2f85_dir}/_flattened_for_newton.xml"
-        with open(flattened_path, "w") as f:
-            f.write(flattened_xml)
-
-        # Build the Shadow Hand model
+        # Build the robotiq 2f85 gripper model
         robotiq_2f85 = newton.ModelBuilder()
         newton.solvers.SolverMuJoCo.register_custom_attributes(robotiq_2f85)
 
@@ -90,14 +79,11 @@ class Example:
         xform = wp.transform(wp.vec3(0, 0, 0.385), quat)
         xform = wp.transform(wp.vec3(0, 0, 0.0), wp.quat_identity())
         robotiq_2f85.add_mjcf(
-            flattened_path,
+            robotiq_2f85_path,
             xform=xform,
             base_joint=base_joint_str,
             # verbose=True,
         )
-
-        # Clean up the temp file
-        os.remove(flattened_path)
 
         # ===============================================
         # Overriding values instead of creating a new asset.
