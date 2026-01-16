@@ -52,6 +52,17 @@ class Example:
 
         # self.viewer._paused = True
 
+        # Params for base joint of the gripper.
+        self.base_joint_str = "px,py,pz,rx,ry,rz"
+        self.base_joint_names = self.base_joint_str.split(",")
+        self.base_joint_dofs = len(self.base_joint_names)
+
+        self.base_target_pos = [0.0, 0.0, 0.5, 0.0, np.pi, 0.5 * np.pi]
+        self.base_limit_upper = [0.5, 0.5, 0.5] + [2.0 * np.pi] * 3
+        self.base_limit_lower = [-0.5, -0.5, 0.0] + [-2.0 * np.pi] * 3
+
+        self.gripper_target_pos = 0.0
+
         # Build the robotiq 2f85 gripper model
         robotiq_2f85 = self.build_robotiq_2f85()
         self.process_single_tendon_info(robotiq_2f85)
@@ -89,9 +100,7 @@ class Example:
         # TODO: Switch to unified collision pipeline.
         self.contacts = self.model.collide(self.state_0)
 
-        self.base_target_pos = 0.5
-        self.gripper_target_pos = 0.0
-
+        # Initialize joint target positions.
         self.joint_target_pos = wp.zeros_like(self.control.joint_target_pos)
         wp.copy(self.joint_target_pos, self.control.joint_target_pos)
 
@@ -162,17 +171,12 @@ class Example:
         robotiq_2f85 = newton.ModelBuilder()
         newton.solvers.SolverMuJoCo.register_custom_attributes(robotiq_2f85)
 
-        # Add base joint
-        base_joint_str = "px,py,pz, rx, ry, rz"
-        self.base_joint_dofs = len(base_joint_str.split(","))
-
-        quat = wp.quat_from_axis_angle(wp.vec3(0, 1, 0), wp.pi) * wp.quat_from_axis_angle(wp.vec3(0, 0, 1), wp.pi / 2)
-        xform = wp.transform(wp.vec3(0, 0, 0.385), quat)
+        # Add mjcf model with base joint (self.base_joint_str)
         xform = wp.transform(wp.vec3(0, 0, 0.0), wp.quat_identity())
         robotiq_2f85.add_mjcf(
             robotiq_2f85_path,
             xform=xform,
-            base_joint=base_joint_str,
+            base_joint=self.base_joint_str,
             # verbose=True,
         )
 
@@ -213,23 +217,14 @@ class Example:
         # Setting joint targets gains and positions.
         # ===============================================
 
-        # Base joint. z axis.
-        robotiq_2f85.joint_q[2] = 0.5
-        robotiq_2f85.joint_target_ke[2] = 1000.0
-        robotiq_2f85.joint_target_kd[2] = 10.0
-        robotiq_2f85.joint_target_pos[2] = 0.5
+        robotiq_2f85.joint_target_pos[:6] = self.base_target_pos[:6]
+        robotiq_2f85.joint_q[:6] = self.base_target_pos[:6]
 
-        # Base joint. rot around y axis.
-        robotiq_2f85.joint_q[4] = np.pi
-        robotiq_2f85.joint_target_ke[4] = 1000.0
-        robotiq_2f85.joint_target_kd[4] = 10.0
-        robotiq_2f85.joint_target_pos[4] = np.pi
-
-        # Base joint. rot around z axis.
-        robotiq_2f85.joint_q[5] = 0.5 * np.pi
-        robotiq_2f85.joint_target_ke[5] = 1000.0
-        robotiq_2f85.joint_target_kd[5] = 10.0
-        robotiq_2f85.joint_target_pos[5] = 0.5 * np.pi
+        # Kp 1000 for pos dofs, Kp 20 for rot dofs.
+        robotiq_2f85.joint_target_ke[:6] = [1000.0] * 3 + [20.0] * 3
+        robotiq_2f85.joint_target_kd[:6] = [10.0] * 3 + [1.0] * 3
+        robotiq_2f85.joint_limit_upper[:6] = self.base_limit_upper[:6]
+        robotiq_2f85.joint_limit_lower[:6] = self.base_limit_lower[:6]
 
         # The actuated joints in the gripper are right_driver_joint and left_driver_joint
         # and have dof indexes 0 and 4.
@@ -237,7 +232,7 @@ class Example:
         for i in [0, 4]:
             robotiq_2f85.joint_target_ke[self.base_joint_dofs + i] = 20.0
             robotiq_2f85.joint_target_kd[self.base_joint_dofs + i] = 1.0
-            robotiq_2f85.joint_target_pos[self.base_joint_dofs + i] = 0.0
+            robotiq_2f85.joint_target_pos[self.base_joint_dofs + i] = self.gripper_target_pos
 
         # ===============================================
         # Add table and cube.
@@ -294,13 +289,19 @@ class Example:
     def gui(self, imgui):
         imgui.text("Base target")
 
-        changed, value = imgui.slider_float("base_target_pos", self.base_target_pos, 0.0, 0.8, format="%.3f")
-        if changed:
-            self.base_target_pos = value
-            joint_target_pos = self.joint_target_pos.reshape((self.num_worlds, -1)).numpy()
-            # Z axis of the base joint.
-            joint_target_pos[:, 2] = value
-            wp.copy(self.joint_target_pos, wp.array(joint_target_pos.flatten(), dtype=wp.float32))
+        for idx, base_joint_name in enumerate(self.base_joint_names):
+            changed, value = imgui.slider_float(
+                base_joint_name,
+                self.base_target_pos[idx],
+                self.base_limit_lower[idx],
+                self.base_limit_upper[idx],
+                format="%.3f",
+            )
+            if changed:
+                self.base_target_pos[idx] = value
+                joint_target_pos = self.joint_target_pos.reshape((self.num_worlds, -1)).numpy()
+                joint_target_pos[:, idx] = value
+                wp.copy(self.joint_target_pos, wp.array(joint_target_pos.flatten(), dtype=wp.float32))
 
         imgui.text("Gripper target")
 
