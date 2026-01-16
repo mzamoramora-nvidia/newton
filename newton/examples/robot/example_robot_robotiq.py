@@ -36,6 +36,7 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.utils.download_assets import download_git_folder
+from newton.geometry import SDFHydroelasticConfig
 
 
 class Example:
@@ -52,19 +53,32 @@ class Example:
 
         # self.viewer._paused = True
 
+        self.use_hydro = False
+        self.shape_config_hydro = newton.ModelBuilder.ShapeConfig(
+            k_hydro=1e11,
+            sdf_max_resolution=64,
+            is_hydroelastic=True,
+            sdf_narrow_band_range=(-0.01, 0.01),
+            contact_margin=0.01,
+            torsional_friction=0.0,
+            rolling_friction=0.0,
+        )
+
+        self.show_isosurface = hasattr(viewer, "renderer") and self.use_hydro
+
+        self.table_size = [0.4, 0.4, 0.2]
+        self.box_size = [0.25, 0.05, 0.05]
+
         # Params for base joint of the gripper.
         self.base_joint_str = "px,py,pz,rx,ry,rz"
         self.base_joint_names = self.base_joint_str.split(",")
         self.base_joint_dofs = len(self.base_joint_names)
 
-        self.base_target_pos = [0.0, 0.0, 0.5, 0.0, np.pi, 0.5 * np.pi]
+        self.base_target_pos = [-0.075, 0.0, 0.5, 0.0, np.pi, 0.5 * np.pi]
         self.base_limit_upper = [0.5, 0.5, 0.5] + [2.0 * np.pi] * 3
-        self.base_limit_lower = [-0.5, -0.5, 0.0] + [-2.0 * np.pi] * 3
+        self.base_limit_lower = [-0.5, -0.5, 0.35] + [-2.0 * np.pi] * 3
 
         self.gripper_target_pos = 0.0
-
-        self.table_size = [0.4, 0.4, 0.2]
-        self.box_size = [0.05, 0.05, 0.05]
 
         self.rigid_contact_max = 100000
 
@@ -83,7 +97,22 @@ class Example:
 
         # Create collision pipeline and set rigid contact max.
         self.model.rigid_contact_max = self.rigid_contact_max
-        self.collision_pipeline = newton.examples.create_collision_pipeline(self.model, args)
+
+        if self.use_hydro:
+            sdf_hydroelastic_config = SDFHydroelasticConfig(
+                output_contact_surface=self.show_isosurface,
+                buffer_mult_iso=2,
+            )
+
+            self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
+                self.model,
+                reduce_contacts=True,
+                rigid_contact_max_per_pair=100,
+                broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
+                sdf_hydroelastic_config=sdf_hydroelastic_config,
+            )
+        else:
+            self.collision_pipeline = newton.examples.create_collision_pipeline(self.model, args)
 
         # Create solver
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.model)
@@ -93,11 +122,13 @@ class Example:
             self.model,
             solver="newton",
             integrator="implicitfast",
+            cone="elliptic",
             njmax=num_per_world,
             nconmax=num_per_world,
             iterations=50,
             ls_iterations=25,
             use_mujoco_contacts=use_mujoco_contacts,
+            impratio=1.0,
         )
 
         # Print MuJoCo tendon info
@@ -115,6 +146,8 @@ class Example:
         wp.copy(self.joint_target_pos, self.control.joint_target_pos)
 
         self.viewer.set_model(self.model)
+        if hasattr(self.viewer, "renderer"):
+            self.viewer.show_hydro_contact_surface = self.use_hydro and self.show_isosurface
 
         self.capture()
 
@@ -158,6 +191,10 @@ class Example:
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
         self.viewer.log_contacts(self.contacts, self.state_0)
+        if self.use_hydro:
+            self.viewer.log_hydro_contact_surface(
+                self.collision_pipeline.get_hydro_contact_surface(), penetrating_only=True
+            )
         self.viewer.end_frame()
 
     def test_final(self):
@@ -185,6 +222,8 @@ class Example:
         # Build the robotiq 2f85 gripper model
         robotiq_2f85 = newton.ModelBuilder()
         newton.solvers.SolverMuJoCo.register_custom_attributes(robotiq_2f85)
+        if self.use_hydro:
+            robotiq_2f85.default_shape_cfg = self.shape_config_hydro
 
         # Add mjcf model with base joint (self.base_joint_str)
         xform = wp.transform(wp.vec3(0, 0, 0.0), wp.quat_identity())
@@ -192,8 +231,25 @@ class Example:
             robotiq_2f85_path,
             xform=xform,
             base_joint=self.base_joint_str,
-            # verbose=True,
+            enable_self_collisions=False,
+            parse_visuals_as_colliders=True,
         )
+
+        if self.use_hydro:
+            finger_body_indices = {
+                robotiq_2f85.body_key.index("left_pad"),
+                robotiq_2f85.body_key.index("right_pad"),
+            }
+
+            non_finger_shape_indices = []
+            for shape_idx, body_idx in enumerate(robotiq_2f85.shape_body):
+                if body_idx not in finger_body_indices:
+                    robotiq_2f85.shape_flags[shape_idx] &= ~newton.ShapeFlags.HYDROELASTIC
+                    non_finger_shape_indices.append(shape_idx)
+
+            robotiq_2f85.approximate_meshes(
+                method="convex_hull", shape_indices=non_finger_shape_indices, keep_visual_shapes=True
+            )
 
         # ===============================================
         # Overriding values instead of creating a new asset.
@@ -331,6 +387,12 @@ class Example:
             joint_target_pos[:, self.base_joint_dofs + 4] = value
             # print(joint_target_pos)
             wp.copy(self.joint_target_pos, wp.array(joint_target_pos.flatten(), dtype=wp.float32))
+
+        if self.use_hydro:
+            changed, self.show_isosurface = imgui.checkbox("Show Isosurface", self.show_isosurface)
+            if changed:
+                print(f"Show Isosurface: {self.show_isosurface}")
+                self.viewer.show_hydro_contact_surface = self.show_isosurface
 
 
 if __name__ == "__main__":
