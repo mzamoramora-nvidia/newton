@@ -39,13 +39,14 @@ from newton._src.utils.download_assets import download_git_folder
 
 
 class Example:
-    def __init__(self, viewer, num_worlds=4):
+    def __init__(self, viewer, num_worlds=4, args=None):
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
-
         self.sim_time = 0.0
         self.sim_substeps = 10
         self.sim_dt = self.frame_dt / self.sim_substeps
+        self.collide_substeps = False
+
 
         self.num_worlds = num_worlds
         self.viewer = viewer
@@ -66,6 +67,8 @@ class Example:
         self.table_size = [0.4, 0.4, 0.2]
         self.box_size = [0.05, 0.05, 0.05]
 
+        self.rigid_contact_max = 100000
+
         # Build the robotiq 2f85 gripper model
         robotiq_2f85 = self.build_robotiq_2f85()
         self.process_single_tendon_info(robotiq_2f85)
@@ -79,17 +82,24 @@ class Example:
         self.model = builder.finalize()
         self.process_worlds_tendon_info()
 
-        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.model)
 
+        # Create collision pipeline and set rigid contact max.
+        self.model.rigid_contact_max = self.rigid_contact_max
+        self.collision_pipeline = newton.examples.create_collision_pipeline(self.model, args)        
+
+        # Create solver
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.model)
+        use_mujoco_contacts = args.use_mujoco_contacts if args is not None else False
+        num_per_world = self.rigid_contact_max // self.num_worlds
         self.solver = newton.solvers.SolverMuJoCo(
             self.model,
             solver="newton",
             integrator="implicitfast",
-            njmax=500,
-            nconmax=300,
+            njmax=num_per_world,
+            nconmax=num_per_world,
             iterations=50,
             ls_iterations=25,
-            use_mujoco_cpu=False,
+            use_mujoco_contacts=use_mujoco_contacts,
         )
 
         # Print MuJoCo tendon info
@@ -99,9 +109,8 @@ class Example:
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
-        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
-        # TODO: Switch to unified collision pipeline.
-        self.contacts = self.model.collide(self.state_0)
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)    
+        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
         # Initialize joint target positions.
         self.joint_target_pos = wp.zeros_like(self.control.joint_target_pos)
@@ -119,8 +128,13 @@ class Example:
             self.graph = capture.graph
 
     def simulate(self):
-        self.contacts = self.model.collide(self.state_0)
+        if not self.collide_substeps:
+            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+
         for _ in range(self.sim_substeps):
+            if self.collide_substeps:
+                self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+
             self.state_0.clear_forces()
 
             # apply forces to the model for picking, wind, etc
@@ -327,6 +341,6 @@ if __name__ == "__main__":
 
     viewer, args = newton.examples.init(parser)
 
-    example = Example(viewer, args.num_worlds)
+    example = Example(viewer, num_worlds=args.num_worlds, args=args)
 
     newton.examples.run(example, args)
