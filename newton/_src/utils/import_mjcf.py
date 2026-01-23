@@ -1068,7 +1068,7 @@ def parse_mjcf(
             elif len(linear_axes) == 1 and len(angular_axes) == 0:
                 joint_type = JointType.PRISMATIC
 
-        if joint_type == JointType.FREE and parent == -1 and (base_joint is not None or floating is not None):
+        if parent == -1 and (joint_type == JointType.FREE or base_joint is not None or floating is not None):
             joint_pos = joint_pos[0] if len(joint_pos) > 0 else wp.vec3(0.0, 0.0, 0.0)
             # Rotate joint_pos by body orientation before adding to body position
             rotated_joint_pos = wp.quat_rotate(body_ori_for_joints, joint_pos)
