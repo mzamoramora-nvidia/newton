@@ -298,8 +298,8 @@ class Example:
         # and have dof indexes 0 and 4.
         # TODO: Check that we are parsing the joint params (armature, stiffness, etc) correctly.
         for i in [0, 4]:
-            robotiq_2f85.joint_target_ke[self.base_joint_dofs + i] = 10000.0
-            robotiq_2f85.joint_target_kd[self.base_joint_dofs + i] = 100.0
+            robotiq_2f85.joint_target_ke[self.base_joint_dofs + i] = 20.0
+            robotiq_2f85.joint_target_kd[self.base_joint_dofs + i] = 2.0
             robotiq_2f85.joint_target_pos[self.base_joint_dofs + i] = self.gripper_target_pos
 
         # ===============================================
@@ -380,7 +380,7 @@ class Example:
             # and have dof indexes 0 and 4.
             # We set the same target for both joints for all worlds.
             joint_target_pos = self.joint_target_pos.reshape((self.num_worlds, -1)).numpy()
-            joint_target_pos[:, self.base_joint_dofs + 2] = value
+            joint_target_pos[:, self.base_joint_dofs + 0] = value
             joint_target_pos[:, self.base_joint_dofs + 4] = value
             # print(joint_target_pos)
             wp.copy(self.joint_target_pos, wp.array(joint_target_pos.flatten(), dtype=wp.float32))
