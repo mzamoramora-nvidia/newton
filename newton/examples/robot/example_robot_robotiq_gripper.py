@@ -68,9 +68,10 @@ class Example:
         self.box_size = [0.25, 0.05, 0.05]
 
         # Params for base joint of the gripper.
+        self.base_joint_enabled = False
         self.base_joint_str = "px,py,pz,rx,ry,rz"
         self.base_joint_names = self.base_joint_str.split(",")
-        self.base_joint_dofs = len(self.base_joint_names)
+        self.base_joint_dofs = len(self.base_joint_names) if self.base_joint_enabled else 0
 
         self.base_target_pos = [-0.075, 0.0, 0.5, 0.0, np.pi, 0.5 * np.pi]
         self.base_limit_upper = [0.5, 0.5, 0.5] + [2.0 * np.pi] * 3
@@ -140,6 +141,11 @@ class Example:
 
         # Initialize joint target positions.
         self.joint_target_pos = wp.zeros_like(self.control.joint_target_pos)
+        self.direct_control = wp.zeros_like(self.control.mujoco.ctrl)
+
+        self.mjc_ctrl_source = self.solver.mjc_actuator_ctrl_source.numpy()
+        self.mjc_to_newton = self.solver.mjc_actuator_to_newton_idx.numpy()
+
         wp.copy(self.joint_target_pos, self.control.joint_target_pos)
 
         self.viewer.set_model(self.model)
@@ -176,6 +182,7 @@ class Example:
     def step(self):
         # Set new targets (self.joint_target_pos) acquired from GUI
         wp.copy(self.control.joint_target_pos, self.joint_target_pos)
+        wp.copy(self.control.mujoco.ctrl, self.direct_control)
 
         if self.graph:
             wp.capture_launch(self.graph)
@@ -223,11 +230,11 @@ class Example:
             robotiq_2f85.default_shape_cfg = self.shape_config_hydro
 
         # Add mjcf model with base joint (self.base_joint_str)
-        xform = wp.transform(wp.vec3(0, 0, 0.0), wp.quat_identity())
+        xform = wp.transform(wp.vec3(0, 0, 0.5), wp.quat_identity())
         robotiq_2f85.add_mjcf(
             robotiq_2f85_path,
             xform=xform,
-            base_joint=self.base_joint_str,
+            base_joint=self.base_joint_str if self.base_joint_enabled else None,
             enable_self_collisions=False,
             parse_visuals_as_colliders=True,
         )
@@ -248,36 +255,6 @@ class Example:
                 method="convex_hull", shape_indices=non_finger_shape_indices, keep_visual_shapes=True
             )
 
-        # ===============================================
-        # Overriding values instead of creating a new asset.
-        # ===============================================
-        # solreflimit is converted to joint_limit_ke and joint_limit_kd.
-        # so, we need to override the values here.
-        robotiq_2f85.joint_limit_ke[self.base_joint_dofs : self.base_joint_dofs + 8] = [10000.0] * 8
-        robotiq_2f85.joint_limit_ke[self.base_joint_dofs + 2] = 2500.0
-        robotiq_2f85.joint_limit_ke[self.base_joint_dofs + 6] = 2500.0
-
-        robotiq_2f85.joint_limit_kd[self.base_joint_dofs : self.base_joint_dofs + 8] = [100.0] * 8
-
-        # ===============================================
-        # Override tendon coefficients as in 2f85_v4.xml to make sure the finger tips can touch each other when closing.
-        robotiq_2f85.custom_attributes["mujoco:tendon_coef"].values = [0.485, 0.485]
-
-        # Stiffness, damping and spring ref for couplers (indexes 1 and 5)
-        robotiq_2f85.custom_attributes["mujoco:dof_passive_stiffness"].values = {
-            self.base_joint_dofs + 1: float(2.0),
-            self.base_joint_dofs + 5: float(2.0),
-        }
-        robotiq_2f85.custom_attributes["mujoco:dof_passive_damping"].values = {
-            self.base_joint_dofs + 1: float(0.3),
-            self.base_joint_dofs + 5: float(0.3),
-        }
-        robotiq_2f85.custom_attributes["mujoco:dof_springref"].values = {
-            self.base_joint_dofs + 1: float(30.0),
-            self.base_joint_dofs + 5: float(30.0),
-        }
-        # # ===============================================
-
         # Store joints per world for the kernel
         self.joints_per_world = robotiq_2f85.joint_count
 
@@ -285,22 +262,16 @@ class Example:
         # Setting joint targets gains and positions.
         # ===============================================
 
-        robotiq_2f85.joint_target_pos[:6] = self.base_target_pos[:6]
-        robotiq_2f85.joint_q[:6] = self.base_target_pos[:6]
+        if self.base_joint_enabled:
+            robotiq_2f85.joint_target_pos[:6] = self.base_target_pos[:6]
+            robotiq_2f85.joint_q[:6] = self.base_target_pos[:6]
+            robotiq_2f85.joint_act_mode[:6] = [int(newton.ActuatorMode.POSITION)] * 6
 
-        # Kp 1000 for pos dofs, Kp 20 for rot dofs.
-        robotiq_2f85.joint_target_ke[:6] = [1000.0] * 3 + [20.0] * 3
-        robotiq_2f85.joint_target_kd[:6] = [100.0] * 3 + [5.0] * 3
-        robotiq_2f85.joint_limit_upper[:6] = self.base_limit_upper[:6]
-        robotiq_2f85.joint_limit_lower[:6] = self.base_limit_lower[:6]
-
-        # The actuated joints in the gripper are right_driver_joint and left_driver_joint
-        # and have dof indexes 0 and 4.
-        # TODO: Check that we are parsing the joint params (armature, stiffness, etc) correctly.
-        for i in [0, 4]:
-            robotiq_2f85.joint_target_ke[self.base_joint_dofs + i] = 20.0
-            robotiq_2f85.joint_target_kd[self.base_joint_dofs + i] = 2.0
-            robotiq_2f85.joint_target_pos[self.base_joint_dofs + i] = self.gripper_target_pos
+            # Kp 1000 for pos dofs, Kp 20 for rot dofs.
+            robotiq_2f85.joint_target_ke[:6] = [1000.0] * 3 + [20.0] * 3
+            robotiq_2f85.joint_target_kd[:6] = [100.0] * 3 + [5.0] * 3
+            robotiq_2f85.joint_limit_upper[:6] = self.base_limit_upper[:6]
+            robotiq_2f85.joint_limit_lower[:6] = self.base_limit_lower[:6]
 
         # ===============================================
         # Add table and cube.
@@ -373,17 +344,12 @@ class Example:
 
         imgui.text("Gripper target")
 
-        changed, value = imgui.slider_float("gripper_target_pos", self.gripper_target_pos, 0.0, 0.8, format="%.3f")
+        changed, value = imgui.slider_float("gripper_target_pos", self.gripper_target_pos, 0.0, 255, format="%.3f")
         if changed:
             self.gripper_target_pos = value
-            # The actuated joint are right_driver_joint and left_driver_joint
-            # and have dof indexes 0 and 4.
-            # We set the same target for both joints for all worlds.
-            joint_target_pos = self.joint_target_pos.reshape((self.num_worlds, -1)).numpy()
-            joint_target_pos[:, self.base_joint_dofs + 0] = value
-            joint_target_pos[:, self.base_joint_dofs + 4] = value
-            # print(joint_target_pos)
-            wp.copy(self.joint_target_pos, wp.array(joint_target_pos.flatten(), dtype=wp.float32))
+            direct_control = self.direct_control.reshape((self.num_worlds, -1)).numpy()
+            direct_control[:, 0] = value
+            wp.copy(self.direct_control, wp.array(direct_control.flatten(), dtype=wp.float32))
 
         if self.use_hydro:
             changed, self.show_isosurface = imgui.checkbox("Show Isosurface", self.show_isosurface)
