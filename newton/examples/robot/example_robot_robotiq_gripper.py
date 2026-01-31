@@ -230,7 +230,8 @@ class Example:
             robotiq_2f85.default_shape_cfg = self.shape_config_hydro
 
         # Add mjcf model with base joint (self.base_joint_str)
-        xform = wp.transform(wp.vec3(0, 0, 0.5), wp.quat_identity())
+        z_offset = 0.5 if not self.base_joint_enabled else 0.0
+        xform = wp.transform(wp.vec3(0, 0, z_offset), wp.quat_identity())
         robotiq_2f85.add_mjcf(
             robotiq_2f85_path,
             xform=xform,
