@@ -33,11 +33,10 @@
 #
 ###########################################################################
 
-import copy
 import os
 import shutil
 import xml.etree.ElementTree as ET
-from enum import Enum
+from enum import Enum, IntEnum
 
 import numpy as np
 import warp as wp
@@ -48,13 +47,14 @@ import newton.solvers
 from newton._src.utils.download_assets import download_git_folder
 from newton.geometry import HydroelasticSDF
 
-# ---- Phase constants (usable in Warp kernels) ----
-PHASE_GO_TO_TARGET = 0
-PHASE_APPROACH = 1
-PHASE_CLOSE_GRIPPER = 2
-PHASE_LIFT = 3
-PHASE_HOLD = 4
-NUM_PHASES = 5
+
+class TaskType(IntEnum):
+    """State-machine tasks for the automatic grasp sequence."""
+
+    APPROACH = 0
+    CLOSE_GRIPPER = 1
+    LIFT = 2
+    HOLD = 3
 
 
 # ---- Warp kernels ----
@@ -69,13 +69,12 @@ def control_pipeline_kernel(
     gui_rot: wp.array(dtype=wp.vec3),
     gui_ctrl: wp.array(dtype=float),
     # State machine state (auto mode, read/write)
-    phase: wp.array(dtype=int),
-    phase_timer: wp.array(dtype=float),
+    task: wp.array(dtype=int),
+    task_timer: wp.array(dtype=float),
     # State machine config
-    above_z: float,
     grasp_z: float,
     lift_z: float,
-    phase_durations: wp.array(dtype=float),
+    task_durations: wp.array(dtype=float),
     frame_dt: float,
     hold_rot: wp.vec3,
     # Rate limiter state (read/write)
@@ -97,24 +96,20 @@ def control_pipeline_kernel(
         d_rot = gui_rot[0]
         d_ctrl = gui_ctrl[0]
     else:
-        p = phase[tid]
-        phase_timer[tid] = phase_timer[tid] + frame_dt
+        p = task[tid]
+        task_timer[tid] = task_timer[tid] + frame_dt
 
-        desired_z = above_z
-        if p == PHASE_APPROACH or p == PHASE_CLOSE_GRIPPER:
-            desired_z = grasp_z
-        elif p == PHASE_LIFT or p == PHASE_HOLD:
+        desired_z = grasp_z
+        if p == TaskType.LIFT.value or p == TaskType.HOLD.value:
             desired_z = lift_z
 
         d_ctrl = 0.0
-        if p == PHASE_CLOSE_GRIPPER:
-            d_ctrl = wp.min(phase_timer[tid] / 1.0, 1.0) * 255.0
-        elif p == PHASE_LIFT or p == PHASE_HOLD:
+        if p == TaskType.CLOSE_GRIPPER.value or p == TaskType.LIFT.value or p == TaskType.HOLD.value:
             d_ctrl = 255.0
 
-        if phase_timer[tid] > phase_durations[p] and p < PHASE_HOLD:
-            phase[tid] = p + 1
-            phase_timer[tid] = 0.0
+        if task_timer[tid] > task_durations[p] and p < TaskType.HOLD.value:
+            task[tid] = p + 1
+            task_timer[tid] = 0.0
 
         d_pos = wp.vec3(0.0, 0.0, desired_z)
         d_rot = hold_rot
@@ -144,6 +139,38 @@ def control_pipeline_kernel(
     clamped_ctrl = prev + gdelta
     prev_gripper_ctrl[tid] = clamped_ctrl
     direct_control[tid, gripper_ctrl_idx] = clamped_ctrl
+
+
+def _patch_solimp(tree: ET.ElementTree) -> None:
+    """Patch equality constraint solimp[0] (dmin) from 0.95 to 0.5 in-place.
+
+    solimp[0] controls impedance at zero constraint violation. The default 0.95
+    causes aggressive enforcement that amplifies small perturbations in the
+    coupled finger linkage, leading to oscillation. Lowering dmin to 0.5 makes
+    the constraint more compliant near zero violation, damping oscillatory modes
+    while preserving grasp accuracy. Must be done pre-parse: equality params are
+    baked during MJCF loading. MuJoCo issue 906.
+    Ref: https://github.com/google-deepmind/mujoco/issues/906#issuecomment-1849032881
+    """
+    for eq_elem in tree.iter("equality"):
+        for child in eq_elem:
+            solimp = child.get("solimp")
+            if solimp:
+                parts = solimp.split()
+                parts[0] = "0.5"
+                child.set("solimp", " ".join(parts))
+
+
+def _patch_v1_mjcf(mjcf_path: str) -> str:
+    """Patch V1 MJCF: apply solimp fix.
+
+    Returns the path to the patched file.
+    """
+    tree = ET.parse(mjcf_path)
+    _patch_solimp(tree)
+    patched_path = mjcf_path.replace(".xml", "_v1_patched.xml")
+    tree.write(patched_path)
+    return patched_path
 
 
 def _patch_v4_mjcf(mjcf_path: str) -> str:
@@ -195,14 +222,8 @@ def _patch_v4_mjcf(mjcf_path: str) -> str:
                     geom.set("quat", visual_base.get("quat"))
         break
 
-    # 3. Patch equality constraint solimp[0] from 0.95 to 0.5
-    for eq_elem in tree.iter("equality"):
-        for child in eq_elem:
-            solimp = child.get("solimp")
-            if solimp:
-                parts = solimp.split()
-                parts[0] = "0.5"
-                child.set("solimp", " ".join(parts))
+    # 3. Patch solimp
+    _patch_solimp(tree)
 
     patched_path = mjcf_path.replace(".xml", "_v4_patched.xml")
     tree.write(patched_path)
@@ -238,20 +259,22 @@ class Example:
         # ---- Configuration (change these to switch modes) ----
         self.use_v4 = False  # True = V4 gripper, False = V1
         self.collision_mode = CollisionMode.NEWTON_HYDROELASTIC
-        self.object_shape = ObjectShape.BOX
+        self.object_armature = 0.01  # artificial inertia on grasp object [kg*m^2]
 
         # ---- Simulation parameters ----
-        self.fps = 60
+        self.fps = 100
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
         self.sim_substeps = 10
-        self.collide_substeps = 2
+        self.collide_substeps = 10
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.num_worlds = num_worlds
         self.viewer = viewer
         self.test_mode = args.test if args else False
 
         # self.viewer._paused = True
+
+        self.rigid_contact_max = 4_000_000
 
         # ---- Initial base pose (single source of truth) ----
         # base_target_pos/rot are D6 joint targets (relative to parent_xform).
@@ -266,21 +289,31 @@ class Example:
         self.gripper_ctrl_value = 0.0
         self.show_isosurface = False
 
-        # Max velocity limits (per frame)
-        self.base_pos_max_vel = 0.005  # ~0.3 m/s at 60fps
-        self.base_rot_max_vel = 0.02  # ~1.2 rad/s at 60fps
-        self.gripper_max_delta = 5.0  # ~300/s at 60fps (ctrl units)
+        # ---- Override from CLI args ----
+        if args:
+            if hasattr(args, "object_shape") and args.object_shape:
+                self.object_shape = ObjectShape(args.object_shape)
+            if hasattr(args, "no_manual") and args.no_manual:
+                self.manual_mode = False
+            if hasattr(args, "object_armature") and args.object_armature is not None:
+                self.object_armature = args.object_armature
+
+        # Max velocity limits (per-frame deltas, derived from target physical rates).
+        # target_velocity / fps = per_frame_delta
+        self.base_pos_max_vel = 0.3 / self.fps  # 0.3 m/s / 100 fps = 0.003 m/frame
+        self.base_rot_max_vel = 1.2 / self.fps  # 1.2 rad/s / 100 fps = 0.012 rad/frame
+        self.gripper_max_delta = 255 / self.fps  # 255 units/s / 100 fps = 2.55 units/frame
 
         # GUI cache (avoid GPU sync every frame)
-        self._gui_phase_val = 0
-        self._gui_timer_val = 0.0
+        self._gui_task_val = 0
+        self._gui_task_timer_val = 0.0
         self._gui_read_interval = 10
         self._frame_count = 0
 
         # ---- Scene geometry ----
         self.table_height = 0.1
-        self.box_size = 0.03
-        self.object_init_z = self.table_height + self.box_size + 0.001
+        self.object_half_size = 0.03
+        self.object_init_z = self.table_height + self.object_half_size + 0.001
 
         # ---- Hydroelastic shape config ----
         self.hydro_shape_cfg = newton.ModelBuilder.ShapeConfig(
@@ -289,17 +322,137 @@ class Example:
             is_hydroelastic=True,
             sdf_narrow_band_range=(-0.01, 0.01),
             gap=0.01,
+            mu=1.0,
+            mu_torsional=0.0,
+            mu_rolling=0.0,
         )
-        self.mesh_shape_cfg = copy.deepcopy(self.hydro_shape_cfg)
-        self.mesh_shape_cfg.sdf_max_resolution = None
-        self.mesh_shape_cfg.sdf_target_voxel_size = None
-        self.mesh_shape_cfg.sdf_narrow_band_range = (-0.1, 0.1)
         self.hydro_mesh_sdf_max_resolution = self.hydro_shape_cfg.sdf_max_resolution
 
         # ---- Build model ----
         builder = newton.ModelBuilder()
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
 
+        self._add_gripper(builder)
+
+        self._add_scene_shapes(builder)
+
+        # Count bodies per world before replication
+        self.bodies_per_world = builder.body_count
+        self.dofs_per_world = builder.joint_dof_count
+
+        # ---- Replicate and finalize ----
+        scene = newton.ModelBuilder()
+        scene.replicate(builder, self.num_worlds, spacing=(0.5, 0.5, 0.0))
+        scene.add_ground_plane()
+        self.model = scene.finalize()
+
+        # ---- GPU state arrays for state machine ----
+        self.task = wp.zeros(self.num_worlds, dtype=int)
+        self.task_timer = wp.zeros(self.num_worlds, dtype=float)
+
+        # GPU state for rate limiting (persistent across frames)
+        init_6dof = [self.base_target_pos + self.base_target_rot]
+        self.prev_base_target = wp.array(
+            init_6dof * self.num_worlds,
+            dtype=float,
+            shape=(self.num_worlds, 6),
+        )
+        self.prev_gripper_ctrl = wp.zeros(self.num_worlds, dtype=float)
+
+        # Task config
+        # Task durations [s]: APPROACH, CLOSE_GRIPPER, LIFT, HOLD
+        self.task_durations = wp.array([1.5, 1.5, 2.0, 1e10], dtype=float)
+
+        # Precompute Z targets for state machine
+        self.gripper_base_to_tcp_dist = 0.155
+        self.grasp_z = self.table_height + self.object_half_size + self.gripper_base_to_tcp_dist
+        self.lift_z = self.grasp_z + 0.10
+
+        # ---- GPU buffers for GUI-driven values (written from CPU, read by kernel) ----
+        self._gpu_manual_mode = wp.array([int(self.manual_mode)], dtype=int)
+        self._gpu_gui_pos = wp.array([wp.vec3(*self.base_target_pos)], dtype=wp.vec3)
+        self._gpu_gui_rot = wp.array([wp.vec3(*self.base_target_rot)], dtype=wp.vec3)
+        self._gpu_gui_ctrl = wp.array([self.gripper_ctrl_value], dtype=float)
+        self._gpu_vel_limits = wp.array(
+            [wp.vec3(self.base_pos_max_vel, self.base_rot_max_vel, self.gripper_max_delta)],
+            dtype=wp.vec3,
+        )
+        self._gpu_dirty = True  # Force initial sync
+
+        # ---- Collision pipeline ----
+        self.collision_pipeline = self._create_collision_pipeline()
+        self.contacts = self.collision_pipeline.contacts() if self.collision_pipeline else None
+
+        # ---- Solver ----
+        self.solver = newton.solvers.SolverMuJoCo(
+            self.model,
+            use_mujoco_contacts=(self.collision_mode == CollisionMode.MUJOCO),
+            solver="newton",
+            integrator="implicitfast",
+            cone="elliptic",
+            njmax=self.rigid_contact_max // self.num_worlds,
+            nconmax=self.rigid_contact_max // self.num_worlds,
+            iterations=50,
+            ls_iterations=100,
+            impratio=1000.0,
+        )
+
+        # ---- State and control ----
+        self.state_0 = self.model.state()
+        self.state_1 = self.model.state()
+        self.control = self.model.control()
+
+        self.has_mujoco_ctrl = hasattr(self.control, "mujoco")
+        if self.has_mujoco_ctrl:
+            self.direct_control = wp.zeros_like(self.control.mujoco.ctrl)
+            self.mujoco_ctrl_gripper_idx = 0
+            print(f"MJCF ctrl size: {self.direct_control.shape}")
+
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+
+        # Per-world test diagnostics
+        if self.test_mode:
+            self.object_max_z = np.full(self.num_worlds, self.object_init_z)
+            self.world_nan_frame = np.full(self.num_worlds, -1, dtype=int)
+            self.world_nan_task = np.full(self.num_worlds, -1, dtype=int)
+        else:
+            self.object_max_z = None
+
+        # ---- Viewer setup ----
+        self.viewer.set_model(self.model)
+        self.viewer.set_world_offsets(wp.vec3(0.5, 0.5, 0.0))
+        if hasattr(self.viewer, "renderer"):
+            self.viewer.show_hydro_contact_surface = self.show_isosurface
+
+        # Pre-cache the reshaped direct_control view for the control graph
+        self._direct_control_2d = self.direct_control.reshape((self.num_worlds, -1))
+
+        self.capture()
+
+        version = "V4" if self.use_v4 else "V1"
+        print(f"Robotiq 2F-85 {version} | Collision: {self.collision_mode.value} | Worlds: {self.num_worlds}")
+
+    def _download_gripper_assets(self) -> str:
+        """Download gripper MJCF and return the path to the XML file."""
+        repo_url = "https://github.com/google-deepmind/mujoco_menagerie.git"
+        if self.use_v4:
+            asset_path = download_git_folder(repo_url, "robotiq_2f85_v4")
+            mjcf_path = f"{asset_path}/2f85.xml"
+            # Copy corrected inertia XML from busbar_assets if available
+            corrected = os.path.join("busbar_assets", "2f85_corrected_inertia.xml")
+            if os.path.exists(corrected):
+                dest = f"{asset_path}/2f85_corrected_inertia.xml"
+                shutil.copy2(corrected, dest)
+                mjcf_path = dest
+            # Add missing coupler joints so V4 has 8 DOFs like V3
+            mjcf_path = _patch_v4_mjcf(mjcf_path)
+        else:
+            asset_path = download_git_folder(repo_url, "robotiq_2f85")
+            mjcf_path = _patch_v1_mjcf(f"{asset_path}/2f85.xml")
+        return mjcf_path
+
+    def _add_gripper(self, builder):
+        """Load the Robotiq 2F-85 MJCF, attach it via a D6 joint, and tune armature."""
         mjcf_path = self._download_gripper_assets()
 
         # D6 joint: 6 scalar DOFs (3 pos + 3 rot radians)
@@ -341,10 +494,37 @@ class Example:
             builder.joint_target_pos[i] = self.base_target_pos[i]
             builder.joint_target_pos[3 + i] = self.base_target_rot[i]
 
-        # Count bodies per world before replication
-        self.bodies_per_world = builder.body_count
+        # Override tendon coefficients and force range
+        builder.custom_attributes["mujoco:tendon_coef"].values = [0.485, 0.485]
+        builder.custom_attributes["mujoco:actuator_forcerange"].values[-1] = [-150, 150]
 
-        # ---- Add table (static mesh) ----
+        # Enable gravity compensation on the D6 base DOFs so the PD controller
+        # only corrects positioning error, not the static gravitational load.
+        gravcomp_attr = builder.custom_attributes["mujoco:jnt_actgravcomp"]
+        if gravcomp_attr.values is None:
+            gravcomp_attr.values = {}
+        for dof_idx in range(self.gripper_joints_start):
+            gravcomp_attr.values[dof_idx] = True
+
+        # Enable body-level gravity compensation on all gripper bodies.
+        gravcomp_body = builder.custom_attributes["mujoco:gravcomp"]
+        if gravcomp_body.values is None:
+            gravcomp_body.values = {}
+        for body_idx in range(builder.body_count):
+            gravcomp_body.values[body_idx] = 1.0
+
+        # Scale gripper joint armature by 2x for stability.
+        # The Robotiq 2F-85 MJCF defines small armature values for its 8 joints
+        # (driver=0.005, coupler/spring_link/follower=0.001) to damp high-frequency oscillation.
+        # Ref: https://github.com/google-deepmind/mujoco/issues/906#issuecomment-1849032881
+        # Scaling by 2x seems to help stabilize the gripper.
+        gripper_dof_offset = self.gripper_joints_start
+        gripper_armature = (2.0 * np.array([0.005, 0.001, 0.001, 0.001, 0.005, 0.001, 0.001, 0.001])).tolist()
+        builder.joint_armature[gripper_dof_offset : gripper_dof_offset + 8] = gripper_armature
+
+    def _add_scene_shapes(self, builder):
+        """Add table, grasp object, and configure hydroelastic finger shapes."""
+        # Table (static mesh)
         table_half = (0.2, 0.2, self.table_height / 2)
         self._add_object_shape(
             builder,
@@ -354,10 +534,10 @@ class Example:
             xform=wp.transform(wp.vec3(0.0, 0.0, self.table_height / 2), wp.quat_identity()),
         )
 
-        # ---- Add grasp object on table ----
+        # Grasp object on table
         object_xform = wp.transform(wp.vec3(0.0, 0.0, self.object_init_z), wp.quat_identity())
-        self.object_body_idx = builder.add_body(xform=object_xform, label="grasp_object")
-        s = self.box_size
+        self.object_body_idx = builder.add_body(xform=object_xform, label="grasp_object", armature=self.object_armature)
+        s = self.object_half_size
         size = {
             ObjectShape.BOX: (s, s, s),
             ObjectShape.SPHERE: (s,),
@@ -366,116 +546,9 @@ class Example:
         }[self.object_shape]
         self._add_object_shape(builder, self.object_body_idx, shape=self.object_shape, size=size)
 
-        # ---- Configure hydroelastic on finger shapes ----
+        # Configure hydroelastic on finger shapes
         if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC:
             self._setup_finger_hydroelastic(builder)
-
-        # ---- Replicate and finalize ----
-        scene = newton.ModelBuilder()
-        scene.replicate(builder, self.num_worlds, spacing=(0.5, 0.5, 0.0))
-        scene.add_ground_plane()
-        self.model = scene.finalize()
-
-        self.dofs_per_world = self.model.joint_dof_count // self.num_worlds
-
-        # ---- GPU state arrays for state machine ----
-        self.phase = wp.zeros(self.num_worlds, dtype=int)
-        self.phase_timer = wp.zeros(self.num_worlds, dtype=float)
-
-        # GPU state for rate limiting (persistent across frames)
-        init_6dof = [self.base_target_pos + self.base_target_rot]
-        self.prev_base_target = wp.array(
-            init_6dof * self.num_worlds,
-            dtype=float,
-            shape=(self.num_worlds, 6),
-        )
-        self.prev_gripper_ctrl = wp.zeros(self.num_worlds, dtype=float)
-
-        # Phase config
-        self.phase_durations = wp.array([1.5, 1.5, 1.5, 2.0, 1e10], dtype=float)
-
-        # Precompute Z targets for state machine
-        self.above_z = self.base_target_pos[2]
-        self.grasp_z = self.table_height + self.box_size + 0.04
-        self.lift_z = self.above_z + 0.1
-
-        # ---- GPU buffers for GUI-driven values (written from CPU, read by kernel) ----
-        self._gpu_manual_mode = wp.array([int(self.manual_mode)], dtype=int)
-        self._gpu_gui_pos = wp.array([wp.vec3(*self.base_target_pos)], dtype=wp.vec3)
-        self._gpu_gui_rot = wp.array([wp.vec3(*self.base_target_rot)], dtype=wp.vec3)
-        self._gpu_gui_ctrl = wp.array([self.gripper_ctrl_value], dtype=float)
-        self._gpu_vel_limits = wp.array(
-            [wp.vec3(self.base_pos_max_vel, self.base_rot_max_vel, self.gripper_max_delta)],
-            dtype=wp.vec3,
-        )
-        self._gpu_dirty = True  # Force initial sync
-
-        # ---- Collision pipeline ----
-        self.collision_pipeline = self._create_collision_pipeline()
-        self.contacts = self.collision_pipeline.contacts() if self.collision_pipeline else None
-
-        # ---- Solver ----
-        self.solver = newton.solvers.SolverMuJoCo(
-            self.model,
-            use_mujoco_contacts=(self.collision_mode == CollisionMode.MUJOCO),
-            solver="newton",
-            integrator="implicitfast",
-            cone="elliptic",
-            njmax=2000,
-            nconmax=2000,
-            iterations=15,
-            ls_iterations=100,
-            impratio=1000.0,
-        )
-
-        # ---- State and control ----
-        self.state_0 = self.model.state()
-        self.state_1 = self.model.state()
-        self.control = self.model.control()
-
-        self.has_mujoco_ctrl = hasattr(self.control, "mujoco")
-        if self.has_mujoco_ctrl:
-            self.direct_control = wp.zeros_like(self.control.mujoco.ctrl)
-            self.mujoco_ctrl_gripper_idx = 0
-            print(f"MJCF ctrl size: {self.direct_control.shape}")
-
-        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
-
-        # Track max object height for testing
-        self.object_max_z = [self.object_init_z] * self.num_worlds if self.test_mode else None
-
-        # ---- Viewer setup ----
-        self.viewer.set_model(self.model)
-        self.viewer.set_world_offsets(wp.vec3(0.5, 0.5, 0.0))
-        if hasattr(self.viewer, "renderer"):
-            self.viewer.show_hydro_contact_surface = self.show_isosurface
-
-        # Pre-cache the reshaped direct_control view for the control graph
-        self._direct_control_2d = self.direct_control.reshape((self.num_worlds, -1))
-
-        self.capture()
-
-        version = "V4" if self.use_v4 else "V1"
-        print(f"Robotiq 2F-85 {version} | Collision: {self.collision_mode.value} | Worlds: {self.num_worlds}")
-
-    def _download_gripper_assets(self) -> str:
-        """Download gripper MJCF and return the path to the XML file."""
-        repo_url = "https://github.com/google-deepmind/mujoco_menagerie.git"
-        if self.use_v4:
-            asset_path = download_git_folder(repo_url, "robotiq_2f85_v4")
-            mjcf_path = f"{asset_path}/2f85.xml"
-            # Copy corrected inertia XML from busbar_assets if available
-            corrected = os.path.join("busbar_assets", "2f85_corrected_inertia.xml")
-            if os.path.exists(corrected):
-                dest = f"{asset_path}/2f85_corrected_inertia.xml"
-                shutil.copy2(corrected, dest)
-                mjcf_path = dest
-            # Add missing coupler joints so V4 has 8 DOFs like V3
-            mjcf_path = _patch_v4_mjcf(mjcf_path)
-        else:
-            asset_path = download_git_folder(repo_url, "robotiq_2f85")
-            mjcf_path = f"{asset_path}/2f85.xml"
-        return mjcf_path
 
     def _add_object_shape(self, builder, body, shape: ObjectShape, size: tuple[float, ...], xform=None):
         """Add a mesh shape, with SDF for hydroelastic if needed.
@@ -599,13 +672,14 @@ class Example:
         elif self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC:
             return newton.CollisionPipeline(
                 self.model,
-                rigid_contact_max=10000,
+                rigid_contact_max=self.rigid_contact_max,
                 reduce_contacts=True,
                 broad_phase="explicit",
                 sdf_hydroelastic_config=HydroelasticSDF.Config(
                     output_contact_surface=True,
                     buffer_fraction=1.0,
                     buffer_mult_iso=2,
+                    buffer_mult_contact=2,
                 ),
             )
         else:
@@ -634,12 +708,11 @@ class Example:
                 self._gpu_gui_pos,
                 self._gpu_gui_rot,
                 self._gpu_gui_ctrl,
-                self.phase,
-                self.phase_timer,
-                self.above_z,
+                self.task,
+                self.task_timer,
                 self.grasp_z,
                 self.lift_z,
-                self.phase_durations,
+                self.task_durations,
                 self.frame_dt,
                 wp.vec3(*self.base_target_rot),
                 self.prev_base_target,
@@ -701,16 +774,27 @@ class Example:
 
         # Periodic GPU read for GUI cache
         if self._frame_count % self._gui_read_interval == 0:
-            self._gui_phase_val = int(self.phase.numpy()[0])
-            self._gui_timer_val = float(self.phase_timer.numpy()[0])
+            self._gui_task_val = int(self.task.numpy()[0])
+            self._gui_task_timer_val = float(self.task_timer.numpy()[0])
 
-        # Track max object height for testing
+        # Per-world diagnostics for testing
         if self.test_mode:
             body_q = self.state_0.body_q.numpy()
-            for w in range(self.num_worlds):
-                obj_idx = w * self.bodies_per_world + self.object_body_local
-                z = float(body_q[obj_idx][2])
-                self.object_max_z[w] = max(self.object_max_z[w], z)
+            obj_indices = np.arange(self.num_worlds) * self.bodies_per_world + self.object_body_idx
+            obj_z = body_q[obj_indices, 2]
+
+            # Detect first NaN per world (check all bodies, not just object)
+            body_q_reshaped = body_q.reshape(self.num_worlds, self.bodies_per_world, 7)
+            world_has_nan = np.any(np.isnan(body_q_reshaped), axis=(1, 2))
+            newly_nan = world_has_nan & (self.world_nan_frame < 0)
+            if np.any(newly_nan):
+                tasks = self.task.numpy()
+                self.world_nan_frame[newly_nan] = self._frame_count
+                self.world_nan_task[newly_nan] = tasks[newly_nan]
+
+            # Only update max_z for worlds that haven't gone NaN
+            healthy = ~world_has_nan
+            np.maximum(self.object_max_z, np.where(healthy, obj_z, self.object_max_z), out=self.object_max_z)
 
     def render(self):
         self.viewer.begin_frame(self.sim_time)
@@ -728,109 +812,170 @@ class Example:
         self.viewer.end_frame()
 
     def gui(self, imgui):
-        # Phase display (cached — updated every _gui_read_interval frames)
-        phase_names = ["go_to_target", "approach", "close", "lift", "hold"]
-        imgui.text(f"Phase: {phase_names[self._gui_phase_val]}")
-        imgui.text(f"Timer: {self._gui_timer_val:.2f}s")
-        imgui.separator()
+        # Isosurface toggle (hydroelastic only)
+        if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC and hasattr(self.viewer, "renderer"):
+            changed, self.show_isosurface = imgui.checkbox("Show Isosurface", self.show_isosurface)
+            if changed:
+                self.viewer.show_hydro_contact_surface = self.show_isosurface
 
         # Manual mode toggle
         changed, new_manual = imgui.checkbox("Manual Mode", self.manual_mode)
         if changed:
             self.manual_mode = new_manual
             self._gpu_dirty = True
-        imgui.separator()
 
-        # Gripper ctrl — slider + input
-        changed, val = imgui.slider_float(
-            "Gripper Ctrl (0=open, 255=closed)", self.gripper_ctrl_value, 0.0, 255.0, format="%.1f"
-        )
-        if changed and self.manual_mode:
-            self.gripper_ctrl_value = val
-            self._gpu_dirty = True
-        changed, val = imgui.input_float("Gripper Ctrl##input", self.gripper_ctrl_value, format="%.1f")
-        if changed and self.manual_mode:
-            self.gripper_ctrl_value = min(max(val, 0.0), 255.0)
-            self._gpu_dirty = True
+        # Task display (auto mode only)
+        if not self.manual_mode:
+            imgui.text(f"Task: {TaskType(self._gui_task_val).name.lower()}")
+            imgui.text(f"Timer: {self._gui_task_timer_val:.2f}s")
 
         imgui.separator()
+
+        # Control
+        imgui.set_next_item_open(True, imgui.Cond_.appearing)
+        if imgui.collapsing_header("Control"):
+            imgui.indent()
+            # Gripper ctrl — slider + input
+            changed, val = imgui.slider_float(
+                "Gripper Ctrl (0=open, 255=closed)", self.gripper_ctrl_value, 0.0, 255.0, format="%.1f"
+            )
+            if changed and self.manual_mode:
+                self.gripper_ctrl_value = val
+                self._gpu_dirty = True
+            changed, val = imgui.input_float("Gripper Ctrl##input", self.gripper_ctrl_value, format="%.1f")
+            if changed and self.manual_mode:
+                self.gripper_ctrl_value = min(max(val, 0.0), 255.0)
+                self._gpu_dirty = True
+            imgui.unindent()
 
         # Base position — slider + input for each axis
-        for i, (label, lo, hi) in enumerate([("Base X", -0.3, 0.3), ("Base Y", -0.3, 0.3), ("Base Z", 0.1, 0.6)]):
-            changed, val = imgui.slider_float(label, self.base_target_pos[i], lo, hi, format="%.4f")
-            if changed and self.manual_mode:
-                self.base_target_pos[i] = val
-                self._gpu_dirty = True
-            changed, val = imgui.input_float(f"{label}##input", self.base_target_pos[i], format="%.4f")
-            if changed and self.manual_mode:
-                self.base_target_pos[i] = min(max(val, lo), hi)
-                self._gpu_dirty = True
-
-        imgui.separator()
+        imgui.set_next_item_open(True, imgui.Cond_.appearing)
+        if imgui.collapsing_header("Base Position"):
+            imgui.indent()
+            for i, (label, lo, hi) in enumerate([("Base X", -0.3, 0.3), ("Base Y", -0.3, 0.3), ("Base Z", 0.1, 0.6)]):
+                changed, val = imgui.slider_float(label, self.base_target_pos[i], lo, hi, format="%.4f")
+                if changed and self.manual_mode:
+                    self.base_target_pos[i] = val
+                    self._gpu_dirty = True
+                changed, val = imgui.input_float(f"{label}##input", self.base_target_pos[i], format="%.4f")
+                if changed and self.manual_mode:
+                    self.base_target_pos[i] = min(max(val, lo), hi)
+                    self._gpu_dirty = True
+            imgui.unindent()
 
         # Base rotation — slider + input for roll/pitch/yaw
-        pi = 3.14159
-        for i, label in enumerate(["Roll", "Pitch", "Yaw"]):
-            changed, val = imgui.slider_float(label, self.base_target_rot[i], -pi, pi, format="%.3f")
-            if changed and self.manual_mode:
-                self.base_target_rot[i] = val
-                self._gpu_dirty = True
-            changed, val = imgui.input_float(f"{label}##input", self.base_target_rot[i], format="%.3f")
-            if changed and self.manual_mode:
-                self.base_target_rot[i] = min(max(val, -pi), pi)
-                self._gpu_dirty = True
+        imgui.set_next_item_open(False, imgui.Cond_.appearing)
+        if imgui.collapsing_header("Base Rotation"):
+            imgui.indent()
+            for i, label in enumerate(["Roll", "Pitch", "Yaw"]):
+                changed, val = imgui.slider_float(label, self.base_target_rot[i], -wp.pi, wp.pi, format="%.3f")
+                if changed and self.manual_mode:
+                    self.base_target_rot[i] = val
+                    self._gpu_dirty = True
+                changed, val = imgui.input_float(f"{label}##input", self.base_target_rot[i], format="%.3f")
+                if changed and self.manual_mode:
+                    self.base_target_rot[i] = min(max(val, -pi), pi)
+                    self._gpu_dirty = True
+            imgui.unindent()
 
         # Velocity limits
-        imgui.separator()
-        imgui.text("Velocity Limits")
-        changed, val = imgui.slider_float(
-            "Base Pos Max Vel (m/frame)", self.base_pos_max_vel, 0.001, 0.05, format="%.4f"
-        )
-        if changed:
-            self.base_pos_max_vel = val
-            self._gpu_dirty = True
-        changed, val = imgui.slider_float(
-            "Base Rot Max Vel (rad/frame)", self.base_rot_max_vel, 0.005, 0.1, format="%.4f"
-        )
-        if changed:
-            self.base_rot_max_vel = val
-            self._gpu_dirty = True
-        changed, val = imgui.slider_float(
-            "Gripper Max Delta (/frame)", self.gripper_max_delta, 0.5, 20.0, format="%.1f"
-        )
-        if changed:
-            self.gripper_max_delta = val
-            self._gpu_dirty = True
-
-        # Isosurface toggle (hydroelastic only)
-        if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC and hasattr(self.viewer, "renderer"):
-            imgui.separator()
-            changed, self.show_isosurface = imgui.checkbox("Show Isosurface", self.show_isosurface)
+        imgui.set_next_item_open(False, imgui.Cond_.appearing)
+        if imgui.collapsing_header("Velocity Limits"):
+            imgui.indent()
+            changed, val = imgui.slider_float(
+                "Base Pos Max Vel (m/frame)", self.base_pos_max_vel, 0.001, 0.05, format="%.4f"
+            )
             if changed:
-                self.viewer.show_hydro_contact_surface = self.show_isosurface
+                self.base_pos_max_vel = val
+                self._gpu_dirty = True
+            changed, val = imgui.slider_float(
+                "Base Rot Max Vel (rad/frame)", self.base_rot_max_vel, 0.005, 0.1, format="%.4f"
+            )
+            if changed:
+                self.base_rot_max_vel = val
+                self._gpu_dirty = True
+            changed, val = imgui.slider_float(
+                "Gripper Max Delta (/frame)", self.gripper_max_delta, 0.5, 20.0, format="%.1f"
+            )
+            if changed:
+                self.gripper_max_delta = val
+                self._gpu_dirty = True
+            imgui.unindent()
 
     def test_final(self):
-        body_q = self.state_0.body_q.numpy()
-        assert not np.any(np.isnan(body_q)), "Body positions contain NaN values"
-
-        if self.test_mode:
-            min_lift = 0.05  # Object should lift at least 5cm
-            for w in range(self.num_worlds):
-                max_z = self.object_max_z[w]
-                lift = max_z - self.object_init_z
-                assert lift > min_lift, (
-                    f"World {w}: Object not lifted enough. "
-                    f"init_z={self.object_init_z:.3f}, max_z={max_z:.3f}, lift={lift:.3f}"
-                )
-
         version = "V4" if self.use_v4 else "V1"
-        print(f"Robotiq 2F-85 {version} basic gripper example completed successfully")
+
+        if not self.test_mode:
+            print(f"Robotiq 2F-85 {version} basic gripper example completed successfully")
+            return
+
+        min_lift = 0.05  # Object should lift at least 5cm [m]
+        nan_worlds = []
+        success_worlds = []
+        fail_worlds = []
+
+        for w in range(self.num_worlds):
+            if self.world_nan_frame[w] >= 0:
+                task_name = TaskType(self.world_nan_task[w]).name.lower()
+                nan_worlds.append(f"  World {w}: NaN at frame {self.world_nan_frame[w]} (task={task_name})")
+            else:
+                lift = self.object_max_z[w] - self.object_init_z
+                if lift > min_lift:
+                    success_worlds.append(w)
+                else:
+                    fail_worlds.append(f"  World {w}: FAIL lift={lift:.3f}m")
+
+        n_nan = len(nan_worlds)
+        n_success = len(success_worlds)
+        n_fail = len(fail_worlds)
+        n_total = self.num_worlds
+
+        print(f"\n{'=' * 50}")
+        print(f"Grasp Test Report — {version} | {self.object_shape.value}")
+        print(f"{'=' * 50}")
+        print(f"  Worlds: {n_total} | Success: {n_success} | Fail: {n_fail} | NaN: {n_nan}")
+
+        if nan_worlds:
+            print(f"\nNaN worlds ({n_nan}):")
+            for line in nan_worlds:
+                print(line)
+
+        if fail_worlds:
+            print(f"\nFailed worlds ({n_fail}):")
+            for line in fail_worlds:
+                print(line)
+
+        rate = n_success / n_total
+        print(f"\nGrasp success rate: {n_success}/{n_total} ({rate:.0%})")
+        print(f"  shape={self.object_shape.value}, armature={self.object_armature}")
+        print(f"{'=' * 50}\n")
+
+        assert n_nan == 0, f"{n_nan}/{n_total} worlds diverged to NaN"
+        assert rate > 0.5, f"Grasp success rate too low: {rate:.0%} ({n_success}/{n_total})"
 
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
-    parser.add_argument("--num-worlds", type=int, default=2, help="Number of simulated worlds.")
-    parser.set_defaults(num_frames=480)
+    parser.add_argument("--num-worlds", type=int, default=4, help="Number of simulated worlds.")
+    parser.add_argument(
+        "--object-shape",
+        type=str,
+        default="sphere",
+        choices=["box", "sphere", "cylinder", "capsule"],
+        help="Shape of the grasp object.",
+    )
+    parser.add_argument(
+        "--no-manual",
+        action="store_true",
+        help="Start in auto mode (disable manual mode).",
+    )
+    parser.add_argument(
+        "--object-armature",
+        type=float,
+        default=1e-2,
+        help="Artificial inertia added to the grasp object body [kg*m^2].",
+    )
+    parser.set_defaults(num_frames=700)
     viewer, args = newton.examples.init(parser)
 
     example = Example(viewer, num_worlds=args.num_worlds, args=args)
