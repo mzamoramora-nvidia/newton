@@ -286,7 +286,7 @@ class Example:
         self.base_target_rot = [0.0, 0.0, 0.0]  # [rx, ry, rz] in radians
 
         # ---- GUI state ----
-        self.manual_mode = True
+        self.manual_mode = False
         self.gripper_ctrl_value = 0.0
         self.show_isosurface = False
 
@@ -318,16 +318,18 @@ class Example:
         self.object_half_size = 0.03
         self.object_init_z = self.table_height + self.object_half_size + 0.001
 
-        # ---- SDF shape config ----
-        self.sdf_shape_cfg = newton.ModelBuilder.ShapeConfig(
-            kh=1e11,
-            sdf_max_resolution=64,
-            sdf_narrow_band_range=(-0.01, 0.01),
+        # ---- Shape config ----
+        self.shape_cfg = newton.ModelBuilder.ShapeConfig(
             gap=0.01,
             mu=1.0,
             mu_torsional=0.0,
             mu_rolling=0.0,
         )
+        self.kh = 1e11  # hydroelastic stiffness
+        self.sdf_params = {
+            "max_resolution": 64,
+            "narrow_band_range": (-0.01, 0.01),
+        }
 
         # ---- Build model ----
         builder = newton.ModelBuilder()
@@ -585,9 +587,9 @@ class Example:
 
         if use_sdf:
             mesh.build_sdf(
-                max_resolution=self.sdf_shape_cfg.sdf_max_resolution,
-                narrow_band_range=self.sdf_shape_cfg.sdf_narrow_band_range,
-                margin=self.sdf_shape_cfg.gap,
+                max_resolution=self.sdf_params["max_resolution"],
+                narrow_band_range=self.sdf_params["narrow_band_range"],
+                margin=self.shape_cfg.gap,
             )
 
         builder.add_shape_mesh(
@@ -596,12 +598,22 @@ class Example:
             xform=xform,
         )
 
+        # Apply material properties for all collision pipelines
+        cfg = self.shape_cfg
+        shape_idx = len(builder.shape_material_kh) - 1
+        builder.shape_gap[shape_idx] = cfg.gap
+        builder.shape_material_mu[shape_idx] = cfg.mu
+        builder.shape_material_mu_torsional[shape_idx] = cfg.mu_torsional
+        builder.shape_material_mu_rolling[shape_idx] = cfg.mu_rolling
+
         if use_hydro:
+            builder.shape_material_kh[shape_idx] = self.kh
             builder.shape_flags[-1] |= newton.ShapeFlags.HYDROELASTIC
 
     def _setup_finger_sdf(self, builder):
         """Build SDFs on finger contact shapes; enable hydroelastic flag if in hydroelastic mode."""
         use_hydro = self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC
+        cfg = self.shape_cfg
 
         # For V1 and V4: find pad collision shapes by exact label suffix
         pad_names = {"left_pad1", "left_pad2", "right_pad1", "right_pad2"}
@@ -624,17 +636,24 @@ class Example:
                     compute_inertia=True,
                 )
                 mesh.build_sdf(
-                    max_resolution=self.sdf_shape_cfg.sdf_max_resolution,
-                    narrow_band_range=self.sdf_shape_cfg.sdf_narrow_band_range,
-                    margin=self.sdf_shape_cfg.gap,
+                    max_resolution=self.sdf_params["max_resolution"],
+                    narrow_band_range=self.sdf_params["narrow_band_range"],
+                    margin=cfg.gap,
                 )
                 builder.shape_type[shape_idx] = newton.GeoType.MESH
                 builder.shape_source[shape_idx] = mesh
                 builder.shape_scale[shape_idx] = (1.0, 1.0, 1.0)
 
-                builder.shape_flags[shape_idx] &= ~newton.ShapeFlags.VISIBLE
-                if use_hydro:
-                    builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
+            # Apply material properties
+            builder.shape_gap[shape_idx] = cfg.gap
+            builder.shape_material_mu[shape_idx] = cfg.mu
+            builder.shape_material_mu_torsional[shape_idx] = cfg.mu_torsional
+            builder.shape_material_mu_rolling[shape_idx] = cfg.mu_rolling
+
+            builder.shape_flags[shape_idx] &= ~newton.ShapeFlags.VISIBLE
+            if use_hydro:
+                builder.shape_material_kh[shape_idx] = self.kh
+                builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
 
         if self.use_v4:
             # V4: Enable tongue meshes on follower bodies
@@ -647,7 +666,12 @@ class Example:
             for shape_idx in follower_shape_indices:
                 if builder.shape_type[shape_idx] == newton.GeoType.MESH:
                     self._build_shape_sdf(builder, shape_idx)
+                    builder.shape_gap[shape_idx] = cfg.gap
+                    builder.shape_material_mu[shape_idx] = cfg.mu
+                    builder.shape_material_mu_torsional[shape_idx] = cfg.mu_torsional
+                    builder.shape_material_mu_rolling[shape_idx] = cfg.mu_rolling
                     if use_hydro:
+                        builder.shape_material_kh[shape_idx] = self.kh
                         builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
 
     def _build_shape_sdf(self, builder, shape_idx):
@@ -662,9 +686,9 @@ class Example:
             builder.shape_scale[shape_idx] = (1.0, 1.0, 1.0)
         mesh.clear_sdf()
         mesh.build_sdf(
-            max_resolution=self.sdf_shape_cfg.sdf_max_resolution,
-            narrow_band_range=self.sdf_shape_cfg.sdf_narrow_band_range,
-            margin=self.sdf_shape_cfg.gap,
+            max_resolution=self.sdf_params["max_resolution"],
+            narrow_band_range=self.sdf_params["narrow_band_range"],
+            margin=self.shape_cfg.gap,
         )
 
     def _create_collision_pipeline(self):
