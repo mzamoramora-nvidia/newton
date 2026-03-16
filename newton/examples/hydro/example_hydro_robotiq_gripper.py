@@ -236,7 +236,7 @@ class ObjectShape(Enum):
 class Example:
     def __init__(self, viewer, num_worlds=1, args=None):
         # ---- Configuration (change these to switch modes) ----
-        self.use_v4 = False  # True = V4 gripper, False = V1
+        self.use_v4 = True  # True = V4 gripper, False = V1
         self.collision_mode = CollisionMode.NEWTON_HYDROELASTIC
         self.object_shape = ObjectShape.BOX
 
@@ -516,64 +516,50 @@ class Example:
 
     def _setup_finger_hydroelastic(self, builder):
         """Enable hydroelastic on finger contact shapes, disable on everything else."""
+
+        # For V1 and V4: find pad collision shapes by exact label suffix
+        pad_names = {"left_pad1", "left_pad2", "right_pad1", "right_pad2"}
+        pad_shape_indices = set()
+        for shape_idx, lbl in enumerate(builder.shape_label):
+            if lbl and lbl.split("/")[-1] in pad_names:
+                pad_shape_indices.add(shape_idx)
+
+        for shape_idx in pad_shape_indices:
+            if builder.shape_type[shape_idx] == newton.GeoType.BOX:
+                # Convert BOX to MESH + SDF for hydroelastic contact
+                hx, hy, hz = builder.shape_scale[shape_idx]
+                mesh = newton.Mesh.create_box(
+                    hx,
+                    hy,
+                    hz,
+                    duplicate_vertices=True,
+                    compute_normals=False,
+                    compute_uvs=False,
+                    compute_inertia=True,
+                )
+                mesh.build_sdf(
+                    max_resolution=self.hydro_mesh_sdf_max_resolution,
+                    narrow_band_range=self.hydro_shape_cfg.sdf_narrow_band_range,
+                    margin=self.hydro_shape_cfg.gap,
+                )
+                builder.shape_type[shape_idx] = newton.GeoType.MESH
+                builder.shape_source[shape_idx] = mesh
+                builder.shape_scale[shape_idx] = (1.0, 1.0, 1.0)
+            builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
+            builder.shape_flags[shape_idx] &= ~newton.ShapeFlags.VISIBLE
+
         if self.use_v4:
             # V4: disable pad box shapes, enable tongue meshes on follower bodies
-            pad_body_indices = {
+            follower_shape_indices = {
                 i
-                for i, lbl in enumerate(builder.body_label)
-                if lbl.split("/")[-1] in ("left_pad", "right_pad", "left_silicone_pad", "right_silicone_pad")
-            }
-            follower_body_indices = {
-                i
-                for i, lbl in enumerate(builder.body_label)
-                if lbl.split("/")[-1] in ("left_follower", "right_follower")
+                for i, lbl in enumerate(builder.shape_label)
+                if lbl.split("/")[-1] in ("left_follower_geom_1", "right_follower_geom_0")
             }
 
-            for shape_idx, body_idx in enumerate(builder.shape_body):
-                if body_idx in pad_body_indices:
-                    builder.shape_flags[shape_idx] &= ~newton.ShapeFlags.HYDROELASTIC
-                    builder.shape_flags[shape_idx] &= ~newton.ShapeFlags.COLLIDE_SHAPES
-                    builder.shape_flags[shape_idx] &= ~newton.ShapeFlags.VISIBLE
-                elif body_idx in follower_body_indices:
-                    shape_lbl = builder.shape_label[shape_idx] or ""
-                    is_tongue_collision = (
-                        builder.shape_type[shape_idx] == newton.GeoType.MESH
-                        and shape_lbl.split("/")[-1] in ("left_follower_geom_1", "right_follower_geom_0")
-                        and "visual" not in shape_lbl
-                    )
-                    if is_tongue_collision:
-                        self._build_shape_sdf(builder, shape_idx)
-                        builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
-        else:
-            # V1: find pad collision shapes by exact label suffix
-            pad_names = {"left_pad1", "left_pad2", "right_pad1", "right_pad2"}
-            pad_shape_indices = set()
-            for shape_idx, lbl in enumerate(builder.shape_label):
-                if lbl and lbl.split("/")[-1] in pad_names:
-                    pad_shape_indices.add(shape_idx)
-
-            for shape_idx in pad_shape_indices:
-                if builder.shape_type[shape_idx] == newton.GeoType.BOX:
-                    # Convert BOX to MESH + SDF for hydroelastic contact
-                    hx, hy, hz = builder.shape_scale[shape_idx]
-                    mesh = newton.Mesh.create_box(
-                        hx,
-                        hy,
-                        hz,
-                        duplicate_vertices=True,
-                        compute_normals=False,
-                        compute_uvs=False,
-                        compute_inertia=True,
-                    )
-                    mesh.build_sdf(
-                        max_resolution=self.hydro_mesh_sdf_max_resolution,
-                        narrow_band_range=self.hydro_shape_cfg.sdf_narrow_band_range,
-                        margin=self.hydro_shape_cfg.gap,
-                    )
-                    builder.shape_type[shape_idx] = newton.GeoType.MESH
-                    builder.shape_source[shape_idx] = mesh
-                    builder.shape_scale[shape_idx] = (1.0, 1.0, 1.0)
-                builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
+            for shape_idx in follower_shape_indices:
+                if builder.shape_type[shape_idx] == newton.GeoType.MESH:
+                    self._build_shape_sdf(builder, shape_idx)
+                    builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
 
     def _build_shape_sdf(self, builder, shape_idx):
         """Build SDF for a mesh shape, baking scale if needed."""
