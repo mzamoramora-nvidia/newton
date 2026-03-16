@@ -258,15 +258,16 @@ class Example:
     def __init__(self, viewer, num_worlds=1, args=None):
         # ---- Configuration (change these to switch modes) ----
         self.use_v4 = False  # True = V4 gripper, False = V1
-        self.collision_mode = CollisionMode.NEWTON_HYDROELASTIC
-        self.object_armature = 0.01  # artificial inertia on grasp object [kg*m^2]
+        # self.object_shape = ObjectShape.BOX
+        # self.collision_mode = CollisionMode.NEWTON_DEFAULT
+        # self.object_armature = 0.01  # artificial inertia on grasp object [kg*m^2]
 
         # ---- Simulation parameters ----
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
         self.sim_substeps = 10
-        self.collide_substeps = 10
+        self.collide_substeps = 2
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.num_worlds = num_worlds
         self.viewer = viewer
@@ -274,7 +275,7 @@ class Example:
 
         # self.viewer._paused = True
 
-        self.rigid_contact_max = 4_000_000
+        self.rigid_contact_max = 10_000 * self.num_worlds
 
         # ---- Initial base pose (single source of truth) ----
         # base_target_pos/rot are D6 joint targets (relative to parent_xform).
@@ -668,10 +669,14 @@ class Example:
         if self.collision_mode == CollisionMode.MUJOCO:
             return None
         elif self.collision_mode == CollisionMode.NEWTON_DEFAULT:
-            return newton.CollisionPipeline(self.model)
+            return newton.CollisionPipeline(
+                self.model,
+                rigid_contact_max=self.rigid_contact_max,
+            )
         elif self.collision_mode == CollisionMode.NEWTON_SDF:
             return newton.CollisionPipeline(
                 self.model,
+                rigid_contact_max=self.rigid_contact_max,
                 reduce_contacts=True,
                 broad_phase="explicit",
             )
@@ -818,6 +823,11 @@ class Example:
         self.viewer.end_frame()
 
     def gui(self, imgui):
+        # Configuration info
+        imgui.text(f"Collision: {self.collision_mode.value}")
+        imgui.text(f"Object: {self.object_shape.value} (armature={self.object_armature:.0e})")
+        imgui.separator()
+
         # Isosurface toggle (hydroelastic only)
         if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC and hasattr(self.viewer, "renderer"):
             changed, self.show_isosurface = imgui.checkbox("Show Isosurface", self.show_isosurface)
@@ -984,7 +994,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--collision-mode",
         type=str,
-        default="newton_hydroelastic",
+        default="newton_default",
         choices=[m.value for m in CollisionMode],
         help="Collision pipeline to use.",
     )
