@@ -236,7 +236,7 @@ class ObjectShape(Enum):
 class Example:
     def __init__(self, viewer, num_worlds=1, args=None):
         # ---- Configuration (change these to switch modes) ----
-        self.use_v4 = True  # True = V4 gripper, False = V1
+        self.use_v4 = False  # True = V4 gripper, False = V1
         self.collision_mode = CollisionMode.NEWTON_HYDROELASTIC
         self.object_shape = ObjectShape.BOX
 
@@ -346,32 +346,25 @@ class Example:
 
         # ---- Add table (static mesh) ----
         table_half = (0.2, 0.2, self.table_height / 2)
-        table_mesh = newton.Mesh.create_box(
-            table_half[0],
-            table_half[1],
-            table_half[2],
-            duplicate_vertices=True,
-            compute_normals=False,
-            compute_uvs=False,
-            compute_inertia=True,
-        )
-        if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC:
-            table_mesh.build_sdf(
-                max_resolution=self.hydro_mesh_sdf_max_resolution,
-                narrow_band_range=self.hydro_shape_cfg.sdf_narrow_band_range,
-                margin=self.hydro_shape_cfg.gap,
-            )
-        builder.add_shape_mesh(
+        self._add_object_shape(
+            builder,
             body=-1,
-            mesh=table_mesh,
+            shape=ObjectShape.BOX,
+            size=table_half,
             xform=wp.transform(wp.vec3(0.0, 0.0, self.table_height / 2), wp.quat_identity()),
-            # cfg=self.mesh_shape_cfg if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC else None,
         )
 
         # ---- Add grasp object on table ----
         object_xform = wp.transform(wp.vec3(0.0, 0.0, self.object_init_z), wp.quat_identity())
-        self.object_body_local = builder.add_body(xform=object_xform, label="grasp_object")
-        self._add_object_shape(builder, self.object_body_local)
+        self.object_body_idx = builder.add_body(xform=object_xform, label="grasp_object")
+        s = self.box_size
+        size = {
+            ObjectShape.BOX: (s, s, s),
+            ObjectShape.SPHERE: (s,),
+            ObjectShape.CYLINDER: (s, s),
+            ObjectShape.CAPSULE: (s, s),
+        }[self.object_shape]
+        self._add_object_shape(builder, self.object_body_idx, shape=self.object_shape, size=size)
 
         # ---- Configure hydroelastic on finger shapes ----
         if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC:
@@ -484,23 +477,32 @@ class Example:
             mjcf_path = f"{asset_path}/2f85.xml"
         return mjcf_path
 
-    def _add_object_shape(self, builder, body):
-        """Add grasp object shape, with SDF mesh for hydroelastic if needed."""
-        s = self.box_size
+    def _add_object_shape(self, builder, body, shape: ObjectShape, size: tuple[float, ...], xform=None):
+        """Add a mesh shape, with SDF for hydroelastic if needed.
+
+        Args:
+            builder: model builder to add the shape to.
+            body: body index (-1 for static/world body).
+            shape: which :class:`ObjectShape` to create.
+            size: shape-specific dimensions — ``(hx, hy, hz)`` for BOX,
+                ``(radius,)`` for SPHERE, ``(radius, half_height)`` for
+                CYLINDER/CAPSULE.
+            xform: optional transform passed to ``add_shape_mesh``.
+        """
         use_hydro = self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC
 
-        if self.object_shape == ObjectShape.BOX:
+        if shape == ObjectShape.BOX:
             mesh = newton.Mesh.create_box(
-                s, s, s, duplicate_vertices=True, compute_normals=False, compute_uvs=False, compute_inertia=True
+                *size, duplicate_vertices=True, compute_normals=False, compute_uvs=False, compute_inertia=True
             )
-        elif self.object_shape == ObjectShape.SPHERE:
-            mesh = newton.Mesh.create_sphere(s, compute_inertia=True)
-        elif self.object_shape == ObjectShape.CYLINDER:
-            mesh = newton.Mesh.create_cylinder(s, s, compute_inertia=True)
-        elif self.object_shape == ObjectShape.CAPSULE:
-            mesh = newton.Mesh.create_capsule(s, s, compute_inertia=True)
+        elif shape == ObjectShape.SPHERE:
+            mesh = newton.Mesh.create_sphere(*size, compute_inertia=True)
+        elif shape == ObjectShape.CYLINDER:
+            mesh = newton.Mesh.create_cylinder(*size, compute_inertia=True)
+        elif shape == ObjectShape.CAPSULE:
+            mesh = newton.Mesh.create_capsule(*size, compute_inertia=True)
         else:
-            raise ValueError(f"Unknown object shape: {self.object_shape}")
+            raise ValueError(f"Unknown object shape: {shape}")
 
         if use_hydro:
             mesh.build_sdf(
@@ -512,7 +514,11 @@ class Example:
         builder.add_shape_mesh(
             body=body,
             mesh=mesh,
+            xform=xform,
         )
+
+        if use_hydro:
+            builder.shape_flags[-1] |= newton.ShapeFlags.HYDROELASTIC
 
     def _setup_finger_hydroelastic(self, builder):
         """Enable hydroelastic on finger contact shapes, disable on everything else."""
@@ -549,7 +555,7 @@ class Example:
             builder.shape_flags[shape_idx] &= ~newton.ShapeFlags.VISIBLE
 
         if self.use_v4:
-            # V4: disable pad box shapes, enable tongue meshes on follower bodies
+            # V4: Enable tongue meshes on follower bodies
             follower_shape_indices = {
                 i
                 for i, lbl in enumerate(builder.shape_label)
@@ -593,10 +599,13 @@ class Example:
         elif self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC:
             return newton.CollisionPipeline(
                 self.model,
+                rigid_contact_max=10000,
                 reduce_contacts=True,
                 broad_phase="explicit",
                 sdf_hydroelastic_config=HydroelasticSDF.Config(
-                    output_contact_surface=hasattr(self.viewer, "renderer"),
+                    output_contact_surface=True,
+                    buffer_fraction=1.0,
+                    buffer_mult_iso=2,
                 ),
             )
         else:
@@ -708,13 +717,12 @@ class Example:
         self.viewer.log_state(self.state_0)
         if self.contacts is not None:
             self.viewer.log_contacts(self.contacts, self.state_0)
-        if (
-            self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC
-            and self.collision_pipeline
-            and self.collision_pipeline.hydroelastic_sdf is not None
-        ):
             self.viewer.log_hydro_contact_surface(
-                self.collision_pipeline.hydroelastic_sdf.get_contact_surface(),
+                (
+                    self.collision_pipeline.hydroelastic_sdf.get_contact_surface()
+                    if self.collision_pipeline.hydroelastic_sdf is not None
+                    else None
+                ),
                 penetrating_only=True,
             )
         self.viewer.end_frame()
