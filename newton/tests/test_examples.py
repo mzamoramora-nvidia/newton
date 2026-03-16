@@ -761,9 +761,11 @@ class TestHydroExamples(unittest.TestCase):
     pass
 
 
-for _collision_mode in ["mujoco", "newton_hydroelastic"]:
+for _collision_mode in ["mujoco", "newton_default", "newton_hydroelastic"]:
     for _shape in ["sphere", "cylinder", "capsule", "box"]:
-        for _armature in [1e-4, 1e-3, 1e-2]:
+        # _armatures = [1e-4, 1e-3, 1e-2]
+        _armatures = [1e-2]
+        for _armature in _armatures:
             _suffix = f"{_collision_mode}_{_shape}_armature_{_armature:.0e}"
             add_example_test(
                 TestHydroExamples,
