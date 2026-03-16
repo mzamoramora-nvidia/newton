@@ -297,6 +297,8 @@ class Example:
                 self.manual_mode = False
             if hasattr(args, "object_armature") and args.object_armature is not None:
                 self.object_armature = args.object_armature
+            if hasattr(args, "collision_mode") and args.collision_mode:
+                self.collision_mode = CollisionMode(args.collision_mode)
 
         # Max velocity limits (per-frame deltas, derived from target physical rates).
         # target_velocity / fps = per_frame_delta
@@ -335,6 +337,7 @@ class Example:
         self._add_gripper(builder)
 
         self._add_scene_shapes(builder)
+        builder.add_ground_plane()
 
         # Count bodies per world before replication
         self.bodies_per_world = builder.body_count
@@ -343,7 +346,6 @@ class Example:
         # ---- Replicate and finalize ----
         scene = newton.ModelBuilder()
         scene.replicate(builder, self.num_worlds, spacing=(0.5, 0.5, 0.0))
-        scene.add_ground_plane()
         self.model = scene.finalize()
 
         # ---- GPU state arrays for state machine ----
@@ -524,14 +526,18 @@ class Example:
 
     def _add_scene_shapes(self, builder):
         """Add table, grasp object, and configure hydroelastic finger shapes."""
-        # Table (static mesh)
+        # Table as kinematic body (mass=0) so it replicates correctly per world.
+        # Using body=-1 (static world body) causes MuJoCo to miss collisions
+        # for replicated worlds since all tables share the same worldbody.
         table_half = (0.2, 0.2, self.table_height / 2)
+        table_xform = wp.transform(wp.vec3(0.0, 0.0, self.table_height / 2), wp.quat_identity())
+        table_body = builder.add_body(xform=table_xform, label="table")
+        builder.body_mass[table_body] = 0.0
         self._add_object_shape(
             builder,
-            body=-1,
+            body=table_body,
             shape=ObjectShape.BOX,
             size=table_half,
-            xform=wp.transform(wp.vec3(0.0, 0.0, self.table_height / 2), wp.quat_identity()),
         )
 
         # Grasp object on table
@@ -974,6 +980,13 @@ if __name__ == "__main__":
         type=float,
         default=1e-2,
         help="Artificial inertia added to the grasp object body [kg*m^2].",
+    )
+    parser.add_argument(
+        "--collision-mode",
+        type=str,
+        default="newton_hydroelastic",
+        choices=[m.value for m in CollisionMode],
+        help="Collision pipeline to use.",
     )
     parser.set_defaults(num_frames=700)
     viewer, args = newton.examples.init(parser)
