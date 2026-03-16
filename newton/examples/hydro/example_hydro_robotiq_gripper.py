@@ -318,18 +318,16 @@ class Example:
         self.object_half_size = 0.03
         self.object_init_z = self.table_height + self.object_half_size + 0.001
 
-        # ---- Hydroelastic shape config ----
-        self.hydro_shape_cfg = newton.ModelBuilder.ShapeConfig(
+        # ---- SDF shape config ----
+        self.sdf_shape_cfg = newton.ModelBuilder.ShapeConfig(
             kh=1e11,
             sdf_max_resolution=64,
-            is_hydroelastic=True,
             sdf_narrow_band_range=(-0.01, 0.01),
             gap=0.01,
             mu=1.0,
             mu_torsional=0.0,
             mu_rolling=0.0,
         )
-        self.hydro_mesh_sdf_max_resolution = self.hydro_shape_cfg.sdf_max_resolution
 
         # ---- Build model ----
         builder = newton.ModelBuilder()
@@ -553,12 +551,12 @@ class Example:
         }[self.object_shape]
         self._add_object_shape(builder, self.object_body_idx, shape=self.object_shape, size=size)
 
-        # Configure hydroelastic on finger shapes
-        if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC:
-            self._setup_finger_hydroelastic(builder)
+        # Build SDFs on finger shapes (required for SDF and hydroelastic modes)
+        if self.collision_mode in (CollisionMode.NEWTON_SDF, CollisionMode.NEWTON_HYDROELASTIC):
+            self._setup_finger_sdf(builder)
 
     def _add_object_shape(self, builder, body, shape: ObjectShape, size: tuple[float, ...], xform=None):
-        """Add a mesh shape, with SDF for hydroelastic if needed.
+        """Add a mesh shape, with SDF for SDF/hydroelastic collision modes.
 
         Args:
             builder: model builder to add the shape to.
@@ -569,6 +567,7 @@ class Example:
                 CYLINDER/CAPSULE.
             xform: optional transform passed to ``add_shape_mesh``.
         """
+        use_sdf = self.collision_mode in (CollisionMode.NEWTON_SDF, CollisionMode.NEWTON_HYDROELASTIC)
         use_hydro = self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC
 
         if shape == ObjectShape.BOX:
@@ -584,11 +583,11 @@ class Example:
         else:
             raise ValueError(f"Unknown object shape: {shape}")
 
-        if use_hydro:
+        if use_sdf:
             mesh.build_sdf(
-                max_resolution=self.hydro_mesh_sdf_max_resolution,
-                narrow_band_range=self.hydro_shape_cfg.sdf_narrow_band_range,
-                margin=self.hydro_shape_cfg.gap,
+                max_resolution=self.sdf_shape_cfg.sdf_max_resolution,
+                narrow_band_range=self.sdf_shape_cfg.sdf_narrow_band_range,
+                margin=self.sdf_shape_cfg.gap,
             )
 
         builder.add_shape_mesh(
@@ -600,8 +599,9 @@ class Example:
         if use_hydro:
             builder.shape_flags[-1] |= newton.ShapeFlags.HYDROELASTIC
 
-    def _setup_finger_hydroelastic(self, builder):
-        """Enable hydroelastic on finger contact shapes, disable on everything else."""
+    def _setup_finger_sdf(self, builder):
+        """Build SDFs on finger contact shapes; enable hydroelastic flag if in hydroelastic mode."""
+        use_hydro = self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC
 
         # For V1 and V4: find pad collision shapes by exact label suffix
         pad_names = {"left_pad1", "left_pad2", "right_pad1", "right_pad2"}
@@ -612,7 +612,7 @@ class Example:
 
         for shape_idx in pad_shape_indices:
             if builder.shape_type[shape_idx] == newton.GeoType.BOX:
-                # Convert BOX to MESH + SDF for hydroelastic contact
+                # Convert BOX to MESH + SDF for SDF-based contact
                 hx, hy, hz = builder.shape_scale[shape_idx]
                 mesh = newton.Mesh.create_box(
                     hx,
@@ -624,15 +624,17 @@ class Example:
                     compute_inertia=True,
                 )
                 mesh.build_sdf(
-                    max_resolution=self.hydro_mesh_sdf_max_resolution,
-                    narrow_band_range=self.hydro_shape_cfg.sdf_narrow_band_range,
-                    margin=self.hydro_shape_cfg.gap,
+                    max_resolution=self.sdf_shape_cfg.sdf_max_resolution,
+                    narrow_band_range=self.sdf_shape_cfg.sdf_narrow_band_range,
+                    margin=self.sdf_shape_cfg.gap,
                 )
                 builder.shape_type[shape_idx] = newton.GeoType.MESH
                 builder.shape_source[shape_idx] = mesh
                 builder.shape_scale[shape_idx] = (1.0, 1.0, 1.0)
-            builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
-            builder.shape_flags[shape_idx] &= ~newton.ShapeFlags.VISIBLE
+
+                builder.shape_flags[shape_idx] &= ~newton.ShapeFlags.VISIBLE
+                if use_hydro:
+                    builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
 
         if self.use_v4:
             # V4: Enable tongue meshes on follower bodies
@@ -645,7 +647,8 @@ class Example:
             for shape_idx in follower_shape_indices:
                 if builder.shape_type[shape_idx] == newton.GeoType.MESH:
                     self._build_shape_sdf(builder, shape_idx)
-                    builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
+                    if use_hydro:
+                        builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
 
     def _build_shape_sdf(self, builder, shape_idx):
         """Build SDF for a mesh shape, baking scale if needed."""
@@ -659,9 +662,9 @@ class Example:
             builder.shape_scale[shape_idx] = (1.0, 1.0, 1.0)
         mesh.clear_sdf()
         mesh.build_sdf(
-            max_resolution=self.hydro_mesh_sdf_max_resolution,
-            narrow_band_range=self.hydro_shape_cfg.sdf_narrow_band_range,
-            margin=self.hydro_shape_cfg.gap,
+            max_resolution=self.sdf_shape_cfg.sdf_max_resolution,
+            narrow_band_range=self.sdf_shape_cfg.sdf_narrow_band_range,
+            margin=self.sdf_shape_cfg.gap,
         )
 
     def _create_collision_pipeline(self):
@@ -994,7 +997,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--collision-mode",
         type=str,
-        default="newton_default",
+        default="newton_hydroelastic",
         choices=[m.value for m in CollisionMode],
         help="Collision pipeline to use.",
     )
