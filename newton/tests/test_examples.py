@@ -757,23 +757,25 @@ class TestHydroExamples(unittest.TestCase):
     pass
 
 
-for _shape in ["sphere", "cylinder", "capsule", "box"]:
-    for _armature in [1e-4, 1e-3, 1e-2]:
-        _suffix = f"{_shape}_armature_{_armature:.0e}"
-        add_example_test(
-            TestHydroExamples,
-            name="hydro.example_hydro_robotiq_gripper",
-            devices=cuda_test_devices,
-            test_options={
-                "object-shape": _shape,
-                "object-armature": _armature,
-                "no-manual": True,
-                "num-worlds": 16,
-                "num-frames": 700,
-            },
-            use_viewer=True,
-            test_suffix=_suffix,
-        )
+for _collision_mode in ["mujoco", "newton_hydroelastic"]:
+    for _shape in ["sphere", "cylinder", "capsule", "box"]:
+        for _armature in [1e-4, 1e-3, 1e-2]:
+            _suffix = f"{_collision_mode}_{_shape}_armature_{_armature:.0e}"
+            add_example_test(
+                TestHydroExamples,
+                name="hydro.example_hydro_robotiq_gripper",
+                devices=cuda_test_devices,
+                test_options={
+                    "collision-mode": _collision_mode,
+                    "object-shape": _shape,
+                    "object-armature": _armature,
+                    "no-manual": True,
+                    "num-worlds": 4,
+                    "num-frames": 700,
+                },
+                use_viewer=True,
+                test_suffix=_suffix,
+            )
 
 
 if __name__ == "__main__":
