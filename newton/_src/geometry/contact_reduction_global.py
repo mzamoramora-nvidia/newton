@@ -283,7 +283,7 @@ def encode_oct(n: wp.vec3) -> wp.vec2:
     Near-uniform precision, stable numerics, no trig needed.
     """
     l1 = wp.abs(n[0]) + wp.abs(n[1]) + wp.abs(n[2])
-    if l1 < 1.0e-20:
+    if l1 < 1.0e-20 or wp.isnan(l1):
         return wp.vec2(0.0, 0.0)
     inv_l1 = 1.0 / l1
     ox = n[0] * inv_l1

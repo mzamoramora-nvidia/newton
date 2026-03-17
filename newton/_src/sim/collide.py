@@ -89,7 +89,11 @@ def write_contact(
     offset_mag_b = contact_data.radius_eff_b + contact_data.margin_b
 
     # Distance calculation matching box_plane_collision
-    contact_normal_a_to_b = wp.normalize(contact_data.contact_normal_a_to_b)
+    raw_normal = contact_data.contact_normal_a_to_b
+    raw_len_sq = wp.length_sq(raw_normal)
+    if raw_len_sq < 1.0e-30 or wp.isnan(raw_len_sq):
+        return
+    contact_normal_a_to_b = raw_normal / wp.sqrt(raw_len_sq)
 
     a_contact_world = contact_data.contact_point_center - contact_normal_a_to_b * (
         0.5 * contact_data.contact_distance + contact_data.radius_eff_a

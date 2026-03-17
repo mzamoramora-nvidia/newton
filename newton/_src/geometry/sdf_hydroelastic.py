@@ -159,8 +159,11 @@ def mc_calc_face_texture(
             num_inside += 1
 
     n = wp.cross(face_verts[1] - face_verts[0], face_verts[2] - face_verts[0])
-    normal = wp.normalize(n)
-    area = wp.length(n) / 2.0
+    n_len = wp.length(n)
+    if n_len < 1.0e-20:
+        return 0.0, wp.vec3(0.0, 0.0, 1.0), wp.vec3(0.0), 0.0, face_verts
+    normal = n / n_len
+    area = n_len * 0.5
     center = (face_verts[0] + face_verts[1] + face_verts[2]) / 3.0
     pen_depth = (vert_depths[0] + vert_depths[1] + vert_depths[2]) / 3.0
     area *= get_triangle_fraction(vert_depths, num_inside)

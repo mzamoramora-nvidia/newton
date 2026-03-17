@@ -36,13 +36,14 @@ MJ_MINVAL = 2.220446049250313e-16
 # Utility functions
 @wp.func
 def orthogonals(a: wp.vec3):
+    a_len_sq = wp.length_sq(a)
+    if a_len_sq < 1.0e-30 or wp.isnan(a_len_sq):
+        return wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 0.0)
     y = wp.vec3(0.0, 1.0, 0.0)
     z = wp.vec3(0.0, 0.0, 1.0)
     b = wp.where((-0.5 < a[1]) and (a[1] < 0.5), y, z)
     b = b - a * wp.dot(a, b)
     b = wp.normalize(b)
-    if wp.length(a) == 0.0:
-        b = wp.vec3(0.0, 0.0, 0.0)
     c = wp.cross(a, b)
 
     return b, c
@@ -50,7 +51,10 @@ def orthogonals(a: wp.vec3):
 
 @wp.func
 def make_frame(a: wp.vec3):
-    a = wp.normalize(a)
+    a_len_sq = wp.length_sq(a)
+    if a_len_sq < 1.0e-30 or wp.isnan(a_len_sq):
+        return wp.identity(n=3, dtype=float)
+    a = a / wp.sqrt(a_len_sq)
     b, c = orthogonals(a)
 
     # fmt: off
