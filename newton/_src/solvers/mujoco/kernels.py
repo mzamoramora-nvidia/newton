@@ -337,25 +337,28 @@ def convert_newton_contacts_to_mjwarp_kernel(
     )
 
     if rigid_contact_stiffness:
-        # Use per-contact stiffness/damping parameters
         contact_ke = rigid_contact_stiffness[tid]
         if contact_ke > 0.0:
-            # set solimp to approximate linear force-to-displacement relationship at rest
-            # see https://mujoco.readthedocs.io/en/latest/modeling.html#solver-parameters
-            imp = solimp[1]
-            solimp = vec5(imp, imp, 0.001, 1.0, 0.5)
-            contact_ke = contact_ke * (1.0 - imp)  # compensate for impedance scaling
-            kd = rigid_contact_damping[tid]
-            # convert from stiffness/damping to MuJoCo's solref timeconst and dampratio
-            if kd > 0.0:
-                timeconst = 2.0 / kd
-                dampratio = wp.sqrt(1.0 / (timeconst * timeconst * contact_ke))
-            else:
-                # if no damping was set, use default damping ratio
-                timeconst = wp.sqrt(1.0 / contact_ke)
-                dampratio = 1.0
-
-            solref = wp.vec2(timeconst, dampratio)
+            # Convert hydroelastic per-contact stiffness to MuJoCo solref.
+            #
+            # The old conversion had three problems that caused NaN divergence:
+            #  1. It overrode solimp (dmin=dmax=imp), doubling the constraint
+            #     diagonal D near zero penetration vs the geom default.
+            #  2. dampratio was inconsistent after extreme contact_ke values
+            #     passed through sqrt(1/(tc²·ke)), producing underdamped modes.
+            #  3. It could soften contacts below the geom-level solref — e.g.
+            #     finger-pad geoms tuned to solref=0.004 (k≈63k) were replaced
+            #     with k≈2500, destabilizing the grasp.
+            #
+            # Fix: compute timeconst from clamped stiffness, use critical
+            # damping (dampratio=1), keep geom solimp, and floor timeconst
+            # at the geom solref so contacts are never made softer.
+            dmax_val = solimp[1]
+            k_direct = contact_ke * (1.0 - dmax_val)
+            k_direct = wp.clamp(k_direct, 100.0, 2500.0)
+            tc_hydro = 1.0 / (dmax_val * wp.sqrt(k_direct))
+            timeconst = wp.min(tc_hydro, solref[0])
+            solref = wp.vec2(timeconst, 1.0)
 
         friction_scale = rigid_contact_friction[tid]
         if friction_scale > 0.0:
@@ -366,6 +369,9 @@ def convert_newton_contacts_to_mjwarp_kernel(
                 friction[3],
                 friction[4],
             )
+
+    if wp.isnan(dist) or wp.isnan(solref[0]) or wp.isnan(solref[1]):
+        return
 
     # Use the write_contact function to write all the data
     write_contact(
