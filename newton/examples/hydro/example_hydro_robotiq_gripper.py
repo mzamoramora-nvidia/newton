@@ -364,7 +364,7 @@ class Example:
 
         # Task config
         # Task durations [s]: APPROACH, CLOSE_GRIPPER, LIFT, HOLD
-        self.task_durations = wp.array([1.5, 1.5, 2.0, 1e10], dtype=float)
+        self.task_durations = wp.array([0.5, 1.0, 0.5, 1.0], dtype=float)
 
         # Precompute Z targets for state machine
         self.gripper_base_to_tcp_dist = 0.155
@@ -1003,7 +1003,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--object-shape",
         type=str,
-        default="sphere",
+        default="box",
         choices=["box", "sphere", "cylinder", "capsule"],
         help="Shape of the grasp object.",
     )
@@ -1025,7 +1025,7 @@ if __name__ == "__main__":
         choices=[m.value for m in CollisionMode],
         help="Collision pipeline to use.",
     )
-    parser.set_defaults(num_frames=700)
+    parser.set_defaults(num_frames=300)
     viewer, args = newton.examples.init(parser)
 
     example = Example(viewer, num_worlds=args.num_worlds, args=args)
