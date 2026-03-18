@@ -60,6 +60,47 @@ class TaskType(IntEnum):
 # ---- Warp kernels ----
 
 
+@wp.func
+def s_curve_profile(t: float, T: float, ramp_fraction: float) -> float:
+    """S-curve trapezoidal position profile, normalized to [0, 1].
+
+    Three phases:
+      1. Accel ramp  [0, t_r]:       smooth 0 → v_max using half-cosine
+      2. Cruise       [t_r, T-t_r]:  constant v_max
+      3. Decel ramp  [T-t_r, T]:     smooth v_max → 0 using half-cosine
+
+    The profile integrates to exactly 1.0 over [0, T], so
+    ``start + s_curve_profile(t, T, f) * (end - start)`` interpolates
+    from ``start`` to ``end`` with zero velocity at both endpoints and
+    bounded acceleration throughout.
+
+    Args:
+        t: Current time [s].
+        T: Total duration [s].
+        ramp_fraction: Fraction of T used for each ramp (0, 0.5).
+            E.g., 0.25 → 25% accel, 50% cruise, 25% decel.
+    """
+    t = wp.clamp(t, 0.0, T)
+    f = wp.clamp(ramp_fraction, 0.01, 0.5)
+    t_r = f * T
+    # v_max chosen so total displacement = 1.0:  v_max = 1 / (T - t_r)
+    v_max = 1.0 / (T - t_r)
+
+    if t < t_r:
+        # Phase 1: accel ramp — integral of v_max * 0.5*(1 - cos(π*t/t_r))
+        return v_max * (t * 0.5 - t_r / (2.0 * wp.pi) * wp.sin(wp.pi * t / t_r))
+    elif t < T - t_r:
+        # Phase 2: cruise — displacement from phase 1 end + linear cruise
+        p1_end = v_max * t_r * 0.5  # integral of phase 1 at t=t_r
+        return p1_end + v_max * (t - t_r)
+    else:
+        # Phase 3: decel ramp — mirror of phase 1
+        t_decel = t - (T - t_r)  # time into decel phase [0, t_r]
+        p12_end = v_max * t_r * 0.5 + v_max * (T - 2.0 * t_r)  # end of cruise
+        # Integral of v_max * 0.5*(1 + cos(π*t_d/t_r)) from 0 to t_decel
+        return p12_end + v_max * (t_decel * 0.5 + t_r / (2.0 * wp.pi) * wp.sin(wp.pi * t_decel / t_r))
+
+
 @wp.kernel(enable_backward=False)
 def compute_max_penetration_kernel(
     contact_count: wp.array(dtype=wp.int32),
@@ -172,7 +213,12 @@ def control_pipeline_kernel(
         task_timer[tid] = task_timer[tid] + frame_dt
 
         desired_z = grasp_z
-        if p == TaskType.LIFT.value or p == TaskType.HOLD.value:
+        if p == TaskType.LIFT.value:
+            # S-curve trapezoidal profile: smooth accel → cruise → smooth decel
+            # ramp_fraction=0.25 → 25% accel, 50% cruise, 25% decel
+            alpha = s_curve_profile(task_timer[tid], task_durations[TaskType.LIFT.value], 0.25)
+            desired_z = grasp_z + alpha * (lift_z - grasp_z)
+        elif p == TaskType.HOLD.value:
             desired_z = lift_z
 
         d_ctrl = 0.0
@@ -891,7 +937,7 @@ class Example:
 
         # Task config
         # Task durations [s]: APPROACH, CLOSE_GRIPPER, LIFT, HOLD
-        self.task_durations = wp.array([0.5, 1.0, 0.5, 1.0], dtype=float)
+        self.task_durations = wp.array([0.5, 1.0, 1.0, 1.0], dtype=float)
 
         # Precompute Z targets for state machine
         self.gripper_base_to_tcp_dist = 0.155
