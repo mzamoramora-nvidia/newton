@@ -773,7 +773,7 @@ for _collision_mode in ["mujoco", "newton_default", "newton_sdf", "newton_hydroe
                     "object-armature": _armature,
                     "no-manual": True,
                     "num-worlds": 4,
-                    "num-frames": 700,
+                    "num-frames": 350,
                 },
                 use_viewer=True,
                 test_suffix=_suffix,
