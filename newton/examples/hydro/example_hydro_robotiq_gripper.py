@@ -816,6 +816,7 @@ class ObjectShape(Enum):
 
     BOX = "box"
     ROUNDED_BOX = "rounded_box"
+    BEAM = "beam"
     SPHERE = "sphere"
     CYLINDER = "cylinder"
     CAPSULE = "capsule"
@@ -895,6 +896,9 @@ class Example:
         # ---- Scene geometry ----
         self.table_height = 0.1
         self.object_half_size = 0.03
+        if self.object_shape == ObjectShape.BEAM:
+            # Beam: 20cm x 3cm x 3cm — grip dimension is the cross-section (3cm)
+            self.object_half_size = 0.015
         self.object_init_z = self.table_height + self.object_half_size + 0.001
 
         # ---- Shape config ----
@@ -964,6 +968,7 @@ class Example:
             grasp_margin_mm = {
                 ObjectShape.BOX: 3.0,
                 ObjectShape.ROUNDED_BOX: 5.0,
+                ObjectShape.BEAM: 3.0,
                 ObjectShape.SPHERE: 13.0,
                 ObjectShape.CYLINDER: 13.0,
                 ObjectShape.CAPSULE: 13.0,
@@ -1197,9 +1202,13 @@ class Example:
         object_xform = wp.transform(wp.vec3(0.0, 0.0, self.object_init_z), wp.quat_identity())
         self.object_body_idx = builder.add_body(xform=object_xform, label="grasp_object", armature=self.object_armature)
         s = self.object_half_size
+        # Beam: 3cm x 20cm x 3cm -- long axis along Y, gripped along X (3cm)
+        beam_hy = 0.10  # half-length [m]
+
         size = {
             ObjectShape.BOX: (s, s, s),
             ObjectShape.ROUNDED_BOX: (s, s, s),
+            ObjectShape.BEAM: (s, beam_hy, s),
             ObjectShape.SPHERE: (s,),
             ObjectShape.CYLINDER: (s, s),
             ObjectShape.CAPSULE: (s, s),
@@ -1225,7 +1234,7 @@ class Example:
         use_sdf = self.collision_mode in (CollisionMode.NEWTON_SDF, CollisionMode.NEWTON_HYDROELASTIC)
         use_hydro = self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC
 
-        if shape == ObjectShape.BOX:
+        if shape == ObjectShape.BOX or shape == ObjectShape.BEAM:
             mesh = newton.Mesh.create_box(
                 *size, duplicate_vertices=True, compute_normals=False, compute_uvs=False, compute_inertia=True
             )
@@ -1832,7 +1841,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--object-shape",
         type=str,
-        default="box",
+        default="beam",
         choices=[s.value for s in ObjectShape],
         help="Shape of the grasp object.",
     )
