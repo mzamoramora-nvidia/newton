@@ -158,6 +158,9 @@ def control_pipeline_kernel(
     prev_gripper_ctrl: wp.array(dtype=float),
     # Rate limit config (GPU buffers, written from CPU on slider change)
     vel_limits: wp.array(dtype=wp.vec3),  # (1,): [pos_max_delta, rot_max_delta, gripper_max_delta]
+    # Current joint state (for position error check)
+    joint_q: wp.array(dtype=float),
+    joint_coord_count: int,
     # Outputs
     joint_target_pos: wp.array(dtype=float),
     direct_control: wp.array2d(dtype=float),
@@ -188,11 +191,18 @@ def control_pipeline_kernel(
         if p == TaskType.CLOSE_GRIPPER.value or p == TaskType.LIFT.value or p == TaskType.HOLD.value:
             d_ctrl = grasp_ctrl
 
-        if task_timer[tid] > task_durations[p] and p < TaskType.HOLD.value:
+        d_pos = wp.vec3(0.0, 0.0, desired_z)
+
+        # Transition to next task only when timer expired AND D6 joint position is at target.
+        # Per-axis thresholds: Z is tighter (vertical precision matters for slip measurement).
+        jq_offset = tid * joint_coord_count
+        err_x = wp.abs(d_pos[0] - joint_q[jq_offset])
+        err_y = wp.abs(d_pos[1] - joint_q[jq_offset + 1])
+        err_z = wp.abs(d_pos[2] - joint_q[jq_offset + 2])
+        pos_settled = err_x < 0.001 and err_y < 0.001 and err_z < 0.0005
+        if task_timer[tid] > task_durations[p] and pos_settled and p < TaskType.HOLD.value:
             task[tid] = p + 1
             task_timer[tid] = 0.0
-
-        d_pos = wp.vec3(0.0, 0.0, desired_z)
         d_rot = hold_rot
 
     # ---- Rate-limit and write outputs ----
@@ -855,11 +865,15 @@ class Example:
         # The static orientation (e.g. gripper pointing down) is baked into
         # the D6 parent_xform so the joint stays near zero — avoiding gimbal lock.
         self.base_parent_rot = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), wp.pi)
-        self.base_target_pos = [0.0, 0.0, 0.5]  # [x, y, z] in meters
+        self.base_target_pos = [0.0, 0.0, 0.375]  # [x, y, z] in meters
         self.base_target_rot = [0.0, 0.0, 0.0]  # [rx, ry, rz] in radians
 
         # ---- GUI state ----
         self.manual_mode = False
+        self._gui_selected_world = 0  # World index for task/debug display
+        # Gripper debug cache (updated periodically)
+        self._gui_body_q_z = None  # Z positions of first few bodies (selected world)
+        self._gui_joint_q = None  # D6 + finger joint positions (selected world)
         # Contact stats (cached for GUI, updated periodically)
         self._gui_hydro_contact_count = 0
         self._gui_hydro_max_pen_surface = 0.0  # from contact surface depth (SDF-based)
@@ -895,11 +909,11 @@ class Example:
 
         # ---- Scene geometry ----
         self.table_height = 0.1
-        self.object_half_size = 0.03
+        self.object_half_size = 0.015
         if self.object_shape == ObjectShape.BEAM:
-            # Beam: 20cm x 3cm x 3cm — grip dimension is the cross-section (3cm)
+            # Beam: 26cm x 3cm x 3cm — grip dimension is the cross-section (3cm)
             self.object_half_size = 0.015
-        self.object_init_z = self.table_height + self.object_half_size + 0.001
+        self.object_init_z = self.table_height + self.object_half_size + 0.0005
 
         # ---- Shape config ----
         self.shape_cfg = newton.ModelBuilder.ShapeConfig(
@@ -931,6 +945,7 @@ class Example:
         # Count bodies per world before replication
         self.bodies_per_world = builder.body_count
         self.dofs_per_world = builder.joint_dof_count
+        self.joint_coord_per_world = builder.joint_coord_count
 
         # ---- Replicate and finalize ----
         scene = newton.ModelBuilder()
@@ -955,8 +970,16 @@ class Example:
         self.task_durations = wp.array([0.5, 1.0, 1.0, 1.0], dtype=float)
 
         # Precompute Z targets for state machine
-        self.gripper_base_to_tcp_dist = 0.155
-        self.grasp_z = self.table_height + self.object_half_size + self.gripper_base_to_tcp_dist
+        # Key dimensions (2F-85):
+        # - Pad length: 38mm (along Z axis of finger)
+        # - TCP (static, from coupling): 174.0mm in Z (from table on p.124)
+        # - Height opened: 149.3mm, closed: 162.8mm (so fingertips move ~13.5mm in Z when closing)
+
+        self.gripper_height_opened = 0.1493
+        self.gripper_height_closed = 0.1628
+        self.gripper_tcp_closed = 0.174
+        # Since the grippers are never fully closed, this grasp_z should ensure that the fingertips never collide with the table.
+        self.grasp_z = self.table_height + self.gripper_tcp_closed
         self.lift_z = self.grasp_z + 0.10
 
         # Gripper ctrl target: close past the object by a shape-dependent margin [mm].
@@ -1026,10 +1049,12 @@ class Example:
             self.object_max_z = np.full(self.num_worlds, self.object_init_z)
             self.world_nan_frame = np.full(self.num_worlds, -1, dtype=int)
             self.world_nan_task = np.full(self.num_worlds, -1, dtype=int)
-            # Vertical slip tracking: record object z at start of LIFT,
-            # then compare with gripper lift to measure how much the object slips down.
-            self.object_z_at_lift_start = np.full(self.num_worlds, np.nan)
+            # Vertical slip tracking: record object and gripper base z at CLOSE start
+            # and HOLD. Slip = measured gripper lift - measured object lift.
+            self.object_z_at_grasp_start = np.full(self.num_worlds, np.nan)
             self.object_z_at_hold = np.full(self.num_worlds, np.nan)
+            self.gripper_z_at_grasp_start = np.full(self.num_worlds, np.nan)
+            self.gripper_z_at_hold = np.full(self.num_worlds, np.nan)
         else:
             self.object_max_z = None
 
@@ -1202,8 +1227,8 @@ class Example:
         object_xform = wp.transform(wp.vec3(0.0, 0.0, self.object_init_z), wp.quat_identity())
         self.object_body_idx = builder.add_body(xform=object_xform, label="grasp_object", armature=self.object_armature)
         s = self.object_half_size
-        # Beam: 3cm x 20cm x 3cm -- long axis along Y, gripped along X (3cm)
-        beam_hy = 0.10  # half-length [m]
+        # Beam: 3cm x 26cm x 3cm -- long axis along Y, gripped along X (3cm)
+        beam_hy = 0.13  # half-length [m]
 
         size = {
             ObjectShape.BOX: (s, s, s),
@@ -1443,6 +1468,8 @@ class Example:
                 self.prev_base_target,
                 self.prev_gripper_ctrl,
                 self._gpu_vel_limits,
+                self.state_0.joint_q,
+                self.joint_coord_per_world,
                 self.control.joint_target_pos,
                 self._direct_control_2d,
                 self.dofs_per_world,
@@ -1516,8 +1543,9 @@ class Example:
 
         # Periodic GPU read for GUI cache
         if self._frame_count % self._gui_read_interval == 0:
-            self._gui_task_val = int(self.task.numpy()[0])
-            self._gui_task_timer_val = float(self.task_timer.numpy()[0])
+            w = self._gui_selected_world
+            self._gui_task_val = int(self.task.numpy()[w])
+            self._gui_task_timer_val = float(self.task_timer.numpy()[w])
 
             # Hydro contact surface penetration stats
             if self.collision_pipeline is not None and self.collision_pipeline.hydroelastic_sdf is not None:
@@ -1546,6 +1574,15 @@ class Example:
                 else:
                     self._gui_mjw_max_pen = 0.0
 
+            # Gripper body/joint debug cache (selected world)
+            bq = self.state_0.body_q.numpy()
+            bq_start = w * self.bodies_per_world
+            self._gui_body_q_z = bq[bq_start : bq_start + self.bodies_per_world, 2].copy()
+            jq = self.state_0.joint_q.numpy()
+            coords_per_world = len(jq) // self.num_worlds
+            jq_start = w * coords_per_world
+            self._gui_joint_q = jq[jq_start : jq_start + coords_per_world].copy()
+
         # Per-world diagnostics for testing
         if self.test_mode:
             body_q = self.state_0.body_q.numpy()
@@ -1565,16 +1602,19 @@ class Example:
             healthy = ~world_has_nan
             np.maximum(self.object_max_z, np.where(healthy, obj_z, self.object_max_z), out=self.object_max_z)
 
-            # Vertical slip: record object z at LIFT start and at HOLD
+            # Vertical slip: record object and gripper base (body 1) z.
             tasks_np = self.task.numpy()
+            gripper_z = body_q_reshaped[:, 1, 2]  # body 1 = base per world
             for w in range(self.num_worlds):
                 if world_has_nan[w]:
                     continue
                 t = int(tasks_np[w])
-                if t == int(TaskType.LIFT) and np.isnan(self.object_z_at_lift_start[w]):
-                    self.object_z_at_lift_start[w] = obj_z[w]
+                if t == int(TaskType.CLOSE_GRIPPER) and np.isnan(self.object_z_at_grasp_start[w]):
+                    self.object_z_at_grasp_start[w] = obj_z[w]
+                    self.gripper_z_at_grasp_start[w] = gripper_z[w]
                 if t == int(TaskType.HOLD):
                     self.object_z_at_hold[w] = obj_z[w]
+                    self.gripper_z_at_hold[w] = gripper_z[w]
 
         if self.diag_logger:
             # Get surface data (post-graph, outside CUDA capture)
@@ -1653,16 +1693,83 @@ class Example:
             imgui.text(f"Pen (surface): {pen_surface_mm:.3f} mm  (max: {pen_surface_ever_mm:.3f} mm)")
         imgui.separator()
 
+        # Gripper debug
+        imgui.set_next_item_open(False, imgui.Cond_.appearing)
+        if imgui.collapsing_header(f"Gripper Debug (world {self._gui_selected_world})"):
+            imgui.indent()
+            if self._gui_body_q_z is not None:
+                imgui.text("Body Z positions:")
+                body_labels = [
+                    "base_mount",
+                    "base",
+                    "R_driver",
+                    "R_coupler",
+                    "R_spring",
+                    "R_follower",
+                    "R_pad",
+                    "R_silicone",
+                    "L_driver",
+                    "L_coupler",
+                    "L_spring",
+                    "L_follower",
+                    "L_pad",
+                    "L_silicone",
+                ]
+                for i, z in enumerate(self._gui_body_q_z):
+                    lbl = body_labels[i] if i < len(body_labels) else f"body_{i}"
+                    imgui.text(f"  {lbl}: z={z:.4f}")
+                # Object body
+                if self.object_body_idx < len(self._gui_body_q_z):
+                    imgui.text(f"  object: z={self._gui_body_q_z[self.object_body_idx]:.4f}")
+            if self._gui_joint_q is not None:
+                imgui.text("D6 joint (pos + rot):")
+                jq = self._gui_joint_q
+                imgui.text(f"  pos: [{jq[0]:.4f}, {jq[1]:.4f}, {jq[2]:.4f}]")
+                imgui.text(f"  rot: [{jq[3]:.4f}, {jq[4]:.4f}, {jq[5]:.4f}]")
+                imgui.text("Finger joints:")
+                finger_labels = [
+                    "R_driver",
+                    "R_coupler",
+                    "R_spring",
+                    "R_follower",
+                    "L_driver",
+                    "L_coupler",
+                    "L_spring",
+                    "L_follower",
+                ]
+                for i, lbl in enumerate(finger_labels):
+                    idx = 6 + i
+                    if idx < len(jq):
+                        imgui.text(f"  {lbl}: {jq[idx]:.4f} rad ({np.degrees(jq[idx]):.1f} deg)")
+            imgui.unindent()
+
         # Manual mode toggle
         changed, new_manual = imgui.checkbox("Manual Mode", self.manual_mode)
         if changed:
             self.manual_mode = new_manual
             self._gpu_dirty = True
 
+        # World selector
+        changed, val = imgui.slider_int("World", self._gui_selected_world, 0, self.num_worlds - 1)
+        if changed:
+            self._gui_selected_world = val
+
         # Task display (auto mode only)
         if not self.manual_mode:
             imgui.text(f"Task: {TaskType(self._gui_task_val).name.lower()}")
             imgui.text(f"Timer: {self._gui_task_timer_val:.2f}s")
+            # D6 joint position error (actual vs target)
+            if self._gui_joint_q is not None:
+                jq = self._gui_joint_q
+                task_id = self._gui_task_val
+                # Compute current target Z based on task
+                target_z = self.grasp_z
+                if task_id >= int(TaskType.LIFT):
+                    target_z = self.lift_z
+                err_x = 0.0 - jq[0]  # target X is always 0
+                err_y = 0.0 - jq[1]  # target Y is always 0
+                err_z = target_z - jq[2]
+                imgui.text(f"Pos err: x={err_x * 1000:+.2f} y={err_y * 1000:+.2f} z={err_z * 1000:+.2f} mm")
 
         imgui.separator()
 
@@ -1785,17 +1892,17 @@ class Example:
         print(f"  shape={self.object_shape.value}, armature={self.object_armature}")
 
         # Vertical slip report
-        # Expected lift = lift_z - grasp_z = 0.10m
-        # Actual lift per world = z_at_hold - z_at_lift_start
-        # Slip = expected_lift - actual_lift
-        expected_lift = self.lift_z - self.grasp_z
+        # Slip = measured gripper base lift - measured object lift
         for w in range(self.num_worlds):
-            z0 = self.object_z_at_lift_start[w]
-            z1 = self.object_z_at_hold[w]
-            if not np.isnan(z0) and not np.isnan(z1):
-                actual_lift = z1 - z0
-                slip = expected_lift - actual_lift
-                print(f"  World {w}: lift={actual_lift * 1000:.1f}mm, slip={slip * 1000:.1f}mm")
+            oz0 = self.object_z_at_grasp_start[w]
+            oz1 = self.object_z_at_hold[w]
+            gz0 = self.gripper_z_at_grasp_start[w]
+            gz1 = self.gripper_z_at_hold[w]
+            if not any(np.isnan(v) for v in [oz0, oz1, gz0, gz1]):
+                object_lift = np.abs(oz1 - oz0)
+                gripper_lift = np.abs(gz1 - gz0)
+                slip = gripper_lift - object_lift
+                print(f"  World {w}: lift={object_lift * 1000:.1f}mm, slip={slip * 1000:.1f}mm")
 
         # Contact force report from MuJoCo constraint forces
         if hasattr(self.solver, "mjw_data"):
