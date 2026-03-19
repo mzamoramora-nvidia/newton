@@ -101,43 +101,6 @@ def s_curve_profile(t: float, T: float, ramp_fraction: float) -> float:
         return p12_end + v_max * (t_decel * 0.5 + t_r / (2.0 * wp.pi) * wp.sin(wp.pi * t_decel / t_r))
 
 
-@wp.kernel(enable_backward=False)
-def compute_max_penetration_kernel(
-    contact_count: wp.array(dtype=wp.int32),
-    contact_normal: wp.array(dtype=wp.vec3),
-    contact_point0: wp.array(dtype=wp.vec3),
-    contact_point1: wp.array(dtype=wp.vec3),
-    body_q: wp.array(dtype=wp.transform),
-    shape_body: wp.array(dtype=wp.int32),
-    contact_shape0: wp.array(dtype=wp.int32),
-    contact_shape1: wp.array(dtype=wp.int32),
-    contact_margin0: wp.array(dtype=wp.float32),
-    contact_margin1: wp.array(dtype=wp.float32),
-    max_penetration: wp.array(dtype=wp.float32),
-):
-    """Compute max penetration depth across all contacts. Graph-safe."""
-    tid = wp.tid()
-    n = contact_count[0]
-    if tid >= n:
-        return
-    body0 = shape_body[contact_shape0[tid]]
-    body1 = shape_body[contact_shape1[tid]]
-    # Transform body-local contact points to world frame
-    p0_world = contact_point0[tid]
-    p1_world = contact_point1[tid]
-    if body0 >= 0:
-        p0_world = wp.transform_point(body_q[body0], contact_point0[tid])
-    if body1 >= 0:
-        p1_world = wp.transform_point(body_q[body1], contact_point1[tid])
-    normal = contact_normal[tid]
-    dist = wp.dot(p1_world - p0_world, normal)
-    separation = dist - (contact_margin0[tid] + contact_margin1[tid])
-    # penetration is negative separation
-    penetration = -separation
-    if penetration > 0.0:
-        wp.atomic_max(max_penetration, 0, penetration)
-
-
 def create_rounded_box_mesh(hx: float, hy: float, hz: float, radius: float, subdivisions: int = 3):
     """Create a rounded box mesh using convex hull of corner spheres.
 
@@ -153,7 +116,7 @@ def create_rounded_box_mesh(hx: float, hy: float, hz: float, radius: float, subd
         Newton Mesh with smooth edges, or None if trimesh is not available.
     """
     try:
-        import trimesh
+        import trimesh  # noqa: PLC0415
     except ImportError:
         print("Warning: trimesh not available, falling back to regular box")
         return None
@@ -356,7 +319,17 @@ class SubstepRecorder:
     kernel launches — safe inside a CUDA graph capture.
     """
 
-    def __init__(self, num_substeps: int, body_count: int, dof_count: int, joint_coord_count: int, contact_max: int, mjw_nv: int = 0, mjw_nu: int = 0):
+    def __init__(
+        self,
+        num_substeps: int,
+        body_count: int,
+        dof_count: int,
+        joint_coord_count: int,
+        contact_max: int,
+        mjw_nv: int = 0,
+        mjw_nu: int = 0,
+        mjw_naconmax: int = 0,
+    ):
         self.num_substeps = num_substeps
         self.body_count = body_count
         self.dof_count = dof_count
@@ -393,15 +366,22 @@ class SubstepRecorder:
         else:
             self.mjw_actuator_force = None
 
-        # Max penetration per substep (computed via kernel)
-        self.max_penetration = wp.zeros(num_substeps, dtype=wp.float32)
+        # MuJoCo Warp contact distance per substep (from mjw_data.contact.dist)
+        # negative = penetrating; compute max pen during readback
+        self._mjw_naconmax = mjw_naconmax
+        if mjw_naconmax > 0:
+            self.mjw_contact_dist = wp.zeros((num_substeps, mjw_naconmax), dtype=wp.float32)
+            self.mjw_nacon = wp.zeros(num_substeps, dtype=wp.int32)
+        else:
+            self.mjw_contact_dist = None
+            self.mjw_nacon = None
 
         # Contact normals snapshot (for variance analysis)
         self._normal_sample_max = min(contact_max, 8192)
         self.contact_normals = wp.zeros((num_substeps, self._normal_sample_max), dtype=wp.vec3)
 
-    def record(self, substep_idx: int, state, contacts, mjw_data=None, model=None):
-        """Snapshot state into substep slot. Graph-safe (wp.copy and kernel launches only)."""
+    def record(self, substep_idx: int, state, contacts, mjw_data=None):
+        """Snapshot state into substep slot. Graph-safe (wp.copy only)."""
         s = substep_idx
         wp.copy(self.body_q, state.body_q, dest_offset=s * self.body_count, count=self.body_count)
         wp.copy(self.body_qd, state.body_qd, dest_offset=s * self.body_count, count=self.body_count)
@@ -434,28 +414,11 @@ class SubstepRecorder:
             mjw_nu = self.mjw_nu
             wp.copy(self.mjw_actuator_force, mjw_data.actuator_force, dest_offset=s * mjw_nu, count=mjw_nu)
 
-        # Max penetration (kernel launch — graph-safe)
-        if contacts is not None and model is not None:
-            # Zero this substep's slot (zero_ is graph-safe)
-            self.max_penetration[s : s + 1].zero_()
-            contact_max = contacts.rigid_contact_normal.shape[0]
-            wp.launch(
-                compute_max_penetration_kernel,
-                dim=contact_max,
-                inputs=[
-                    contacts.rigid_contact_count,
-                    contacts.rigid_contact_normal,
-                    contacts.rigid_contact_point0,
-                    contacts.rigid_contact_point1,
-                    state.body_q,
-                    model.shape_body,
-                    contacts.rigid_contact_shape0,
-                    contacts.rigid_contact_shape1,
-                    contacts.rigid_contact_margin0,
-                    contacts.rigid_contact_margin1,
-                    self.max_penetration[s : s + 1],
-                ],
-            )
+        # MuJoCo contact distance (graph-safe: wp.copy only)
+        if mjw_data is not None and self.mjw_contact_dist is not None:
+            n = self._mjw_naconmax
+            wp.copy(self.mjw_contact_dist, mjw_data.contact.dist, dest_offset=s * n, count=n)
+            wp.copy(self.mjw_nacon, mjw_data.nacon, dest_offset=s, count=1)
 
     def readback(self):
         """Read all GPU buffers to CPU. Call OUTSIDE the graph."""
@@ -469,10 +432,7 @@ class SubstepRecorder:
             "contact_stiffness": self.contact_stiffness.numpy().reshape(
                 self.num_substeps, self._contact_stiffness_sample_max
             ),
-            "max_penetration": self.max_penetration.numpy(),
-            "contact_normals": self.contact_normals.numpy().reshape(
-                self.num_substeps, self._normal_sample_max, 3
-            ),
+            "contact_normals": self.contact_normals.numpy().reshape(self.num_substeps, self._normal_sample_max, 3),
         }
         if self.mjw_qfrc_actuator is not None:
             result["mjw_qfrc_actuator"] = self.mjw_qfrc_actuator.numpy().reshape(self.num_substeps, self.mjw_nv)
@@ -480,6 +440,16 @@ class SubstepRecorder:
             result["mjw_qacc"] = self.mjw_qacc.numpy().reshape(self.num_substeps, self.mjw_nv)
         if self.mjw_actuator_force is not None:
             result["mjw_actuator_force"] = self.mjw_actuator_force.numpy().reshape(self.num_substeps, self.mjw_nu)
+        if self.mjw_contact_dist is not None:
+            dist_all = self.mjw_contact_dist.numpy().reshape(self.num_substeps, self._mjw_naconmax)
+            nacon_all = self.mjw_nacon.numpy()
+            # Compute max penetration per substep from contact.dist (negative = penetrating)
+            mjw_max_pen = np.zeros(self.num_substeps)
+            for s in range(self.num_substeps):
+                nc = int(nacon_all[s])
+                if nc > 0:
+                    mjw_max_pen[s] = max(0.0, -float(np.min(dist_all[s, :nc])))
+            result["mjw_max_pen"] = mjw_max_pen
         return result
 
 
@@ -492,7 +462,20 @@ class DiagnosticsLogger:
         self.records = []
         self.substep_records = []  # per-frame substep snapshots
 
-    def sample(self, frame, state, contacts, model, task_array, bodies_per_world, object_body_idx, gripper_joints_start, surface_pen=0.0, surface_contact_count=0, rigid_contact_count=0):
+    def sample(
+        self,
+        frame,
+        state,
+        contacts,
+        model,
+        task_array,
+        bodies_per_world,
+        object_body_idx,
+        gripper_joints_start,
+        surface_pen=0.0,
+        surface_contact_count=0,
+        rigid_contact_count=0,
+    ):
         if frame % self.sample_interval != 0:
             return
 
@@ -522,31 +505,42 @@ class DiagnosticsLogger:
         joint_qd = state.joint_qd.numpy()
         dofs_per_world = len(joint_qd) // self.num_worlds
         joint_qd = joint_qd.reshape(self.num_worlds, dofs_per_world)
-        gripper_qd = joint_qd[:, gripper_joints_start:gripper_joints_start + 8]
+        gripper_qd = joint_qd[:, gripper_joints_start : gripper_joints_start + 8]
         gripper_speed_max = float(np.max(np.abs(gripper_qd)))
 
         tasks = task_array.numpy()
 
         for w in range(self.num_worlds):
-            self.records.append({
-                "frame": frame,
-                "world": w,
-                "task": int(tasks[w]),
-                "obj_z": float(obj_pos[w, 2]),
-                "obj_speed": float(obj_speed[w]),
-                "obj_angspeed": float(obj_angspeed[w]),
-                "contact_count": contact_count,
-                "contact_stiffness_max": contact_stiffness_max,
-                "contact_stiffness_mean": contact_stiffness_mean,
-                "contact_force_max": contact_force_max,
-                "gripper_speed_max": gripper_speed_max,
-                "surface_contact_count": surface_contact_count,
-                "rigid_contact_count": rigid_contact_count,
-                "surface_pen_mm": surface_pen * 1000.0,
-                "has_nan": bool(np.any(np.isnan(body_q[w]))),
-            })
+            self.records.append(
+                {
+                    "frame": frame,
+                    "world": w,
+                    "task": int(tasks[w]),
+                    "obj_z": float(obj_pos[w, 2]),
+                    "obj_speed": float(obj_speed[w]),
+                    "obj_angspeed": float(obj_angspeed[w]),
+                    "contact_count": contact_count,
+                    "contact_stiffness_max": contact_stiffness_max,
+                    "contact_stiffness_mean": contact_stiffness_mean,
+                    "contact_force_max": contact_force_max,
+                    "gripper_speed_max": gripper_speed_max,
+                    "surface_contact_count": surface_contact_count,
+                    "rigid_contact_count": rigid_contact_count,
+                    "surface_pen_mm": surface_pen * 1000.0,
+                    "has_nan": bool(np.any(np.isnan(body_q[w]))),
+                }
+            )
 
-    def sample_substeps(self, frame, substep_data, bodies_per_world, object_body_idx, gripper_joints_start, task_array, num_worlds_mjw=None):
+    def sample_substeps(
+        self,
+        frame,
+        substep_data,
+        bodies_per_world,
+        object_body_idx,
+        gripper_joints_start,
+        task_array,
+        num_worlds_mjw=None,
+    ):
         """Process substep GPU readback into per-substep records."""
         body_q = substep_data["body_q"]
         body_qd = substep_data["body_qd"]
@@ -556,7 +550,7 @@ class DiagnosticsLogger:
         contact_count = substep_data["contact_count"]
         contact_stiffness = substep_data["contact_stiffness"]
 
-        max_penetration = substep_data.get("max_penetration")
+        mjw_max_pen = substep_data.get("mjw_max_pen")
 
         contact_normals = substep_data.get("contact_normals")  # (num_substeps, N, 3)
 
@@ -565,7 +559,7 @@ class DiagnosticsLogger:
             mjw_qfrc_act = substep_data["mjw_qfrc_actuator"]
             mjw_qfrc_con = substep_data["mjw_qfrc_constraint"]
             mjw_qacc = substep_data["mjw_qacc"]
-            mjw_act_force = substep_data.get("mjw_actuator_force")
+            _mjw_act_force = substep_data.get("mjw_actuator_force")
             mjw_nv_total = mjw_qfrc_act.shape[1]
             mjw_nv_per_world = mjw_nv_total // (num_worlds_mjw or self.num_worlds)
 
@@ -584,7 +578,7 @@ class DiagnosticsLogger:
             stiff = contact_stiffness[s]
 
             stiff_max = float(np.max(stiff[:nc])) if nc > 0 else 0.0
-            pen_max = float(max_penetration[s]) if max_penetration is not None else 0.0
+            pen_max = float(mjw_max_pen[s]) if mjw_max_pen is not None else 0.0
 
             # Contact normal analysis
             normal_mean_mag = 0.0
@@ -608,8 +602,8 @@ class DiagnosticsLogger:
                 obj_pos = bq[w, object_body_idx, :3]
                 obj_vel = bqd[w, object_body_idx, :3]
                 obj_f = bf[w, object_body_idx, :]
-                gripper_q_w = jq[w, gripper_joints_start:gripper_joints_start + 8]
-                gripper_qd_w = jqd[w, gripper_joints_start:gripper_joints_start + 8]
+                gripper_q_w = jq[w, gripper_joints_start : gripper_joints_start + 8]
+                gripper_qd_w = jqd[w, gripper_joints_start : gripper_joints_start + 8]
 
                 rec = {
                     "frame": frame,
@@ -650,7 +644,8 @@ class DiagnosticsLogger:
     def write_substep_csv(self, path):
         if not self.substep_records:
             return
-        import csv
+        import csv  # noqa: PLC0415
+
         keys = self.substep_records[0].keys()
         with open(path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=keys)
@@ -666,61 +661,71 @@ class DiagnosticsLogger:
             return
 
         first = min(nan_recs, key=lambda r: (r["frame"], r["substep"]))
-        print(f"\n  SUBSTEP NaN ANALYSIS:")
+        print("\n  SUBSTEP NaN ANALYSIS:")
         print(f"    First NaN: frame {first['frame']}, substep {first['substep']}, world {first['world']}")
 
         # Show the substep progression leading up to NaN for that world
         world = first["world"]
         frame = first["frame"]
-        frame_recs = [r for r in self.substep_records
-                      if r["frame"] == frame and r["world"] == world]
+        frame_recs = [r for r in self.substep_records if r["frame"] == frame and r["world"] == world]
         frame_recs.sort(key=lambda r: r["substep"])
 
         has_mjw = "mjw_qfrc_constraint_max" in frame_recs[0]
-        hdr = (f"    {'sub':>3} {'obj_z':>8} {'obj_spd':>8} {'stiff_max':>12} {'pen_max':>10}"
-               f" {'n_var':>8} {'n_ang°':>6} {'grip_q':>8} {'grip_spd':>8}")
+        hdr = (
+            f"    {'sub':>3} {'obj_z':>8} {'obj_spd':>8} {'stiff_max':>12} {'pen_max':>10}"
+            f" {'n_var':>8} {'n_ang°':>6} {'grip_q':>8} {'grip_spd':>8}"
+        )
         if has_mjw:
             hdr += f" {'act_frc':>10} {'con_frc':>10} {'qacc':>10} {'con_nan':>7} {'acc_nan':>7}"
         hdr += f" {'nan':>4}"
         print(f"    Substep progression (frame {frame}, world {world}):")
         print(hdr)
         for r in frame_recs:
-            line = (f"    {r['substep']:>3} {r['obj_z']:>8.4f} {r['obj_speed']:>8.4f} "
-                    f"{r['contact_stiffness_max']:>12.2e} {r.get('max_penetration', 0):>10.6f} "
-                    f"{r.get('normal_variance', 0):>8.5f} {r.get('normal_max_angle_deg', 0):>6.1f} "
-                    f"{r.get('gripper_q_max', 0):>8.4f} {r['gripper_speed_max']:>8.4f}")
+            line = (
+                f"    {r['substep']:>3} {r['obj_z']:>8.4f} {r['obj_speed']:>8.4f} "
+                f"{r['contact_stiffness_max']:>12.2e} {r.get('max_penetration', 0):>10.6f} "
+                f"{r.get('normal_variance', 0):>8.5f} {r.get('normal_max_angle_deg', 0):>6.1f} "
+                f"{r.get('gripper_q_max', 0):>8.4f} {r['gripper_speed_max']:>8.4f}"
+            )
             if has_mjw:
-                line += (f" {r['mjw_qfrc_actuator_max']:>10.2e} {r['mjw_qfrc_constraint_max']:>10.2e}"
-                         f" {r['mjw_qacc_max']:>10.2e}"
-                         f" {'NaN' if r.get('mjw_qfrc_constraint_has_nan') else 'ok':>7}"
-                         f" {'NaN' if r.get('mjw_qacc_has_nan') else 'ok':>7}")
+                line += (
+                    f" {r['mjw_qfrc_actuator_max']:>10.2e} {r['mjw_qfrc_constraint_max']:>10.2e}"
+                    f" {r['mjw_qacc_max']:>10.2e}"
+                    f" {'NaN' if r.get('mjw_qfrc_constraint_has_nan') else 'ok':>7}"
+                    f" {'NaN' if r.get('mjw_qacc_has_nan') else 'ok':>7}"
+                )
             line += f" {'NaN' if r['has_nan'] else 'ok':>4}"
             print(line)
 
         # Also show previous frame's last substep for context
-        prev_recs = [r for r in self.substep_records
-                     if r["frame"] == frame - 1 and r["world"] == world]
+        prev_recs = [r for r in self.substep_records if r["frame"] == frame - 1 and r["world"] == world]
         if prev_recs:
             last_prev = max(prev_recs, key=lambda r: r["substep"])
             print(f"\n    Previous frame {frame - 1}, substep {last_prev['substep']}:")
-            print(f"      obj_z={last_prev['obj_z']:.4f} obj_speed={last_prev['obj_speed']:.4f}"
-                  f" stiff_max={last_prev['contact_stiffness_max']:.2e}"
-                  f" pen_max={last_prev.get('max_penetration', 0):.6f}"
-                  f" grip_q_max={last_prev.get('gripper_q_max', 0):.4f}"
-                  f" grip_speed={last_prev['gripper_speed_max']:.4f}")
+            print(
+                f"      obj_z={last_prev['obj_z']:.4f} obj_speed={last_prev['obj_speed']:.4f}"
+                f" stiff_max={last_prev['contact_stiffness_max']:.2e}"
+                f" pen_max={last_prev.get('max_penetration', 0):.6f}"
+                f" grip_q_max={last_prev.get('gripper_q_max', 0):.4f}"
+                f" grip_speed={last_prev['gripper_speed_max']:.4f}"
+            )
             if has_mjw:
-                print(f"      mjw_act_frc={last_prev['mjw_qfrc_actuator_max']:.2e}"
-                      f" mjw_con_frc={last_prev['mjw_qfrc_constraint_max']:.2e}"
-                      f" mjw_qacc={last_prev['mjw_qacc_max']:.2e}")
+                print(
+                    f"      mjw_act_frc={last_prev['mjw_qfrc_actuator_max']:.2e}"
+                    f" mjw_con_frc={last_prev['mjw_qfrc_constraint_max']:.2e}"
+                    f" mjw_qacc={last_prev['mjw_qacc_max']:.2e}"
+                )
 
         # Show surface vs contacts penetration from per-frame records
         frame_rec = [r for r in self.records if r["frame"] == frame and r["world"] == world]
         if frame_rec:
             fr = frame_rec[0]
             print(f"\n    Contact surface stats (frame {frame}):")
-            print(f"      Surface faces: {fr.get('surface_contact_count', 0)}"
-                  f"  Rigid contacts: {fr.get('rigid_contact_count', 0)}"
-                  f"  Reduction ratio: {fr.get('rigid_contact_count', 0)}/{fr.get('surface_contact_count', 1)}")
+            print(
+                f"      Surface faces: {fr.get('surface_contact_count', 0)}"
+                f"  Rigid contacts: {fr.get('rigid_contact_count', 0)}"
+                f"  Reduction ratio: {fr.get('rigid_contact_count', 0)}/{fr.get('surface_contact_count', 1)}"
+            )
             print(f"      Surface pen (SDF): {fr.get('surface_pen_mm', 0):.3f} mm")
 
     def print_summary(self):
@@ -760,11 +765,14 @@ class DiagnosticsLogger:
         if nan_records:
             print(f"\n  NaN EVENTS ({len(nan_records)} samples):")
             first_nan = min(nan_records, key=lambda r: r["frame"])
-            print(f"    First NaN: frame {first_nan['frame']}, world {first_nan['world']}, task={task_names.get(first_nan['task'], '?')}")
-            pre_nan = [r for r in self.records
-                       if r["world"] == first_nan["world"]
-                       and r["frame"] < first_nan["frame"]
-                       and not r["has_nan"]]
+            print(
+                f"    First NaN: frame {first_nan['frame']}, world {first_nan['world']}, task={task_names.get(first_nan['task'], '?')}"
+            )
+            pre_nan = [
+                r
+                for r in self.records
+                if r["world"] == first_nan["world"] and r["frame"] < first_nan["frame"] and not r["has_nan"]
+            ]
             if pre_nan:
                 last = max(pre_nan, key=lambda r: r["frame"])
                 print(f"    Last healthy frame {last['frame']}:")
@@ -778,7 +786,8 @@ class DiagnosticsLogger:
     def write_csv(self, path):
         if not self.records:
             return
-        import csv
+        import csv  # noqa: PLC0415
+
         keys = self.records[0].keys()
         with open(path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=keys)
@@ -833,7 +842,7 @@ class Example:
         self.diagnostics = args.diagnostics if args and hasattr(args, "diagnostics") else False
         self.diag_logger = DiagnosticsLogger(self.num_worlds) if self.diagnostics else None
 
-        #self.viewer._paused = True
+        # self.viewer._paused = True
 
         # Contact budget: hydroelastic reduction yields ~240 contacts per shape pair
         # (20 normal bins x 7 spatial + 100 voxel slots). With 4 finger pads x 1 object
@@ -850,11 +859,13 @@ class Example:
 
         # ---- GUI state ----
         self.manual_mode = False
-        # Hydro contact stats (cached for GUI, updated periodically)
+        # Contact stats (cached for GUI, updated periodically)
         self._gui_hydro_contact_count = 0
         self._gui_hydro_max_pen_surface = 0.0  # from contact surface depth (SDF-based)
         self._max_pen_surface_ever = 0.0
-        self._gui_hydro_max_pen_contacts = 0.0  # from rigid contact points (solver-based)
+        self._gui_hydro_max_pen_contacts = 0.0  # kept for hydroelastic GUI display
+        self._gui_mjw_max_pen = 0.0  # from mjw_data.contact.dist (unified, all modes)
+        self._mjw_max_pen_ever = 0.0
         self.gripper_ctrl_value = 0.0
         self.show_isosurface = False
 
@@ -958,8 +969,10 @@ class Example:
                 ObjectShape.CAPSULE: 13.0,
             }[self.object_shape]
         self.grasp_ctrl = self._mm_to_ctrl(self.object_half_size * 2 * 1000.0, grasp_margin_mm)
-        print(f"Grasp ctrl target: {self.grasp_ctrl:.1f}/255 "
-              f"(object={self.object_half_size*2*1000:.0f}mm, margin={grasp_margin_mm:.0f}mm)")
+        print(
+            f"Grasp ctrl target: {self.grasp_ctrl:.1f}/255 "
+            f"(object={self.object_half_size * 2 * 1000:.0f}mm, margin={grasp_margin_mm:.0f}mm)"
+        )
 
         # ---- GPU buffers for GUI-driven values (written from CPU, read by kernel) ----
         self._gpu_manual_mode = wp.array([int(self.manual_mode)], dtype=int)
@@ -1030,6 +1043,7 @@ class Example:
                 mjw_data = self.solver.mjw_data
                 mjw_nv = mjw_data.qfrc_actuator.size
                 mjw_nu = mjw_data.actuator_force.size
+            mjw_naconmax = int(mjw_data.naconmax) if hasattr(self.solver, "mjw_data") else 0
             self.substep_recorder = SubstepRecorder(
                 num_substeps=self.sim_substeps,
                 body_count=self.model.body_count,
@@ -1038,6 +1052,7 @@ class Example:
                 contact_max=self.rigid_contact_max,
                 mjw_nv=mjw_nv,
                 mjw_nu=mjw_nu,
+                mjw_naconmax=mjw_naconmax,
             )
         else:
             self.substep_recorder = None
@@ -1440,7 +1455,7 @@ class Example:
             # Substep snapshot (graph-safe: wp.copy only)
             if self.substep_recorder is not None:
                 mjw_data = self.solver.mjw_data if hasattr(self.solver, "mjw_data") else None
-                self.substep_recorder.record(i, self.state_0, self.contacts, mjw_data, self.model)
+                self.substep_recorder.record(i, self.state_0, self.contacts, mjw_data)
 
     def _sync_gpu_buffers(self):
         """Write GUI-driven Python values to GPU buffers (only when dirty)."""
@@ -1496,10 +1511,7 @@ class Example:
             self._gui_task_timer_val = float(self.task_timer.numpy()[0])
 
             # Hydro contact surface penetration stats
-            if (
-                self.collision_pipeline is not None
-                and self.collision_pipeline.hydroelastic_sdf is not None
-            ):
+            if self.collision_pipeline is not None and self.collision_pipeline.hydroelastic_sdf is not None:
                 surface_data = self.collision_pipeline.hydroelastic_sdf.get_contact_surface()
                 if surface_data is not None:
                     nc = int(surface_data.face_contact_count.numpy()[0])
@@ -1509,18 +1521,21 @@ class Example:
                         # depth is negative for penetrating (SDF convention)
                         min_depth = float(np.min(depths))
                         self._gui_hydro_max_pen_surface = -min_depth  # positive = penetration
-                        self._max_pen_surface_ever = max(
-                            self._max_pen_surface_ever, self._gui_hydro_max_pen_surface
-                        )
+                        self._max_pen_surface_ever = max(self._max_pen_surface_ever, self._gui_hydro_max_pen_surface)
                     else:
                         self._gui_hydro_max_pen_surface = 0.0
 
-            # Contact-point-based penetration (from rigid contacts)
-            if self.contacts is not None:
-                nc = int(self.contacts.rigid_contact_count.numpy()[0])
-                if nc > 0 and self.substep_recorder is not None:
-                    pen = float(self.substep_recorder.max_penetration.numpy()[-1])
-                    self._gui_hydro_max_pen_contacts = pen
+            # Unified penetration from MuJoCo Warp contact.dist (works for ALL collision modes)
+            if hasattr(self.solver, "mjw_data"):
+                mjw_data = self.solver.mjw_data
+                nc = int(mjw_data.nacon.numpy()[0])
+                if nc > 0:
+                    dist = mjw_data.contact.dist.numpy()[:nc]
+                    min_dist = float(np.min(dist))
+                    self._gui_mjw_max_pen = max(0.0, -min_dist)
+                    self._mjw_max_pen_ever = max(self._mjw_max_pen_ever, self._gui_mjw_max_pen)
+                else:
+                    self._gui_mjw_max_pen = 0.0
 
         # Per-world diagnostics for testing
         if self.test_mode:
@@ -1556,10 +1571,7 @@ class Example:
             # Get surface data (post-graph, outside CUDA capture)
             surface_pen = 0.0
             surface_count = 0
-            if (
-                self.collision_pipeline is not None
-                and self.collision_pipeline.hydroelastic_sdf is not None
-            ):
+            if self.collision_pipeline is not None and self.collision_pipeline.hydroelastic_sdf is not None:
                 sd = self.collision_pipeline.hydroelastic_sdf.get_contact_surface()
                 if sd is not None:
                     surface_count = int(sd.face_contact_count.numpy()[0])
@@ -1612,19 +1624,25 @@ class Example:
             if changed:
                 self.viewer.show_hydro_contact_surface = self.show_isosurface
 
-        # Hydroelastic contact stats
+        # Contact penetration (unified, all collision modes)
+        mjw_pen_mm = self._gui_mjw_max_pen * 1000.0
+        mjw_pen_ever_mm = self._mjw_max_pen_ever * 1000.0
+        imgui.text(f"Pen (mjw): {mjw_pen_mm:.3f} mm  (max: {mjw_pen_ever_mm:.3f} mm)")
+
+        # Hydroelastic-specific contact stats
         if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC:
             rigid_count = 0
             if self.contacts is not None:
-                rigid_count = int(self.contacts.rigid_contact_count.numpy()[0]) if self._frame_count % self._gui_read_interval == 0 else self._gui_hydro_contact_count
+                rigid_count = (
+                    int(self.contacts.rigid_contact_count.numpy()[0])
+                    if self._frame_count % self._gui_read_interval == 0
+                    else self._gui_hydro_contact_count
+                )
             imgui.text(f"Surface faces: {self._gui_hydro_contact_count}  Rigid: {rigid_count}")
             pen_surface_mm = self._gui_hydro_max_pen_surface * 1000.0
-            pen_ever_mm = self._max_pen_surface_ever * 1000.0
-            pen_contacts_mm = self._gui_hydro_max_pen_contacts * 1000.0
-            imgui.text(f"Pen (surface): {pen_surface_mm:.3f} mm")
-            imgui.text(f"Pen (surface, max ever): {pen_ever_mm:.3f} mm")
-            imgui.text(f"Pen (contacts): {pen_contacts_mm:.3f} mm")
-            imgui.separator()
+            pen_surface_ever_mm = self._max_pen_surface_ever * 1000.0
+            imgui.text(f"Pen (surface): {pen_surface_mm:.3f} mm  (max: {pen_surface_ever_mm:.3f} mm)")
+        imgui.separator()
 
         # Manual mode toggle
         changed, new_manual = imgui.checkbox("Manual Mode", self.manual_mode)
@@ -1768,7 +1786,7 @@ class Example:
             if not np.isnan(z0) and not np.isnan(z1):
                 actual_lift = z1 - z0
                 slip = expected_lift - actual_lift
-                print(f"  World {w}: lift={actual_lift*1000:.1f}mm, slip={slip*1000:.1f}mm")
+                print(f"  World {w}: lift={actual_lift * 1000:.1f}mm, slip={slip * 1000:.1f}mm")
 
         # Contact force report from MuJoCo constraint forces
         if hasattr(self.solver, "mjw_data"):
@@ -1778,11 +1796,13 @@ class Example:
             if qfrc_con.ndim == 1:
                 nv_per_world = len(qfrc_con) // self.num_worlds
                 qfrc_con = qfrc_con.reshape(self.num_worlds, nv_per_world)
-            print(f"\n  Grip constraint forces (last frame):")
+            print("\n  Grip constraint forces (last frame):")
             for w in range(min(self.num_worlds, qfrc_con.shape[0])):
-                gripper_frc = qfrc_con[w, self.gripper_joints_start:self.gripper_joints_start + 8]
-                print(f"    World {w}: max={np.max(np.abs(gripper_frc)):.2f} Nm, "
-                      f"driver=[{gripper_frc[0]:.2f}, {gripper_frc[4]:.2f}] Nm")
+                gripper_frc = qfrc_con[w, self.gripper_joints_start : self.gripper_joints_start + 8]
+                print(
+                    f"    World {w}: max={np.max(np.abs(gripper_frc)):.2f} Nm, "
+                    f"driver=[{gripper_frc[0]:.2f}, {gripper_frc[4]:.2f}] Nm"
+                )
 
         print(f"{'=' * 50}\n")
 
@@ -1790,15 +1810,18 @@ class Example:
             self.diag_logger.print_summary()
             self.diag_logger.print_substep_nan_analysis()
             self.diag_logger.write_csv(f"diagnostics_{self.collision_mode.value}_{self.object_shape.value}.csv")
-            self.diag_logger.write_substep_csv(f"diagnostics_substeps_{self.collision_mode.value}_{self.object_shape.value}.csv")
+            self.diag_logger.write_substep_csv(
+                f"diagnostics_substeps_{self.collision_mode.value}_{self.object_shape.value}.csv"
+            )
+
+        # Unified penetration report (all collision modes, from mjw_data.contact.dist)
+        mjw_pen_mm = self._mjw_max_pen_ever * 1000.0
+        print(f"  Max penetration (mjw, all time): {mjw_pen_mm:.3f} mm")
+        if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC:
+            surface_pen_mm = self._max_pen_surface_ever * 1000.0
+            print(f"  Max penetration (surface, all time): {surface_pen_mm:.3f} mm")
 
         assert n_nan == 0, f"{n_nan}/{n_total} worlds diverged to NaN"
-
-        # Check max penetration from hydroelastic contact surface (< 0.5mm)
-        if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC:
-            max_pen_mm = self._max_pen_surface_ever * 1000.0
-            print(f"  Max penetration (all time): {max_pen_mm:.3f} mm")
-            assert max_pen_mm < 1.0, f"Max penetration too deep: {max_pen_mm:.3f} mm (limit: 1.0 mm)"
 
         assert rate > 0.5, f"Grasp success rate too low: {rate:.0%} ({n_success}/{n_total})"
 

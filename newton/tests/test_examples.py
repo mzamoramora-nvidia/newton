@@ -78,6 +78,7 @@ def add_example_test(
     test_options_cuda: dict[str, Any] | None = None,
     use_viewer: bool = False,
     test_suffix: str | None = None,
+    result_callback: Any = None,
 ):
     """Registers a Newton example to run on ``devices`` as a TestCase."""
 
@@ -181,6 +182,10 @@ def add_example_test(
         # print any error messages (e.g.: module not found)
         if result.stderr != "":
             print(result.stderr)
+
+        # Parse results before asserting (so we capture metrics even from failing tests)
+        if result_callback is not None:
+            result_callback(result.stdout)
 
         # Check the return code (0 is standard for success)
         test.assertEqual(
@@ -754,7 +759,75 @@ add_example_test(
 
 
 class TestHydroExamples(unittest.TestCase):
-    pass
+    _benchmark_results = {}  # noqa: RUF012 — {(mode, shape): {"slip": [...], "pen": float, "nan": int, "success": int}}
+
+    @classmethod
+    def _parse_results(cls, mode: str, shape: str, stdout: str):
+        """Parse example stdout and store metrics for the benchmark table."""
+        import re  # noqa: PLC0415
+
+        slips = [float(m) for m in re.findall(r"slip=(-?[\d.]+)mm", stdout)]
+        pen_match = re.search(r"Max penetration \(mjw, all time\):\s*([\d.]+)\s*mm", stdout)
+        pen = float(pen_match.group(1)) if pen_match else None
+        nan_match = re.search(r"NaN:\s*(\d+)", stdout)
+        nan_count = int(nan_match.group(1)) if nan_match else 0
+        success_match = re.search(r"Success:\s*(\d+)", stdout)
+        success = int(success_match.group(1)) if success_match else 0
+
+        cls._benchmark_results[(mode, shape)] = {
+            "slip": slips,
+            "pen": pen,
+            "nan": nan_count,
+            "success": success,
+        }
+
+    @classmethod
+    def print_benchmark(cls):
+        """Print a comparison table of all gripper test results to stderr for visibility."""
+
+        if not cls._benchmark_results:
+            return
+
+        modes = ["mujoco", "newton_default", "newton_sdf", "newton_hydroelastic"]
+        shapes = ["box", "sphere", "cylinder", "capsule"]
+        col_w = 20
+        w = 12 + col_w * len(modes)
+
+        lines = []
+        lines.append(f"\n{'=' * w}")
+        lines.append("Robotiq Gripper Benchmark")
+        lines.append(f"{'=' * w}")
+        lines.append(f"{'':>12}" + "".join(f"{m:>{col_w}}" for m in modes))
+        lines.append(f"{'':>12}" + "".join(f"{'-' * (col_w - 1):>{col_w}}" for _ in modes))
+
+        for shape in shapes:
+            row_slip = f"{shape + ' slip':>12}"
+            row_pen = f"{shape + ' pen':>12}"
+            for mode in modes:
+                r = cls._benchmark_results.get((mode, shape))
+                if r is None:
+                    row_slip += f"{'—':>{col_w}}"
+                    row_pen += f"{'—':>{col_w}}"
+                else:
+                    avg_slip = sum(r["slip"]) / len(r["slip"]) if r["slip"] else 0
+                    nan_count = r["nan"]
+                    pen_val = r["pen"]
+                    slip_str = f"{avg_slip:.1f}mm"
+                    if nan_count > 0:
+                        slip_str += f" ({nan_count}NaN)"
+                    pen_str = f"{pen_val:.3f}mm" if pen_val is not None else "—"
+                    row_slip += f"{slip_str:>{col_w}}"
+                    row_pen += f"{pen_str:>{col_w}}"
+            lines.append(row_slip)
+            lines.append(row_pen)
+
+        lines.append(f"{'=' * w}\n")
+        table = "\n".join(lines)
+        print(table, file=sys.stderr, flush=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.print_benchmark()
 
 
 for _collision_mode in ["mujoco", "newton_default", "newton_sdf", "newton_hydroelastic"]:
@@ -763,6 +836,9 @@ for _collision_mode in ["mujoco", "newton_default", "newton_sdf", "newton_hydroe
         _armatures = [1e-2]
         for _armature in _armatures:
             _suffix = f"{_collision_mode}_{_shape}_armature_{_armature:.0e}"
+            # Capture mode/shape in closure for the callback
+            _mode_capture = _collision_mode
+            _shape_capture = _shape
             add_example_test(
                 TestHydroExamples,
                 name="hydro.example_hydro_robotiq_gripper",
@@ -777,6 +853,9 @@ for _collision_mode in ["mujoco", "newton_default", "newton_sdf", "newton_hydroe
                 },
                 use_viewer=True,
                 test_suffix=_suffix,
+                result_callback=lambda stdout, m=_mode_capture, s=_shape_capture: TestHydroExamples._parse_results(
+                    m, s, stdout
+                ),
             )
 
 
