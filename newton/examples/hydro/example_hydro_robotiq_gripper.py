@@ -824,8 +824,8 @@ class Example:
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 10
-        self.collide_substeps = 2
+        self.sim_substeps = 64
+        self.collide_substeps = 16
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.num_worlds = num_worlds
         self.viewer = viewer
@@ -896,7 +896,7 @@ class Example:
         self.kh = 2e11  # hydroelastic stiffness [Pa]
         if args and hasattr(args, "kh") and args.kh is not None:
             self.kh = args.kh
-        self._impratio = 30.0
+        self._impratio = 10.0
         if args and hasattr(args, "impratio") and args.impratio is not None:
             self._impratio = args.impratio
         self.sdf_params = {
@@ -1379,6 +1379,7 @@ class Example:
                     buffer_fraction=1.0,
                     buffer_mult_iso=2,
                     buffer_mult_contact=2,
+                    anchor_contact=True,
                 ),
             )
         else:
