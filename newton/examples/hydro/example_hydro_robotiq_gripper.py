@@ -992,9 +992,9 @@ class Example:
                 ObjectShape.BOX: 3.0,
                 ObjectShape.ROUNDED_BOX: 5.0,
                 ObjectShape.BEAM: 3.0,
-                ObjectShape.SPHERE: 13.0,
-                ObjectShape.CYLINDER: 13.0,
-                ObjectShape.CAPSULE: 13.0,
+                ObjectShape.SPHERE: 10.0,
+                ObjectShape.CYLINDER: 10.0,
+                ObjectShape.CAPSULE: 10.0,
             }[self.object_shape]
         self.grasp_ctrl = self._mm_to_ctrl(self.object_half_size * 2 * 1000.0, grasp_margin_mm)
         print(
@@ -1948,7 +1948,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--object-shape",
         type=str,
-        default="beam",
+        default="sphere",
         choices=[s.value for s in ObjectShape],
         help="Shape of the grasp object.",
     )
