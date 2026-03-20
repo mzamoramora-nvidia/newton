@@ -1662,92 +1662,9 @@ class Example:
         self.viewer.end_frame()
 
     def gui(self, imgui):
-        imgui.text(f"Frame: {self._frame_count}  Sim time: {self.sim_time:.2f}s")
         imgui.text(f"Collision: {self.collision_mode.value}")
         imgui.text(f"Object: {self.object_shape.value} (armature={self.object_armature:.0e})")
         imgui.separator()
-
-        # Isosurface toggle (hydroelastic only)
-        if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC and hasattr(self.viewer, "renderer"):
-            changed, self.show_isosurface = imgui.checkbox("Show Isosurface", self.show_isosurface)
-            if changed:
-                self.viewer.show_hydro_contact_surface = self.show_isosurface
-
-        # Contact penetration (unified, all collision modes)
-        mjw_pen_mm = self._gui_mjw_max_pen * 1000.0
-        mjw_pen_ever_mm = self._mjw_max_pen_ever * 1000.0
-        imgui.text(f"Pen (mjw): {mjw_pen_mm:.3f} mm  (max: {mjw_pen_ever_mm:.3f} mm)")
-
-        # Hydroelastic-specific contact stats
-        if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC:
-            rigid_count = 0
-            if self.contacts is not None:
-                rigid_count = (
-                    int(self.contacts.rigid_contact_count.numpy()[0])
-                    if self._frame_count % self._gui_read_interval == 0
-                    else self._gui_hydro_contact_count
-                )
-            imgui.text(f"Surface faces: {self._gui_hydro_contact_count}  Rigid: {rigid_count}")
-            pen_surface_mm = self._gui_hydro_max_pen_surface * 1000.0
-            pen_surface_ever_mm = self._max_pen_surface_ever * 1000.0
-            imgui.text(f"Pen (surface): {pen_surface_mm:.3f} mm  (max: {pen_surface_ever_mm:.3f} mm)")
-        imgui.separator()
-
-        # Gripper debug
-        imgui.set_next_item_open(False, imgui.Cond_.appearing)
-        if imgui.collapsing_header(f"Gripper Debug (world {self._gui_selected_world})"):
-            imgui.indent()
-            if self._gui_body_q_z is not None:
-                imgui.text("Body Z positions:")
-                body_labels = [
-                    "base_mount",
-                    "base",
-                    "R_driver",
-                    "R_coupler",
-                    "R_spring",
-                    "R_follower",
-                    "R_pad",
-                    "R_silicone",
-                    "L_driver",
-                    "L_coupler",
-                    "L_spring",
-                    "L_follower",
-                    "L_pad",
-                    "L_silicone",
-                ]
-                for i, z in enumerate(self._gui_body_q_z):
-                    lbl = body_labels[i] if i < len(body_labels) else f"body_{i}"
-                    imgui.text(f"  {lbl}: z={z:.4f}")
-                # Object body
-                if self.object_body_idx < len(self._gui_body_q_z):
-                    imgui.text(f"  object: z={self._gui_body_q_z[self.object_body_idx]:.4f}")
-            if self._gui_joint_q is not None:
-                imgui.text("D6 joint (pos + rot):")
-                jq = self._gui_joint_q
-                imgui.text(f"  pos: [{jq[0]:.4f}, {jq[1]:.4f}, {jq[2]:.4f}]")
-                imgui.text(f"  rot: [{jq[3]:.4f}, {jq[4]:.4f}, {jq[5]:.4f}]")
-                imgui.text("Finger joints:")
-                finger_labels = [
-                    "R_driver",
-                    "R_coupler",
-                    "R_spring",
-                    "R_follower",
-                    "L_driver",
-                    "L_coupler",
-                    "L_spring",
-                    "L_follower",
-                ]
-                for i, lbl in enumerate(finger_labels):
-                    idx = 6 + i
-                    if idx < len(jq):
-                        imgui.text(f"  {lbl}: {jq[idx]:.4f} rad ({np.degrees(jq[idx]):.1f} deg)")
-            imgui.unindent()
-
-        # Manual mode toggle
-        changed, new_manual = imgui.checkbox("Manual Mode", self.manual_mode)
-        if changed:
-            self.manual_mode = new_manual
-            self._gpu_dirty = True
 
         # World selector
         changed, val = imgui.slider_int("World", self._gui_selected_world, 0, self.num_worlds - 1)
@@ -1770,6 +1687,43 @@ class Example:
                 err_y = 0.0 - jq[1]  # target Y is always 0
                 err_z = target_z - jq[2]
                 imgui.text(f"Pos err: x={err_x * 1000:+.2f} y={err_y * 1000:+.2f} z={err_z * 1000:+.2f} mm")
+
+        imgui.text(f"Frame: {self._frame_count}  Sim time: {self.sim_time:.2f}s")
+        imgui.separator()
+
+        # Isosurface toggle (hydroelastic only)
+        if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC and hasattr(self.viewer, "renderer"):
+            changed, self.show_isosurface = imgui.checkbox("Show Isosurface", self.show_isosurface)
+            if changed:
+                self.viewer.show_hydro_contact_surface = self.show_isosurface
+
+        # Contact penetration (unified, all collision modes)
+        mjw_pen_mm = self._gui_mjw_max_pen * 1000.0
+        mjw_pen_ever_mm = self._mjw_max_pen_ever * 1000.0
+        imgui.text(f"Pen (mjw): {mjw_pen_mm:.3f} mm  (max: {mjw_pen_ever_mm:.3f} mm)")
+
+        # Hydroelastic-specific contact stats
+        if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC:
+            pen_surface_mm = self._gui_hydro_max_pen_surface * 1000.0
+            pen_surface_ever_mm = self._max_pen_surface_ever * 1000.0
+            imgui.text(f"Pen (surface): {pen_surface_mm:.3f} mm  (max: {pen_surface_ever_mm:.3f} mm)")
+
+            rigid_count = 0
+            if self.contacts is not None:
+                rigid_count = (
+                    int(self.contacts.rigid_contact_count.numpy()[0])
+                    if self._frame_count % self._gui_read_interval == 0
+                    else self._gui_hydro_contact_count
+                )
+            imgui.text(f"Surface faces: {self._gui_hydro_contact_count}  Rigid: {rigid_count}")
+
+        imgui.separator()
+
+        # Manual mode toggle
+        changed, new_manual = imgui.checkbox("Manual Mode", self.manual_mode)
+        if changed:
+            self.manual_mode = new_manual
+            self._gpu_dirty = True
 
         imgui.separator()
 
