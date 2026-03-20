@@ -35,6 +35,7 @@
 
 import os
 import shutil
+import time
 import xml.etree.ElementTree as ET
 from enum import Enum, IntEnum
 
@@ -901,6 +902,12 @@ class Example:
         self.base_rot_max_vel = 1.2 / self.fps  # 1.2 rad/s / 100 fps = 0.012 rad/frame
         self.gripper_max_delta = 255 / self.fps  # 255 units/s / 100 fps = 2.55 units/frame
 
+        # SPS measurement
+        self._sps_frame_count = 0
+        self._sps_last_time = time.perf_counter()
+        self._sps_samples: list[float] = []
+        self._sps_warmup_done = False
+
         # GUI cache (avoid GPU sync every frame)
         self._gui_task_val = 0
         self._gui_task_timer_val = 0.0
@@ -1424,7 +1431,7 @@ class Example:
                 reduce_contacts=True,
                 broad_phase="explicit",
                 sdf_hydroelastic_config=HydroelasticSDF.Config(
-                    output_contact_surface=True,
+                    output_contact_surface=False,
                     buffer_fraction=1.0,
                     buffer_mult_iso=2,
                     buffer_mult_contact=2,
@@ -1493,6 +1500,38 @@ class Example:
                 mjw_data = self.solver.mjw_data if hasattr(self.solver, "mjw_data") else None
                 self.substep_recorder.record(i, self.state_0, self.contacts, mjw_data)
 
+    def _update_sps(self):
+        """Print SPS every ~1s with running average and std deviation."""
+        self._sps_frame_count += 1
+        now = time.perf_counter()
+        elapsed = now - self._sps_last_time
+        if elapsed < 1.0:
+            return
+        sps = (self._sps_frame_count / elapsed) * self.num_worlds
+        self._sps_frame_count = 0
+        self._sps_last_time = now
+
+        sps_per_env = sps / self.num_worlds
+
+        if not self._sps_warmup_done:
+            self._sps_warmup_done = True
+            print(
+                f"SimTime: {self.sim_time:.2f} [SPS] {sps:.1f} steps/s"
+                f"  ({sps_per_env:.1f}/env, {self.num_worlds} worlds) (warmup)"
+            )
+            return
+
+        self._sps_samples.append(sps)
+        n = len(self._sps_samples)
+        avg = sum(self._sps_samples) / n
+        avg_per_env = avg / self.num_worlds
+        std = (sum((s - avg) ** 2 for s in self._sps_samples) / (n - 1)) ** 0.5 if n > 1 else 0.0
+        print(
+            f"SimTime: {self.sim_time:.2f} [SPS] {sps:.1f} steps/s"
+            f"  ({sps_per_env:.1f}/env, {self.num_worlds} worlds)"
+            f"  avg={avg:.1f} ({avg_per_env:.1f}/env) std={std:.1f} (n={n})"
+        )
+
     def _sync_gpu_buffers(self):
         """Write GUI-driven Python values to GPU buffers (only when dirty)."""
         if not self._gpu_dirty:
@@ -1527,6 +1566,7 @@ class Example:
 
         self.sim_time += self.frame_dt
         self._frame_count += 1
+        self._update_sps()
 
         # Substep readback (outside graph — safe to call .numpy())
         if self.substep_recorder is not None and self.diag_logger is not None:
