@@ -871,14 +871,13 @@ class Example:
         # ---- GUI state ----
         self.manual_mode = False
         self._gui_selected_world = 0  # World index for task/debug display
-        # Gripper debug cache (updated periodically)
-        self._gui_body_q_z = None  # Z positions of first few bodies (selected world)
+        self._gui_panel_open = False  # Skip GPU readbacks when GUI panel is collapsed
         self._gui_joint_q = None  # D6 + finger joint positions (selected world)
         # Contact stats (cached for GUI, updated periodically)
         self._gui_hydro_contact_count = 0
+        self._gui_rigid_contact_count = 0
         self._gui_hydro_max_pen_surface = 0.0  # from contact surface depth (SDF-based)
         self._max_pen_surface_ever = 0.0
-        self._gui_hydro_max_pen_contacts = 0.0  # kept for hydroelastic GUI display
         self._gui_mjw_max_pen = 0.0  # from mjw_data.contact.dist (unified, all modes)
         self._mjw_max_pen_ever = 0.0
         self.gripper_ctrl_value = 0.0
@@ -1541,8 +1540,8 @@ class Example:
                     task_array=self.task,
                 )
 
-        # Periodic GPU read for GUI cache
-        if self._frame_count % self._gui_read_interval == 0:
+        # Periodic GPU read for GUI cache (skip when panel is collapsed)
+        if self._gui_panel_open and self._frame_count % self._gui_read_interval == 0:
             w = self._gui_selected_world
             self._gui_task_val = int(self.task.numpy()[w])
             self._gui_task_timer_val = float(self.task_timer.numpy()[w])
@@ -1555,9 +1554,8 @@ class Example:
                     self._gui_hydro_contact_count = nc
                     if nc > 0:
                         depths = surface_data.contact_surface_depth.numpy()[:nc]
-                        # depth is negative for penetrating (SDF convention)
                         min_depth = float(np.min(depths))
-                        self._gui_hydro_max_pen_surface = -min_depth  # positive = penetration
+                        self._gui_hydro_max_pen_surface = -min_depth
                         self._max_pen_surface_ever = max(self._max_pen_surface_ever, self._gui_hydro_max_pen_surface)
                     else:
                         self._gui_hydro_max_pen_surface = 0.0
@@ -1574,10 +1572,11 @@ class Example:
                 else:
                     self._gui_mjw_max_pen = 0.0
 
-            # Gripper body/joint debug cache (selected world)
-            bq = self.state_0.body_q.numpy()
-            bq_start = w * self.bodies_per_world
-            self._gui_body_q_z = bq[bq_start : bq_start + self.bodies_per_world, 2].copy()
+            # Rigid contact count (cached to avoid .numpy() in gui())
+            if self.contacts is not None:
+                self._gui_rigid_contact_count = int(self.contacts.rigid_contact_count.numpy()[0])
+
+            # Joint position cache (selected world) for GUI pos error display
             jq = self.state_0.joint_q.numpy()
             coords_per_world = len(jq) // self.num_worlds
             jq_start = w * coords_per_world
@@ -1586,6 +1585,7 @@ class Example:
         # Per-world diagnostics for testing
         if self.test_mode:
             body_q = self.state_0.body_q.numpy()
+            tasks_np = self.task.numpy()
             obj_indices = np.arange(self.num_worlds) * self.bodies_per_world + self.object_body_idx
             obj_z = body_q[obj_indices, 2]
 
@@ -1594,16 +1594,14 @@ class Example:
             world_has_nan = np.any(np.isnan(body_q_reshaped), axis=(1, 2))
             newly_nan = world_has_nan & (self.world_nan_frame < 0)
             if np.any(newly_nan):
-                tasks = self.task.numpy()
                 self.world_nan_frame[newly_nan] = self._frame_count
-                self.world_nan_task[newly_nan] = tasks[newly_nan]
+                self.world_nan_task[newly_nan] = tasks_np[newly_nan]
 
             # Only update max_z for worlds that haven't gone NaN
             healthy = ~world_has_nan
             np.maximum(self.object_max_z, np.where(healthy, obj_z, self.object_max_z), out=self.object_max_z)
 
             # Vertical slip: record object and gripper base (body 1) z.
-            tasks_np = self.task.numpy()
             gripper_z = body_q_reshaped[:, 1, 2]  # body 1 = base per world
             for w in range(self.num_worlds):
                 if world_has_nan[w]:
@@ -1662,6 +1660,13 @@ class Example:
         self.viewer.end_frame()
 
     def gui(self, imgui):
+        imgui.separator()
+        imgui.set_next_item_open(False, imgui.Cond_.appearing)
+        self._gui_panel_open = imgui.collapsing_header("Info")
+        if not self._gui_panel_open:
+            return
+        imgui.indent()
+
         imgui.text(f"Collision: {self.collision_mode.value}")
         imgui.text(f"Object: {self.object_shape.value} (armature={self.object_armature:.0e})")
         imgui.separator()
@@ -1708,14 +1713,7 @@ class Example:
             pen_surface_ever_mm = self._max_pen_surface_ever * 1000.0
             imgui.text(f"Pen (surface): {pen_surface_mm:.3f} mm  (max: {pen_surface_ever_mm:.3f} mm)")
 
-            rigid_count = 0
-            if self.contacts is not None:
-                rigid_count = (
-                    int(self.contacts.rigid_contact_count.numpy()[0])
-                    if self._frame_count % self._gui_read_interval == 0
-                    else self._gui_hydro_contact_count
-                )
-            imgui.text(f"Surface faces: {self._gui_hydro_contact_count}  Rigid: {rigid_count}")
+            imgui.text(f"Surface faces: {self._gui_hydro_contact_count}  Rigid: {self._gui_rigid_contact_count}")
 
         imgui.separator()
 
@@ -1797,6 +1795,8 @@ class Example:
                 self.gripper_max_delta = val
                 self._gpu_dirty = True
             imgui.unindent()
+
+        imgui.unindent()
 
     def test_final(self):
         version = "V4" if self.use_v4 else "V1"
