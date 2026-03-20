@@ -873,13 +873,14 @@ class Example:
         self._gui_selected_world = 0  # World index for task/debug display
         self._gui_panel_open = False  # Skip GPU readbacks when GUI panel is collapsed
         self._gui_joint_q = None  # D6 + finger joint positions (selected world)
-        # Contact stats (cached for GUI, updated periodically)
-        self._gui_hydro_contact_count = 0
-        self._gui_rigid_contact_count = 0
-        self._gui_hydro_max_pen_surface = 0.0  # from contact surface depth (SDF-based)
+        # Penetration and contact tracking (used by both GUI and test reports)
+        self._hydro_contact_count = 0
+        self._hydro_max_pen_surface = 0.0  # from contact surface depth (SDF-based)
         self._max_pen_surface_ever = 0.0
-        self._gui_mjw_max_pen = 0.0  # from mjw_data.contact.dist (unified, all modes)
+        self._mjw_max_pen = 0.0  # from mjw_data.contact.dist (unified, all modes)
         self._mjw_max_pen_ever = 0.0
+        # GUI-only cached values
+        self._gui_rigid_contact_count = 0
         self.gripper_ctrl_value = 0.0
         self.show_isosurface = False
 
@@ -1540,25 +1541,22 @@ class Example:
                     task_array=self.task,
                 )
 
-        # Periodic GPU read for GUI cache (skip when panel is collapsed)
-        if self._gui_panel_open and self._frame_count % self._gui_read_interval == 0:
-            w = self._gui_selected_world
-            self._gui_task_val = int(self.task.numpy()[w])
-            self._gui_task_timer_val = float(self.task_timer.numpy()[w])
-
+        # Penetration tracking (needed for test reports and GUI display)
+        periodic = self._gui_panel_open and self._frame_count % self._gui_read_interval == 0
+        if self.test_mode or periodic:
             # Hydro contact surface penetration stats
             if self.collision_pipeline is not None and self.collision_pipeline.hydroelastic_sdf is not None:
                 surface_data = self.collision_pipeline.hydroelastic_sdf.get_contact_surface()
                 if surface_data is not None:
                     nc = int(surface_data.face_contact_count.numpy()[0])
-                    self._gui_hydro_contact_count = nc
+                    self._hydro_contact_count = nc
                     if nc > 0:
                         depths = surface_data.contact_surface_depth.numpy()[:nc]
                         min_depth = float(np.min(depths))
-                        self._gui_hydro_max_pen_surface = -min_depth
-                        self._max_pen_surface_ever = max(self._max_pen_surface_ever, self._gui_hydro_max_pen_surface)
+                        self._hydro_max_pen_surface = -min_depth
+                        self._max_pen_surface_ever = max(self._max_pen_surface_ever, self._hydro_max_pen_surface)
                     else:
-                        self._gui_hydro_max_pen_surface = 0.0
+                        self._hydro_max_pen_surface = 0.0
 
             # Unified penetration from MuJoCo Warp contact.dist (works for ALL collision modes)
             if hasattr(self.solver, "mjw_data"):
@@ -1567,16 +1565,20 @@ class Example:
                 if nc > 0:
                     dist = mjw_data.contact.dist.numpy()[:nc]
                     min_dist = float(np.min(dist))
-                    self._gui_mjw_max_pen = max(0.0, -min_dist)
-                    self._mjw_max_pen_ever = max(self._mjw_max_pen_ever, self._gui_mjw_max_pen)
+                    self._mjw_max_pen = max(0.0, -min_dist)
+                    self._mjw_max_pen_ever = max(self._mjw_max_pen_ever, self._mjw_max_pen)
                 else:
-                    self._gui_mjw_max_pen = 0.0
+                    self._mjw_max_pen = 0.0
 
-            # Rigid contact count (cached to avoid .numpy() in gui())
+        # GUI-only readbacks (periodic, skip when panel is collapsed)
+        if periodic:
+            w = self._gui_selected_world
+            self._gui_task_val = int(self.task.numpy()[w])
+            self._gui_task_timer_val = float(self.task_timer.numpy()[w])
+
             if self.contacts is not None:
                 self._gui_rigid_contact_count = int(self.contacts.rigid_contact_count.numpy()[0])
 
-            # Joint position cache (selected world) for GUI pos error display
             jq = self.state_0.joint_q.numpy()
             coords_per_world = len(jq) // self.num_worlds
             jq_start = w * coords_per_world
@@ -1703,17 +1705,17 @@ class Example:
                 self.viewer.show_hydro_contact_surface = self.show_isosurface
 
         # Contact penetration (unified, all collision modes)
-        mjw_pen_mm = self._gui_mjw_max_pen * 1000.0
+        mjw_pen_mm = self._mjw_max_pen * 1000.0
         mjw_pen_ever_mm = self._mjw_max_pen_ever * 1000.0
         imgui.text(f"Pen (mjw): {mjw_pen_mm:.3f} mm  (max: {mjw_pen_ever_mm:.3f} mm)")
 
         # Hydroelastic-specific contact stats
         if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC:
-            pen_surface_mm = self._gui_hydro_max_pen_surface * 1000.0
+            pen_surface_mm = self._hydro_max_pen_surface * 1000.0
             pen_surface_ever_mm = self._max_pen_surface_ever * 1000.0
             imgui.text(f"Pen (surface): {pen_surface_mm:.3f} mm  (max: {pen_surface_ever_mm:.3f} mm)")
 
-            imgui.text(f"Surface faces: {self._gui_hydro_contact_count}  Rigid: {self._gui_rigid_contact_count}")
+            imgui.text(f"Surface faces: {self._hydro_contact_count}  Rigid: {self._gui_rigid_contact_count}")
 
         imgui.separator()
 
@@ -1902,7 +1904,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--object-shape",
         type=str,
-        default="sphere",
+        default="box",
         choices=[s.value for s in ObjectShape],
         help="Shape of the grasp object.",
     )
@@ -1914,7 +1916,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--object-armature",
         type=float,
-        default=1e-2,
+        default=0.0,
         help="Artificial inertia added to the grasp object body [kg*m^2].",
     )
     parser.add_argument(
