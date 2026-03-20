@@ -845,8 +845,12 @@ class Example:
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 64
-        self.collide_substeps = 16
+        self.sim_substeps = 16
+        self.collide_substeps = 4
+        if args and hasattr(args, "substeps") and args.substeps is not None:
+            self.sim_substeps = args.substeps
+        if args and hasattr(args, "collide_substeps") and args.collide_substeps is not None:
+            self.collide_substeps = args.collide_substeps
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.num_worlds = num_worlds
         self.viewer = viewer
@@ -997,11 +1001,11 @@ class Example:
         else:
             grasp_margin_mm = {
                 ObjectShape.BOX: 3.0,
-                ObjectShape.ROUNDED_BOX: 5.0,
-                ObjectShape.BEAM: 3.0,
-                ObjectShape.SPHERE: 10.0,
-                ObjectShape.CYLINDER: 10.0,
-                ObjectShape.CAPSULE: 10.0,
+                ObjectShape.ROUNDED_BOX: 3.0,
+                ObjectShape.BEAM: 4.0,
+                ObjectShape.SPHERE: 3.0,
+                ObjectShape.CYLINDER: 3.0,
+                ObjectShape.CAPSULE: 3.0,
             }[self.object_shape]
         self.grasp_ctrl = self._mm_to_ctrl(self.object_half_size * 2 * 1000.0, grasp_margin_mm)
         print(
@@ -1033,8 +1037,10 @@ class Example:
             cone="elliptic",
             njmax=self.rigid_contact_max // self.num_worlds,
             nconmax=self.rigid_contact_max // self.num_worlds,
-            iterations=50,
-            ls_iterations=100,
+            iterations=args.iterations if args and hasattr(args, "iterations") and args.iterations is not None else 10,
+            ls_iterations=args.ls_iterations
+            if args and hasattr(args, "ls_iterations") and args.ls_iterations is not None
+            else 20,
             impratio=self._impratio,
         )
 
@@ -1944,7 +1950,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--object-shape",
         type=str,
-        default="box",
+        default="beam",
         choices=[s.value for s in ObjectShape],
         help="Shape of the grasp object.",
     )
@@ -1971,7 +1977,11 @@ if __name__ == "__main__":
     parser.add_argument("--impratio", type=float, default=None, help="Override MuJoCo impratio. Default: 10.")
     parser.add_argument("--grasp-margin", type=float, default=None, help="Override grasp margin [mm] for all shapes.")
     parser.add_argument("--no-gravity", action="store_true", help="Disable gravity (diagnostic mode).")
-    parser.set_defaults(num_frames=300)
+    parser.add_argument("--substeps", type=int, default=None, help="Override sim_substeps.")
+    parser.add_argument("--collide-substeps", type=int, default=None, help="Override collide_substeps.")
+    parser.add_argument("--iterations", type=int, default=None, help="Override solver iterations.")
+    parser.add_argument("--ls-iterations", type=int, default=None, help="Override solver ls_iterations.")
+    parser.set_defaults(num_frames=350)
     viewer, args = newton.examples.init(parser)
 
     example = Example(viewer, num_worlds=args.num_worlds, args=args)

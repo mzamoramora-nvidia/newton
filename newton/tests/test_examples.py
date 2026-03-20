@@ -844,32 +844,28 @@ class TestHydroExamples(unittest.TestCase):
 
 
 for _collision_mode in ["mujoco", "newton_default", "newton_sdf", "newton_hydroelastic"]:
-    for _shape in ["sphere", "cylinder", "capsule", "box"]:
-        # _armatures = [1e-4, 1e-3, 1e-2]
-        _armatures = [1e-2]
-        for _armature in _armatures:
-            _suffix = f"{_collision_mode}_{_shape}_armature_{_armature:.0e}"
-            # Capture mode/shape in closure for the callback
-            _mode_capture = _collision_mode
-            _shape_capture = _shape
-            add_example_test(
-                TestHydroExamples,
-                name="hydro.example_hydro_robotiq_gripper",
-                devices=cuda_test_devices,
-                test_options={
-                    "collision-mode": _collision_mode,
-                    "object-shape": _shape,
-                    "object-armature": _armature,
-                    "no-manual": True,
-                    "num-worlds": 4,
-                    "num-frames": 350,
-                },
-                use_viewer=True,
-                test_suffix=_suffix,
-                result_callback=lambda stdout, m=_mode_capture, s=_shape_capture: TestHydroExamples._parse_results(
-                    m, s, stdout
-                ),
-            )
+    for _shape in ["sphere", "cylinder", "capsule", "box", "beam"]:
+        _suffix = f"{_collision_mode}_{_shape}"
+        # Capture mode/shape in closure for the callback
+        _mode_capture = _collision_mode
+        _shape_capture = _shape
+        add_example_test(
+            TestHydroExamples,
+            name="hydro.example_hydro_robotiq_gripper",
+            devices=cuda_test_devices,
+            test_options={
+                "collision-mode": _collision_mode,
+                "object-shape": _shape,
+                "no-manual": True,
+                "num-worlds": 4,
+                "num-frames": 350,
+            },
+            use_viewer=True,
+            test_suffix=_suffix,
+            result_callback=lambda stdout, m=_mode_capture, s=_shape_capture: TestHydroExamples._parse_results(
+                m, s, stdout
+            ),
+        )
 
 
 if __name__ == "__main__":
