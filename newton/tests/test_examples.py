@@ -801,7 +801,7 @@ class TestHydroExamples(unittest.TestCase):
         if not cls._benchmark_results:
             return
 
-        modes = ["mujoco", "newton_default", "newton_sdf", "newton_hydroelastic"]
+        modes = ["mujoco", "newton_default", "newton_sdf", "newton_hydroelastic", "newton_hydroelastic_mm"]
         shapes = ["box", "sphere", "cylinder", "capsule"]
         col_w = 20
         w = 12 + col_w * len(modes)
@@ -843,28 +843,34 @@ class TestHydroExamples(unittest.TestCase):
         cls.print_benchmark()
 
 
-for _collision_mode in ["mujoco", "newton_default", "newton_sdf", "newton_hydroelastic"]:
-    for _shape in ["sphere", "cylinder", "capsule", "box"]:
-        _suffix = f"{_collision_mode}_{_shape}"
-        # Capture mode/shape in closure for the callback
-        _mode_capture = _collision_mode
-        _shape_capture = _shape
+# Maps test mode key → (collision-mode CLI value, extra CLI options).
+_collision_modes = {
+    "mujoco": ("mujoco", {}),
+    "newton_default": ("newton_default", {}),
+    "newton_sdf": ("newton_sdf", {}),
+    "newton_hydroelastic": ("newton_hydroelastic", {}),
+    "newton_hydroelastic_mm": ("newton_hydroelastic", {"moment-matching": True}),
+}
+_shapes = ["sphere", "cylinder", "capsule", "box"]
+
+for _mode, (_collision_mode, _extra) in _collision_modes.items():
+    for _shape in _shapes:
+        _options = {
+            "collision-mode": _collision_mode,
+            "object-shape": _shape,
+            "no-manual": True,
+            "num-worlds": 4,
+            "num-frames": 350,
+            **_extra,
+        }
         add_example_test(
             TestHydroExamples,
             name="hydro.example_hydro_robotiq_gripper",
             devices=cuda_test_devices,
-            test_options={
-                "collision-mode": _collision_mode,
-                "object-shape": _shape,
-                "no-manual": True,
-                "num-worlds": 4,
-                "num-frames": 350,
-            },
+            test_options=_options,
             use_viewer=True,
-            test_suffix=_suffix,
-            result_callback=lambda stdout, m=_mode_capture, s=_shape_capture: TestHydroExamples._parse_results(
-                m, s, stdout
-            ),
+            test_suffix=f"{_mode}_{_shape}",
+            result_callback=lambda stdout, m=_mode, s=_shape: TestHydroExamples._parse_results(m, s, stdout),
         )
 
 

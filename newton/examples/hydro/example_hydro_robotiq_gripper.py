@@ -939,6 +939,7 @@ class Example:
         self._impratio = 10.0
         if args and hasattr(args, "impratio") and args.impratio is not None:
             self._impratio = args.impratio
+        self._moment_matching = args.moment_matching if args and hasattr(args, "moment_matching") else False
         self.sdf_params = {
             "max_resolution": 64,
             "narrow_band_range": (-0.005, 0.005),
@@ -1442,6 +1443,7 @@ class Example:
                     buffer_mult_iso=2,
                     buffer_mult_contact=2,
                     anchor_contact=True,
+                    moment_matching=self._moment_matching,
                 ),
             )
         else:
@@ -1977,6 +1979,9 @@ if __name__ == "__main__":
     parser.add_argument("--impratio", type=float, default=None, help="Override MuJoCo impratio. Default: 10.")
     parser.add_argument("--grasp-margin", type=float, default=None, help="Override grasp margin [mm] for all shapes.")
     parser.add_argument("--no-gravity", action="store_true", help="Disable gravity (diagnostic mode).")
+    parser.add_argument(
+        "--moment-matching", action="store_true", help="Enable moment matching for hydroelastic contacts."
+    )
     parser.add_argument("--substeps", type=int, default=None, help="Override sim_substeps.")
     parser.add_argument("--collide-substeps", type=int, default=None, help="Override collide_substeps.")
     parser.add_argument("--iterations", type=int, default=None, help="Override solver iterations.")
