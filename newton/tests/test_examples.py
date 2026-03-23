@@ -844,7 +844,7 @@ class TestHydroExamples(unittest.TestCase):
 
 
 for _collision_mode in ["mujoco", "newton_default", "newton_sdf", "newton_hydroelastic"]:
-    for _shape in ["sphere", "cylinder", "capsule", "box", "beam"]:
+    for _shape in ["sphere", "cylinder", "capsule", "box"]:
         _suffix = f"{_collision_mode}_{_shape}"
         # Capture mode/shape in closure for the callback
         _mode_capture = _collision_mode

@@ -200,7 +200,7 @@ def control_pipeline_kernel(
         err_x = wp.abs(d_pos[0] - joint_q[jq_offset])
         err_y = wp.abs(d_pos[1] - joint_q[jq_offset + 1])
         err_z = wp.abs(d_pos[2] - joint_q[jq_offset + 2])
-        pos_settled = err_x < 0.001 and err_y < 0.001 and err_z < 0.0005
+        pos_settled = err_x < 0.0005 and err_y < 0.0005 and err_z < 0.00075
         if task_timer[tid] > task_durations[p] and pos_settled and p < TaskType.HOLD.value:
             task[tid] = p + 1
             task_timer[tid] = 0.0
@@ -1037,10 +1037,10 @@ class Example:
             cone="elliptic",
             njmax=self.rigid_contact_max // self.num_worlds,
             nconmax=self.rigid_contact_max // self.num_worlds,
-            iterations=args.iterations if args and hasattr(args, "iterations") and args.iterations is not None else 10,
+            iterations=args.iterations if args and hasattr(args, "iterations") and args.iterations is not None else 50,
             ls_iterations=args.ls_iterations
             if args and hasattr(args, "ls_iterations") and args.ls_iterations is not None
-            else 20,
+            else 100,
             impratio=self._impratio,
         )
 
@@ -1950,7 +1950,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--object-shape",
         type=str,
-        default="beam",
+        default="capsule",
         choices=[s.value for s in ObjectShape],
         help="Shape of the grasp object.",
     )
@@ -1981,7 +1981,7 @@ if __name__ == "__main__":
     parser.add_argument("--collide-substeps", type=int, default=None, help="Override collide_substeps.")
     parser.add_argument("--iterations", type=int, default=None, help="Override solver iterations.")
     parser.add_argument("--ls-iterations", type=int, default=None, help="Override solver ls_iterations.")
-    parser.set_defaults(num_frames=350)
+    parser.set_defaults(num_frames=400)
     viewer, args = newton.examples.init(parser)
 
     example = Example(viewer, num_worlds=args.num_worlds, args=args)
