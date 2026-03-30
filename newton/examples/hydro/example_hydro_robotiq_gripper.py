@@ -1040,9 +1040,6 @@ class Example:
         # ---- Replicate and finalize ----
         scene = newton.ModelBuilder()
         scene.replicate(builder, self.num_worlds, spacing=(0.5, 0.5, 0.0))
-        # Lower inertia tolerance for the V4 gripper's lightweight finger links
-        # (eigenvalues as low as 1.2e-7 kg·m²) to avoid inflating them.
-        scene.inertia_tolerance = 1e-9
         self.model = scene.finalize()
 
         # ---- GPU state arrays for state machine ----
