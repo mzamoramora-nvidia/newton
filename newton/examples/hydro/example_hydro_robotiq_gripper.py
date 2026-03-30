@@ -996,7 +996,7 @@ class Example:
 
         # ---- Shape config ----
         self.shape_cfg = newton.ModelBuilder.ShapeConfig(
-            gap=0.00,
+            gap=0.0005,
             mu=1.0,
             mu_torsional=0.0,
             mu_rolling=0.0,
@@ -1358,9 +1358,9 @@ class Example:
         }[self.object_shape]
         self._add_object_shape(builder, self.object_body_idx, shape=self.object_shape, size=size)
 
-        # Build SDFs on finger shapes (required for SDF and hydroelastic modes)
+        # Build SDFs on all collision shapes (required for SDF and hydroelastic modes)
         if self.collision_mode in (CollisionMode.NEWTON_SDF, CollisionMode.NEWTON_HYDROELASTIC):
-            self._setup_finger_sdf(builder)
+            self._setup_collision_sdf(builder)
 
     def _add_object_shape(self, builder, body, shape: ObjectShape, size: tuple[float, ...], xform=None):
         """Add a mesh shape, with SDF for SDF/hydroelastic collision modes.
@@ -1423,21 +1423,29 @@ class Example:
             builder.shape_material_kh[shape_idx] = self.kh
             builder.shape_flags[-1] |= newton.ShapeFlags.HYDROELASTIC
 
-    def _setup_finger_sdf(self, builder):
-        """Build SDFs on finger contact shapes; enable hydroelastic flag if in hydroelastic mode."""
+    def _setup_collision_sdf(self, builder):
+        """Build SDFs on all collision shapes; mark fingertips as hydroelastic.
+
+        Pass 1 — SDF on every collision shape (both ``newton_sdf`` and
+        ``newton_hydroelastic`` modes).  This ensures the mesh-mesh
+        narrowphase always uses the texture-SDF path instead of the
+        BVH fallback, which can produce false contacts from sign errors
+        in ``wp.mesh_query_point_sign_normal``.
+
+        Pass 2 — HYDROELASTIC flag only on fingertip shapes (pads and
+        V4 tongue meshes).  Other collision meshes get SDF-based narrow
+        phase but do not generate hydroelastic pressure contacts.
+        """
         use_hydro = self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC
         cfg = self.shape_cfg
 
-        # For V1 and V4: find pad collision shapes by exact label suffix
-        pad_names = {"left_pad1", "left_pad2", "right_pad1", "right_pad2"}
-        pad_shape_indices = set()
-        for shape_idx, lbl in enumerate(builder.shape_label):
-            if lbl and lbl.split("/")[-1] in pad_names:
-                pad_shape_indices.add(shape_idx)
+        # ---- Pass 1: build SDF on every collision shape ----
+        for shape_idx in range(builder.shape_count):
+            if not (builder.shape_flags[shape_idx] & newton.ShapeFlags.COLLIDE_SHAPES):
+                continue
 
-        for shape_idx in pad_shape_indices:
             if builder.shape_type[shape_idx] == newton.GeoType.BOX:
-                # Convert BOX to MESH + SDF for SDF-based contact
+                # Convert BOX to MESH + SDF
                 hx, hy, hz = builder.shape_scale[shape_idx]
                 mesh = newton.Mesh.create_box(
                     hx,
@@ -1456,36 +1464,30 @@ class Example:
                 builder.shape_type[shape_idx] = newton.GeoType.MESH
                 builder.shape_source[shape_idx] = mesh
                 builder.shape_scale[shape_idx] = (1.0, 1.0, 1.0)
+            elif builder.shape_type[shape_idx] == newton.GeoType.MESH:
+                self._build_shape_sdf(builder, shape_idx)
 
-            # Apply material properties
+        # ---- Pass 2: fingertip shapes get hydroelastic flag + material ----
+        # Pads (V1 and V4)
+        pad_names = {"left_pad1", "left_pad2", "right_pad1", "right_pad2"}
+        # V4 tongue meshes on follower bodies
+        tongue_names = {"left_follower_geom_1", "right_follower_geom_0"} if self.use_v4 else set()
+        fingertip_names = pad_names | tongue_names
+
+        for shape_idx, lbl in enumerate(builder.shape_label):
+            short = lbl.split("/")[-1] if lbl else ""
+            if short not in fingertip_names:
+                continue
+
             builder.shape_gap[shape_idx] = cfg.gap
             builder.shape_material_mu[shape_idx] = cfg.mu
             builder.shape_material_mu_torsional[shape_idx] = cfg.mu_torsional
             builder.shape_material_mu_rolling[shape_idx] = cfg.mu_rolling
-
             builder.shape_flags[shape_idx] &= ~newton.ShapeFlags.VISIBLE
+
             if use_hydro:
                 builder.shape_material_kh[shape_idx] = self.kh
                 builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
-
-        if self.use_v4:
-            # V4: Enable tongue meshes on follower bodies
-            follower_shape_indices = {
-                i
-                for i, lbl in enumerate(builder.shape_label)
-                if lbl.split("/")[-1] in ("left_follower_geom_1", "right_follower_geom_0")
-            }
-
-            for shape_idx in follower_shape_indices:
-                if builder.shape_type[shape_idx] == newton.GeoType.MESH:
-                    self._build_shape_sdf(builder, shape_idx)
-                    builder.shape_gap[shape_idx] = cfg.gap
-                    builder.shape_material_mu[shape_idx] = cfg.mu
-                    builder.shape_material_mu_torsional[shape_idx] = cfg.mu_torsional
-                    builder.shape_material_mu_rolling[shape_idx] = cfg.mu_rolling
-                    if use_hydro:
-                        builder.shape_material_kh[shape_idx] = self.kh
-                        builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
 
     def _build_shape_sdf(self, builder, shape_idx):
         """Build SDF for a mesh shape, baking scale if needed."""
@@ -2102,7 +2104,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--object-shape",
         type=str,
-        default="capsule",
+        default="box",
         choices=[s.value for s in ObjectShape],
         help="Shape of the grasp object.",
     )
@@ -2120,7 +2122,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--collision-mode",
         type=str,
-        default="newton_default",
+        default="newton_hydroelastic",
         choices=[m.value for m in CollisionMode],
         help="Collision pipeline to use.",
     )
