@@ -232,72 +232,24 @@ def control_pipeline_kernel(
     direct_control[tid, gripper_ctrl_idx] = clamped_ctrl
 
 
-def _patch_solimp(tree: ET.ElementTree) -> None:
-    """Patch equality constraint solimp[0] (dmin) from 0.95 to 0.5 in-place.
-
-    solimp[0] controls impedance at zero constraint violation. The default 0.95
-    causes aggressive enforcement that amplifies small perturbations in the
-    coupled finger linkage, leading to oscillation. Lowering dmin to 0.5 makes
-    the constraint more compliant near zero violation, damping oscillatory modes
-    while preserving grasp accuracy. Must be done pre-parse: equality params are
-    baked during MJCF loading. MuJoCo issue 906.
-    Ref: https://github.com/google-deepmind/mujoco/issues/906#issuecomment-1849032881
-    """
-    for eq_elem in tree.iter("equality"):
-        for child in eq_elem:
-            solimp = child.get("solimp")
-            if solimp:
-                parts = solimp.split()
-                parts[0] = "0.5"
-                child.set("solimp", " ".join(parts))
-
-
 def _patch_v1_mjcf(mjcf_path: str) -> str:
-    """Patch V1 MJCF: apply solimp fix.
-
-    Returns the path to the patched file.
-    """
-    tree = ET.parse(mjcf_path)
-    _patch_solimp(tree)
-    patched_path = mjcf_path.replace(".xml", "_v1_patched.xml")
-    tree.write(patched_path)
-    return patched_path
+    """Patch V1 MJCF (no-op for now, returns original path)."""
+    return mjcf_path
 
 
-def _patch_v4_mjcf(mjcf_path: str, add_coupler_joints: bool = True) -> str:
-    """Patch V4 MJCF to fix known issues vs V3.
+def _patch_v4_mjcf(mjcf_path: str) -> str:
+    """Patch V4 MJCF to fix known issues.
 
-    1. Add missing coupler joints (left_coupler, right_coupler bodies have no
-       joint element in V4, giving 6 DOFs instead of V3's 8).
-    2. Fix base collision geom transform — V4 visual base has
+    1. Fix base collision geom transform — V4 visual base has
        pos/quat but collision base has none, causing misalignment.
-    3. Patch equality constraint solimp[0] (dmin) from 0.95 to 0.5.
-    4. Patch pad geom masses from 1e-6 to 0.00175 kg each (0.0035 per pad
+    2. Patch pad geom masses from 1e-6 to 0.00175 kg each (0.0035 per pad
        body, matching V1).
 
     Returns the path to the patched file.
     """
     tree = ET.parse(mjcf_path)
 
-    # 1. Add missing coupler joints
-    if add_coupler_joints:
-        coupler_names = {
-            "left_coupler": "left_coupler_joint",
-            "right_coupler": "right_coupler_joint",
-        }
-
-        for body in tree.iter("body"):
-            name = body.get("name")
-            if name in coupler_names and body.find("joint") is None:
-                joint_elem = ET.Element("joint")
-                joint_elem.set("name", coupler_names[name])
-                joint_elem.set("class", "coupler")
-                # Insert after <inertial> to match V3 element order
-                inertial = body.find("inertial")
-                idx = list(body).index(inertial) + 1 if inertial is not None else 0
-                body.insert(idx, joint_elem)
-
-    # 2. Fix base collision geom: copy pos/quat from the visual base geom
+    # 1. Fix base collision geom: copy pos/quat from the visual base geom
     for body in tree.iter("body"):
         if body.get("name") != "base":
             continue
@@ -316,10 +268,7 @@ def _patch_v4_mjcf(mjcf_path: str, add_coupler_joints: bool = True) -> str:
                     geom.set("quat", visual_base.get("quat"))
         break
 
-    # 3. Patch solimp
-    _patch_solimp(tree)
-
-    # 4. Patch pad geom masses — V4 pads use mass="1e-6" (unrealistic).
+    # 2. Patch pad geom masses — V4 pads use mass="1e-6" (unrealistic).
     #    Set each pad geom to 0.00175 kg so each pad body totals 0.0035 kg,
     #    matching the V1 menagerie gripper's explicit <inertial mass="0.0035">.
     for body in tree.iter("body"):
@@ -906,7 +855,7 @@ class Example:
         self._disable_forcerange_override = getattr(args, "disable_forcerange_override", False) if args else False
         self._disable_gravcomp = getattr(args, "disable_gravcomp", False) if args else False
         self._disable_armature_scale = getattr(args, "disable_armature_scale", False) if args else False
-        self._add_coupler_joints = not (getattr(args, "no_coupler_joints", False) if args else False)
+        # coupler joints removed — V4 menagerie model used as-is
         self._disable_cuda_graph = getattr(args, "no_cuda_graph", False) if args else False
         self._debug_ctrl = getattr(args, "debug_ctrl", False) if args else False
 
@@ -1218,7 +1167,7 @@ class Example:
         repo_url = "https://github.com/google-deepmind/mujoco_menagerie.git"
         if self.use_v4:
             asset_path = download_git_folder(repo_url, "robotiq_2f85_v4")
-            mjcf_path = _patch_v4_mjcf(f"{asset_path}/2f85.xml", add_coupler_joints=self._add_coupler_joints)
+            mjcf_path = _patch_v4_mjcf(f"{asset_path}/2f85.xml")
         else:
             asset_path = download_git_folder(repo_url, "robotiq_2f85")
             mjcf_path = _patch_v1_mjcf(f"{asset_path}/2f85.xml")
@@ -2142,7 +2091,6 @@ if __name__ == "__main__":
     )
     parser.add_argument("--disable-gravcomp", action="store_true", help="Skip gravity compensation.")
     parser.add_argument("--disable-armature-scale", action="store_true", help="Skip armature scaling.")
-    parser.add_argument("--no-coupler-joints", action="store_true", help="Skip adding coupler joints to V4.")
     parser.add_argument(
         "--no-cuda-graph", action="store_true", help="Disable CUDA graph capture (slower, for debugging)."
     )
