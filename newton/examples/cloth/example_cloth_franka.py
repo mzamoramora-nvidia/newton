@@ -141,7 +141,7 @@ class Example:
         self.add_cloth = True
         self.add_robot = True
         self.sim_substeps = 10
-        self.iterations = 5
+        self.iterations = 10
         self.fps = 60
         self.frame_dt = 1 / self.fps
         self.sim_dt = self.frame_dt / self.sim_substeps
@@ -153,16 +153,16 @@ class Example:
         #   contact (cm scale)
         #       body-cloth contact
         self.cloth_particle_radius = 0.8
-        self.cloth_body_contact_margin = 0.8
+        self.cloth_body_contact_margin = 1.5
         #       self-contact
         self.particle_self_contact_radius = 0.2
         self.particle_self_contact_margin = 0.2
 
         self.soft_contact_ke = 1e4
-        self.soft_contact_kd = 1e-2
+        self.soft_contact_kd = 0.1
 
         self.robot_contact_ke = 5e4
-        self.robot_contact_kd = 1e-3
+        self.robot_contact_kd = 0.01
         self.robot_contact_mu = 1.5
 
         self.self_contact_friction = 0.25
@@ -189,8 +189,8 @@ class Example:
             self.dof_qd_per_world = franka.joint_dof_count
 
         # add a table (cm scale)
-        self.table_hx_cm = 40.0
-        self.table_hy_cm = 40.0
+        self.table_hx_cm = 60.0
+        self.table_hy_cm = 60.0
         self.table_hz_cm = 10.0
         self.table_pos_cm = wp.vec3(0.0, -50.0, 10.0)
         self.table_shape_idx = self.scene.shape_count
@@ -321,7 +321,7 @@ class Example:
                 particle_vertex_contact_buffer_size=16,
                 particle_edge_contact_buffer_size=20,
                 particle_collision_detection_interval=-1,
-                rigid_contact_k_start=self.soft_contact_ke,
+                rigid_contact_k_start=self.robot_contact_ke,
             )
 
         self.viewer.set_model(self.model)
@@ -384,11 +384,23 @@ class Example:
         self.Jacobian_one_hots = [onehot(i, out_dim) for i in range(out_dim)]
 
         @wp.kernel
-        def compute_body_out(body_qd: wp.array[wp.spatial_vector], body_out: wp.array[float]):
-            # TODO verify transform twist
-            mv = transform_twist(wp.static(self.endeffector_offset), body_qd[wp.static(self.endeffector_id)])
-            for i in range(6):
-                body_out[i] = mv[i]
+        def compute_body_out(
+            body_q: wp.array[wp.transform], body_qd: wp.array[wp.spatial_vector], body_out: wp.array[float]
+        ):
+            q = body_q[wp.static(self.endeffector_id)]
+            qd = body_qd[wp.static(self.endeffector_id)]
+            v = wp.spatial_top(qd)
+            w = wp.spatial_bottom(qd)
+            # Rotate the body-local end-effector offset to world frame
+            ee_local = wp.transform_get_translation(wp.static(self.endeffector_offset))
+            r = wp.transform_vector(q, ee_local)
+            v_ee = v + wp.cross(w, r)
+            body_out[0] = v_ee[0]
+            body_out[1] = v_ee[1]
+            body_out[2] = v_ee[2]
+            body_out[3] = w[0]
+            body_out[4] = w[1]
+            body_out[5] = w[2]
 
         self.compute_body_out_kernel = compute_body_out
         self.temp_state_for_jacobian = self.model.state(requires_grad=True)
@@ -414,7 +426,7 @@ class Example:
         builder.add_urdf(
             str(asset_path / "urdf" / "fr3_franka_hand.urdf"),
             xform=wp.transform(
-                (-50.0, -50.0, -10.0),
+                (-35.0, -15.0, 20.0),
                 wp.quat_identity(),
             ),
             floating=False,
@@ -432,7 +444,7 @@ class Example:
             [
                 # translation_duration, gripper transform (3D position [cm], 4D quaternion), gripper activation
                 # top left
-                [2.5, 31.0, -60.0, 23.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                [4.5, 31.0, -60.0, 19.5, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
                 [2, 31.0, -60.0, 23.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
                 [2, 26.0, -60.0, 26.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
                 [2, 12.0, -60.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
@@ -477,13 +489,20 @@ class Example:
 
         self.robot_key_poses_time = np.cumsum(self.robot_key_poses[:, 0])
         self.endeffector_id = builder.body_count - 3
+        # Transform from the end-effector body (link8) to the gripper tip.
+        # The translation (22 cm along z) reaches the fingertip from link8.
+        # The rotation accounts for the collapsed fr3_hand_joint fixed joint,
+        # which introduces a -pi/4 yaw between link8 and the hand frame
+        # (see fr3_franka_hand.urdf).  Without this rotation the IK drives
+        # toward link8's frame and the gripper ends up with a constant
+        # 45-degree yaw offset from the desired orientation.
         self.endeffector_offset = wp.transform(
             [
                 0.0,
                 0.0,
                 22.0,
             ],
-            wp.quat_identity(),
+            wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), -np.pi / 4.0 + np.pi / 2.0),
         )
 
     def compute_body_jacobian(
@@ -508,7 +527,10 @@ class Example:
         with tape:
             eval_fk(model, joint_q, joint_qd, self.temp_state_for_jacobian)
             wp.launch(
-                self.compute_body_out_kernel, 1, inputs=[self.temp_state_for_jacobian.body_qd], outputs=[self.body_out]
+                self.compute_body_out_kernel,
+                1,
+                inputs=[self.temp_state_for_jacobian.body_q, self.temp_state_for_jacobian.body_qd],
+                outputs=[self.body_out],
             )
 
         for i in range(out_dim):
@@ -551,7 +573,13 @@ class Example:
         )
         J = self.J_flat.numpy().reshape(-1, self.model.joint_dof_count)
         delta_target = self.ee_delta.numpy()[0]
-        J_inv = np.linalg.pinv(J)
+        # Scale angular error to match position error magnitude so the
+        # pseudoinverse gives rotation tracking comparable priority.
+        delta_target[3:6] *= 20.0
+        # Damped least-squares pseudoinverse to avoid jitter near singularities
+        damping = 1e-4
+        JJT = J @ J.T
+        J_inv = J.T @ np.linalg.inv(JJT + damping * np.eye(JJT.shape[0], dtype=np.float32))
 
         I = np.eye(J.shape[1], dtype=np.float32)
         N = I - J_inv @ J
