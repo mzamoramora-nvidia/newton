@@ -28,7 +28,7 @@ import newton.examples
 import newton.ik as ik
 import newton.usd
 import newton.utils
-from newton import ModelBuilder
+from newton import ModelBuilder, State
 from newton.solvers import SolverFeatherstone, SolverVBD
 
 
@@ -387,8 +387,6 @@ class Example:
         )
         self.targets = self.robot_key_poses[:, 1:]
         self.transition_duration = self.robot_key_poses[:, 0]
-        self.target = self.targets[0]
-
         self.robot_key_poses_time = np.cumsum(self.robot_key_poses[:, 0])
         self.endeffector_id = builder.body_count - 3
         # Offset from the end-effector body (link8) to the gripper tip.
@@ -401,7 +399,7 @@ class Example:
         self.ee_link_offset = wp.vec3(0.0, 0.0, 22.0)
         self.ee_link_rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), -np.pi / 4.0 + np.pi / 2.0)
 
-    def generate_control_joint_qd(self, state_in):
+    def generate_control_joint_qd(self, state_in: State):
         # After the key poses sequence ends, hold position with zero velocity
         if self.sim_time >= self.robot_key_poses_time[-1]:
             self.target_joint_qd.zero_()
