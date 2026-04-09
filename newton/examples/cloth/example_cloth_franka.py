@@ -101,8 +101,8 @@ class Example:
             self.dof_qd_per_world = franka.joint_dof_count
 
         # add a table (cm scale)
-        self.table_hx_cm = 60.0
-        self.table_hy_cm = 60.0
+        self.table_hx_cm = 40.0
+        self.table_hy_cm = 40.0
         self.table_hz_cm = 10.0
         self.table_pos_cm = wp.vec3(0.0, -50.0, 10.0)
         self.table_shape_idx = self.scene.shape_count
@@ -327,7 +327,7 @@ class Example:
         builder.add_urdf(
             str(asset_path / "urdf" / "fr3_franka_hand.urdf"),
             xform=wp.transform(
-                (-35.0, -15.0, 20.0),
+                (-50.0, -50.0, 0.0),
                 wp.quat_identity(),
             ),
             floating=False,
@@ -344,43 +344,54 @@ class Example:
         self.robot_key_poses = np.array(
             [
                 # translation_duration, gripper transform (3D position [cm], 4D quaternion), gripper activation
-                # top left
-                [4.5, 31.0, -60.0, 19.5, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                [1, 31.0, -60.0, 20.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
-                [2, 26.0, -60.0, 26.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
-                [2, 12.0, -60.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
-                [3, -6.0, -60.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
-                [1, -6.0, -60.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                # bottom left
-                [2, 15.0, -33.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                [3, 15.0, -33.0, 21.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                [3, 15.0, -33.0, 21.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
-                [2, 15.0, -33.0, 28.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
-                [3, -2.0, -33.0, 28.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
-                [1, -2.0, -33.0, 28.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                [1, -2.0, -33.0, 30.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                # top left (tilted gripper for +x reachability)
+                [4.5, 31.0, -60.0, 23.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
+                [2, 31.0, -60.0, 20.25, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
+                [1, 31.0, -60.0, 20.25, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
+                [2, 26.0, -60.0, 26.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
+                [2, 12.0, -60.0, 31.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
+                [3, -6.0, -60.0, 31.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
+                [1, -6.0, -60.0, 31.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
+                [1, -6.0, -60.0, 35.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
+                # bottom left (tilted gripper for +x reachability)
+                [2, 15.0, -33.0, 31.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
+                [3, 15.0, -33.0, 20.25, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
+                [2, 15.0, -33.0, 20.25, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
+                [1, 15.0, -33.0, 20.25, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
+                [2, 15.0, -33.0, 28.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
+                [3, -2.0, -33.0, 28.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
+                [1, -2.0, -33.0, 31.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
+                [1, -2.0, -33.0, 31.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
+                [1, -2.0, -33.0, 35.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
                 # top right
                 [2, -28.0, -60.0, 28.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                [2, -28.0, -60.0, 20.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                [2, -28.0, -60.0, 20.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
+                [2, -28.0, -60.0, 20.25, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                [2, -28.0, -60.0, 20.25, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                [1, -28.0, -60.0, 20.25, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
                 [2, -18.0, -60.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
                 [3, 5.0, -60.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
                 [1, 5.0, -60.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                [1, 5.0, -60.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
                 # bottom right
-                [3, -18.0, -30.0, 20.5, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                [3, -18.0, -30.0, 20.5, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
+                [3, -18.0, -30.0, 20.25, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                [2, -18.0, -30.0, 20.25, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                [1, -18.0, -30.0, 20.25, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
                 [2, -3.0, -30.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
                 [3, -3.0, -30.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
-                [2, -3.0, -30.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                [1, -3.0, -30.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                [1, -3.0, -30.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
                 # bottom
                 [2, 0.0, -20.0, 30.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                [2, 0.0, -20.0, 19.5, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                [2, 0.0, -20.0, 19.5, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
+                [2, 0.0, -20.0, 20.25, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                [2, 0.0, -20.0, 20.25, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                [1, 0.0, -20.0, 20.25, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
                 [2, 0.0, -20.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
                 [1, 0.0, -30.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
                 [1.5, 0.0, -30.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
                 [1.5, 0.0, -40.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
-                [1.5, 0.0, -40.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                [1, 0.0, -40.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
+                [1.5, 0.0, -40.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                [1, 0.0, -40.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
                 [2, -28.0, -60.0, 28.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
             ],
             dtype=np.float32,
@@ -397,7 +408,7 @@ class Example:
         # toward link8's frame and the gripper ends up with a constant
         # 45-degree yaw offset from the desired orientation.
         self.ee_link_offset = wp.vec3(0.0, 0.0, 22.0)
-        self.ee_link_rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), -np.pi / 4.0 + np.pi / 2.0)
+        self.ee_link_rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), -np.pi / 4.0)
 
     def generate_control_joint_qd(self, state_in: State):
         # After the key poses sequence ends, hold position with zero velocity
@@ -406,9 +417,18 @@ class Example:
             return
 
         current_interval = np.searchsorted(self.robot_key_poses_time, self.sim_time)
-        target = self.targets[current_interval]
 
-        # Update IK targets from current key pose
+        # Interpolate linearly between previous and current keyframe so the
+        # end-effector follows a straight Cartesian path between waypoints.
+        t_start = self.robot_key_poses_time[current_interval - 1] if current_interval > 0 else 0.0
+        t_end = self.robot_key_poses_time[current_interval]
+        alpha = float(np.clip((self.sim_time - t_start) / (t_end - t_start), 0.0, 1.0))
+
+        target_cur = self.targets[current_interval]
+        target_prev = self.targets[current_interval - 1] if current_interval > 0 else target_cur
+        target = (1.0 - alpha) * target_prev + alpha * target_cur
+
+        # Update IK targets from interpolated pose
         self.pos_obj.set_target_position(0, wp.vec3(float(target[0]), float(target[1]), float(target[2])))
         self.rot_obj.set_target_rotation(
             0, wp.vec4(float(target[3]), float(target[4]), float(target[5]), float(target[6]))
@@ -543,7 +563,7 @@ class Example:
 if __name__ == "__main__":
     # Parse arguments and initialize viewer
     parser = newton.examples.create_parser()
-    parser.set_defaults(num_frames=3850)
+    parser.set_defaults(num_frames=4400)
     viewer, args = newton.examples.init(parser)
 
     # Create example and run
