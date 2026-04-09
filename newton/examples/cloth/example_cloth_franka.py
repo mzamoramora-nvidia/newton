@@ -101,8 +101,8 @@ class Example:
             self.dof_qd_per_world = franka.joint_dof_count
 
         # add a table (cm scale)
-        self.table_hx_cm = 40.0
-        self.table_hy_cm = 40.0
+        self.table_hx_cm = 60.0
+        self.table_hy_cm = 60.0
         self.table_hz_cm = 10.0
         self.table_pos_cm = wp.vec3(0.0, -50.0, 10.0)
         self.table_shape_idx = self.scene.shape_count
