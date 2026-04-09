@@ -101,8 +101,8 @@ class Example:
             self.dof_qd_per_world = franka.joint_dof_count
 
         # add a table (cm scale)
-        self.table_hx_cm = 60.0
-        self.table_hy_cm = 60.0
+        self.table_hx_cm = 40.0
+        self.table_hy_cm = 40.0
         self.table_hz_cm = 10.0
         self.table_pos_cm = wp.vec3(0.0, -50.0, 10.0)
         self.table_shape_idx = self.scene.shape_count
@@ -380,18 +380,19 @@ class Example:
                 [3, -3.0, -30.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
                 [1, -3.0, -30.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
                 [1, -3.0, -30.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                # bottom
-                [2, 0.0, -20.0, 30.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                [2, 0.0, -20.0, 20.25, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                [2, 0.0, -20.0, 20.25, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                [1, 0.0, -20.0, 20.25, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
-                [2, 0.0, -20.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
-                [1, 0.0, -30.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
-                [1.5, 0.0, -30.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
-                [1.5, 0.0, -40.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
-                [1, 0.0, -40.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
-                [1.5, 0.0, -40.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                [1, 0.0, -40.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                # bottom (tilted gripper toward +y for reachability)
+                [2, 0.0, -20.0, 30.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_open_activation_val],
+                [2, 0.0, -20.0, 20.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_open_activation_val],
+                [2, 0.0, -20.0, 20.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_open_activation_val],
+                [1, 0.0, -20.0, 20.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
+                [2, 0.0, -20.0, 20.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
+                [2, 0.0, -20.0, 35.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
+                [1, 0.0, -30.0, 35.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
+                [1.5, 0.0, -30.0, 35.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
+                [1.5, 0.0, -40.0, 35.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
+                [1, 0.0, -40.0, 31.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
+                [1.5, 0.0, -40.0, 31.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_open_activation_val],
+                [1, 0.0, -40.0, 35.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_open_activation_val],
                 [2, -28.0, -60.0, 28.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
             ],
             dtype=np.float32,
