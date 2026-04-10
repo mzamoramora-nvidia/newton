@@ -374,7 +374,7 @@ class Example:
             [
                 # translation_duration, gripper transform (3D position [cm], 4D quaternion), gripper activation
                 # top left (tilted gripper for +x reachability)
-                [6.5, 31.0, -60.0, 23.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
+                [4, 31.0, -60.0, 23.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
                 [2, 31.0, -60.0, 21.25, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
                 [2, 31.0, -60.0, 21.25, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
                 [2, 26.0, -60.0, 26.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
@@ -389,8 +389,8 @@ class Example:
                 [2, 15.0, -33.0, 21.25, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
                 [2, 15.0, -33.0, 28.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
                 [3, -2.0, -33.0, 28.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
-                [1, -2.0, -33.0, 31.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
-                [1, -2.0, -33.0, 31.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
+                [1, -2.0, -33.0, 28.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
+                # [1, -2.0, -33.0, 31.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
                 [1, -2.0, -33.0, 35.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
                 # top right
                 [2, -28.0, -60.0, 28.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
@@ -402,7 +402,8 @@ class Example:
                 [1, 5.0, -60.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
                 [1, 5.0, -60.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
                 # bottom right
-                [3, -18.0, -30.0, 21.25, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                [3, -18.0, -30.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                [2, -18.0, -30.0, 21.25, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
                 [2, -18.0, -30.0, 21.25, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
                 [2, -18.0, -30.0, 21.25, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
                 [2, -3.0, -30.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
@@ -499,10 +500,14 @@ class Example:
         # Solve IK for target joint positions
         self.ik_solver.step(self.ik_joint_q, self.ik_joint_q, iterations=24)
 
-        # Compute joint velocities from position difference
+        # Compute joint velocities from position difference.
+        # Use higher gain when the gripper is open (not holding cloth)
+        # so the arm moves faster between grasp sequences.
         current_q = state_in.joint_q.numpy()
         target_q = ik_flat.numpy()
-        delta_q = target_q - current_q
+        is_open = target[-1] > 0.5
+        joint_gain = 10.0 if is_open else 1.0
+        delta_q = joint_gain * (target_q - current_q)
 
         # Apply gripper finger control. Activation values (0-1) are scaled to
         # the finger joint range (0-4 cm at scale=100).
