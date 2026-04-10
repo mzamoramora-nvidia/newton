@@ -53,7 +53,7 @@ class Example:
         self.add_cloth = True
         self.add_robot = True
         self.sim_substeps = 10
-        self.iterations = 10
+        self.iterations = 5
         self.fps = 60
         self.frame_dt = 1 / self.fps
         self.sim_dt = self.frame_dt / self.sim_substeps
@@ -564,7 +564,7 @@ class Example:
 if __name__ == "__main__":
     # Parse arguments and initialize viewer
     parser = newton.examples.create_parser()
-    parser.set_defaults(num_frames=4400)
+    parser.set_defaults(num_frames=4800)
     viewer, args = newton.examples.init(parser)
 
     # Create example and run
