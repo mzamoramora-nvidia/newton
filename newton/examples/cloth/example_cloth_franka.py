@@ -54,6 +54,7 @@ class Example:
         self.add_robot = True
         self.show_trajectory = getattr(args, "show_trajectory", False)
         self.show_targets = getattr(args, "show_targets", False)
+        self.show_world_axes = getattr(args, "show_world_axes", False)
         self.pause_on_keyframe = getattr(args, "pause_on_keyframe", False)
         self._current_keyframe = 0
         self._keyframe_elapsed = 0.0
@@ -262,6 +263,11 @@ class Example:
             np.tile([1.0, 0.2, 0.2], (max_frames, 1)).astype(np.float32), dtype=wp.vec3
         )
         self.trajectory_count = 0
+        # World coordinate axes (RGB = XYZ, in meters)
+        L = 0.3
+        self.axis_starts = wp.array([wp.vec3(0, 0, 0)] * 3, dtype=wp.vec3)
+        self.axis_ends = wp.array([wp.vec3(L, 0, 0), wp.vec3(0, L, 0), wp.vec3(0, 0, L)], dtype=wp.vec3)
+        self.axis_colors = wp.array([wp.vec3(1, 0, 0), wp.vec3(0, 1, 0), wp.vec3(0, 0, 1)], dtype=wp.vec3)
 
         # Visualization state for meter-scale rendering
         self.viz_state = self.model.state()
@@ -376,53 +382,53 @@ class Example:
                 # top left (tilted gripper for +x reachability)
                 [4, 31.0, -60.0, 23.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
                 [2, 31.0, -60.0, 21.25, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
-                [2, 31.0, -60.0, 21.25, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
-                [2, 26.0, -60.0, 26.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
-                [2, 12.0, -60.0, 31.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
-                [3, -6.0, -60.0, 31.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
+                [1, 31.0, -60.0, 21.25, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
+                # [2, 26.0, -60.0, 26.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
+                # [2, 12.0, -60.0, 31.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
+                [2, -6.0, -60.0, 31.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
                 [1, -6.0, -60.0, 31.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
-                [1, -6.0, -60.0, 35.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
+                # [1, -6.0, -60.0, 35.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
                 # bottom left (tilted gripper for +x reachability)
-                [2, 15.0, -33.0, 31.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
-                [3, 15.0, -33.0, 21.25, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
-                [2, 15.0, -33.0, 21.25, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
-                [2, 15.0, -33.0, 21.25, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
-                [2, 15.0, -33.0, 28.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
-                [3, -2.0, -33.0, 28.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
-                [1, -2.0, -33.0, 28.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
+                [2, 17.5, -33.0, 31.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
+                # [3, 15.0, -33.0, 21.25, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
+                [2, 17.5, -33.0, 21.25, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
+                [2, 17.5, -33.0, 21.25, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
+                # [2, 15.0, -33.0, 28.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
+                [3, -5.0, -33.0, 28.0, 0.9239, 0, 0.3827, 0, clamp_close_activation_val],
+                [1, -5.0, -33.0, 28.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
                 # [1, -2.0, -33.0, 31.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
-                [1, -2.0, -33.0, 35.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
+                # [1, -2.0, -33.0, 35.0, 0.9239, 0, 0.3827, 0, clamp_open_activation_val],
                 # top right
                 [2, -28.0, -60.0, 28.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                [2, -28.0, -60.0, 21.25, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                # [2, -28.0, -60.0, 21.25, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
                 [2, -28.0, -60.0, 21.25, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
                 [2, -28.0, -60.0, 21.25, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
-                [2, -18.0, -60.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
+                # [2, -18.0, -60.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
                 [3, 5.0, -60.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
                 [1, 5.0, -60.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                [1, 5.0, -60.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                # [1, 5.0, -60.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
                 # bottom right
                 [3, -18.0, -30.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
                 [2, -18.0, -30.0, 21.25, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                [2, -18.0, -30.0, 21.25, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                # [2, -18.0, -30.0, 21.25, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
                 [2, -18.0, -30.0, 21.25, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
-                [2, -3.0, -30.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
+                # [2, -3.0, -30.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
                 [3, -3.0, -30.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_close_activation_val],
                 [1, -3.0, -30.0, 31.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
-                [1, -3.0, -30.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
+                # [1, -3.0, -30.0, 35.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
                 # bottom (tilted gripper toward +y for reachability)
-                [2, 0.0, -20.0, 30.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_open_activation_val],
-                [2, 0.0, -20.0, 21.25, 0.6533, 0.6533, 0.2706, -0.2706, clamp_open_activation_val],
-                [2, 0.0, -20.0, 21.25, 0.6533, 0.6533, 0.2706, -0.2706, clamp_open_activation_val],
-                [1, 0.0, -20.0, 21.25, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
-                [2, 0.0, -20.0, 21.25, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
-                [2, 0.0, -20.0, 35.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
-                [1, 0.0, -30.0, 35.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
-                [1.5, 0.0, -30.0, 35.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
-                [1.5, 0.0, -40.0, 35.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
-                [1, 0.0, -40.0, 31.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
-                [1.5, 0.0, -40.0, 31.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_open_activation_val],
-                [1, 0.0, -40.0, 35.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_open_activation_val],
+                [2, 0.0, -22.5, 30.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_open_activation_val],
+                [2, 0.0, -22.5, 21.25, 0.6533, 0.6533, 0.2706, -0.2706, clamp_open_activation_val],
+                # [2, 0.0, -20.0, 21.25, 0.6533, 0.6533, 0.2706, -0.2706, clamp_open_activation_val],
+                [1, 0.0, -22.5, 21.25, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
+                # [2, 0.0, -20.0, 21.25, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
+                # [2, 0.0, -20.0, 35.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
+                # [1, 0.0, -30.0, 35.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
+                # [1.5, 0.0, -30.0, 35.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
+                # [1.5, 0.0, -40.0, 35.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
+                [2, 0.0, -60.0, 28.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_close_activation_val],
+                [1.5, 0.0, -60.0, 28.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_open_activation_val],
+                # [1, 0.0, -40.0, 35.0, 0.6533, 0.6533, 0.2706, -0.2706, clamp_open_activation_val],
                 [2, -28.0, -60.0, 28.0, 1, 0.0, 0.0, 0.0, clamp_open_activation_val],
             ],
             dtype=np.float32,
@@ -628,6 +634,8 @@ class Example:
                 radii=self.viz_target_radii,
                 colors=self.viz_target_colors,
             )
+        if self.show_world_axes:
+            self.viewer.log_lines("/world_axes", self.axis_starts, self.axis_ends, colors=self.axis_colors, width=0.005)
         self.viewer.end_frame()
 
         # Restore simulation shape data
@@ -635,6 +643,7 @@ class Example:
         self.model.shape_scale = self.sim_shape_scale
 
     def render_ui(self, imgui):
+        _changed, self.show_world_axes = imgui.checkbox("Show World Axes", self.show_world_axes)
         _changed, self.show_trajectory = imgui.checkbox("Show Trajectory", self.show_trajectory)
         _changed, self.show_targets = imgui.checkbox("Show Targets", self.show_targets)
         _changed, self.pause_on_keyframe = imgui.checkbox("Pause on Keyframe", self.pause_on_keyframe)
