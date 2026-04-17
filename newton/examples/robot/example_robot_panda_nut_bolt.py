@@ -13,6 +13,7 @@
 #
 ###########################################################################
 
+import argparse
 import copy
 import enum
 from dataclasses import replace
@@ -318,6 +319,8 @@ class Example:
 
         self.world_count = args.world_count
         self.test_mode = args.test
+        self.finger_kh = args.finger_kh
+        self.nut_kh = args.nut_kh
         self.viewer = viewer
 
         # Scene layout
@@ -356,7 +359,7 @@ class Example:
         rem = self.grasp_yaw_offset % (np.pi / 3)  # remainder in [0, 60 deg)
         theta_eff = rem if rem <= np.pi / 6 else np.pi / 3 - rem
         nut_grasp_width = nut_across_flats / np.cos(theta_eff)
-        grasp_margin = 0.008  # 8mm extra closure past first contact
+        grasp_margin = args.grasp_margin  # extra closure past first contact [m]
         self.gripper_closed_pos = max(0.0, nut_grasp_width / 2.0 - grasp_margin)
         gripper_ke = 100.0  # from joint_target_ke for finger joints
         expected_force_per_finger = gripper_ke * grasp_margin
@@ -411,13 +414,14 @@ class Example:
         self.model_single = copy.deepcopy(robot_builder).finalize()
 
         # Add bolt (fixed to ground) and nut (floating body).
-        # Bolt has very low mu so the nut can thread onto it.
-        # Nut has moderate mu so the gripper can hold it (effective nut-bolt
-        # friction = sqrt(0.5 * 0.01) = 0.07, still low enough for threading;
-        # effective nut-finger friction = sqrt(0.5 * 1.0) = 0.71, enough to grip).
+        # Both bolt and nut use the MuJoCo minimum mu (1e-5, MJ_MINMU floor) so
+        # the nut threads onto the bolt with the least possible friction.
+        # MuJoCo combines pair friction as max(mu_a, mu_b), so:
+        #   effective nut-bolt friction  = max(1e-5, 1e-5) = 1e-5 (smooth threading)
+        #   effective nut-finger friction = max(1e-5, 1.0) = 1.0  (strong grip)
         bolt_cfg = newton.ModelBuilder.ShapeConfig(
             margin=0.0,
-            mu=0.01,
+            mu=1e-5,
             ke=1e7,
             kd=1e4,
             gap=0.005,
@@ -426,7 +430,7 @@ class Example:
             mu_rolling=0.0,
             is_hydroelastic=True,
         )
-        nut_cfg = replace(bolt_cfg, mu=0.5)
+        nut_cfg = replace(bolt_cfg, kh=self.nut_kh)
 
         bolt_xform = wp.transform(self.bolt_base_pos, wp.quat_identity())
         add_mesh_object(
@@ -442,7 +446,7 @@ class Example:
         self.nut_body_index = robot_builder.body_count
         nut_xform = wp.transform(
             self.nut_start_pos,
-            wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), np.pi / 8),
+            # wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), np.pi / 8),
         )
         add_mesh_object(
             robot_builder,
@@ -457,7 +461,17 @@ class Example:
         # Build multi-world scene
         scene = newton.ModelBuilder()
         scene.replicate(robot_builder, self.world_count)
-        scene.add_ground_plane()
+        ground_shape_idx = scene.add_ground_plane()
+
+        # Filter out collisions between the robot base and the ground plane.
+        # Robot sits on the table above ground; ground contacts are spurious.
+        base_link_suffixes = ("/fr3_link0", "/fr3_link1")
+        for shape_idx, body_idx in enumerate(scene.shape_body):
+            if body_idx < 0:
+                continue
+            label = scene.body_label[body_idx]
+            if label.endswith(base_link_suffixes):
+                scene.add_shape_collision_filter_pair(shape_idx, ground_shape_idx)
 
         self.model = scene.finalize()
         self.num_bodies_per_world = self.model.body_count // self.world_count
@@ -475,6 +489,8 @@ class Example:
         sdf_hydroelastic_config = HydroelasticSDF.Config(
             output_contact_surface=hasattr(viewer, "renderer"),
             buffer_mult_iso=2,
+            anchor_contact=args.anchor_contact,
+            moment_matching=args.moment_matching,
         )
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
@@ -544,6 +560,15 @@ class Example:
         self._ee_z_at_lift_end = np.full(self.world_count, np.nan)
         self._slip = np.full(self.world_count, np.nan)  # computed after lift [m]
 
+        # Per-state tracking (for per-state report in test_final)
+        n_states = len(TaskType)
+        self._state_force_max = np.zeros((self.world_count, n_states))
+        self._state_friction_max = np.zeros((self.world_count, n_states))
+        self._state_nut_z_start = np.full((self.world_count, n_states), np.nan)
+        self._state_nut_z_end = np.full((self.world_count, n_states), np.nan)
+        self._state_ee_z_start = np.full((self.world_count, n_states), np.nan)
+        self._state_ee_z_end = np.full((self.world_count, n_states), np.nan)
+
         if hasattr(self.viewer, "renderer"):
             self.viewer.set_camera(wp.vec3(0.5, 0.0, 0.5), -15, -140)
             self.viewer.set_world_offsets(wp.vec3(1.5, 1.5, 0.0))
@@ -557,7 +582,7 @@ class Example:
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
 
         shape_cfg = newton.ModelBuilder.ShapeConfig(
-            kh=1e11,
+            kh=self.finger_kh,
             gap=0.01,
             mu_torsional=0.0,
             mu_rolling=0.0,
@@ -665,6 +690,7 @@ class Example:
             mesh=table_mesh,
             xform=wp.transform(self.table_pos, wp.quat_identity()),
             cfg=shape_cfg_meshes,
+            label="table",
         )
 
         return builder
@@ -873,8 +899,10 @@ class Example:
         )
         if self.show_debug_frames:
             self._log_debug_frames()
+            self._log_test_zone()
         else:
             self.viewer.log_lines("/debug_frames", None, None, None)
+            self.viewer.log_lines("/test_zone", None, None, None)
         self.viewer.end_frame()
 
     def _log_debug_frames(self):
@@ -936,6 +964,51 @@ class Example:
             wp.array(colors, dtype=wp.vec3),
         )
 
+    def _log_test_zone(self):
+        """Draw two square outlines at the min and max Z levels that would pass the
+        'nut reached the bottom of the bolt' test, centered on the bolt XY per world."""
+        bolt_center_z = float(self.bolt_frame_pos[2])
+        z_min = bolt_center_z - 0.010
+        z_max = bolt_center_z + 0.010
+        half = 0.03  # 60mm square side
+        cx = float(self.bolt_frame_pos[0])
+        cy = float(self.bolt_frame_pos[1])
+        green = wp.vec3(0.0, 1.0, 0.0)  # pass-zone color
+
+        offsets = self.viewer.world_offsets.numpy() if self.viewer.world_offsets is not None else None
+
+        starts = []
+        ends = []
+        colors = []
+
+        def add_square(z, off):
+            corners = [
+                wp.vec3(cx - half, cy - half, z) + off,
+                wp.vec3(cx + half, cy - half, z) + off,
+                wp.vec3(cx + half, cy + half, z) + off,
+                wp.vec3(cx - half, cy + half, z) + off,
+            ]
+            for i in range(4):
+                starts.append(corners[i])
+                ends.append(corners[(i + 1) % 4])
+                colors.append(green)
+
+        for w in range(self.world_count):
+            off = (
+                wp.vec3(float(offsets[w][0]), float(offsets[w][1]), float(offsets[w][2]))
+                if offsets is not None
+                else wp.vec3()
+            )
+            add_square(z_min, off)
+            add_square(z_max, off)
+
+        self.viewer.log_lines(
+            "/test_zone",
+            wp.array(starts, dtype=wp.vec3),
+            wp.array(ends, dtype=wp.vec3),
+            wp.array(colors, dtype=wp.vec3),
+        )
+
     def _update_gui_state(self):
         """Read GPU state for the selected world (called periodically from step)."""
         w = self._gui_selected_world
@@ -988,7 +1061,7 @@ class Example:
             for c in range(min(n_cols, 2)):
                 self._gui_finger_forces[c] = float(np.linalg.norm(fm[w, c]))
 
-        # Slippage: snapshot Z positions at LIFT start and MOVE_TO_BOLT start
+        # Slippage + per-state tracking: snapshot Z positions at state entry/exit
         tasks_np = self.task_idx.numpy()
         schedule_np = self.task_schedule.numpy()
         body_q = self.state_0.body_q.numpy()
@@ -999,6 +1072,16 @@ class Example:
             nut_body_id = w * self.num_bodies_per_world + self.nut_body_index
             ee_z = float(body_q[ee_body_id][2])
             nut_z = float(body_q[nut_body_id][2])
+
+            # Per-state tracking: record start Z on first observation, update end Z
+            # and max force/friction while in this state.
+            if np.isnan(self._state_nut_z_start[w, task_type]):
+                self._state_nut_z_start[w, task_type] = nut_z
+                self._state_ee_z_start[w, task_type] = ee_z
+            self._state_nut_z_end[w, task_type] = nut_z
+            self._state_ee_z_end[w, task_type] = ee_z
+            self._state_force_max[w, task_type] = max(self._state_force_max[w, task_type], self._cur_force[w])
+            self._state_friction_max[w, task_type] = max(self._state_friction_max[w, task_type], self._cur_friction[w])
 
             # Record at LIFT start (first frame we see LIFT)
             if task_type == TaskType.LIFT and np.isnan(self._nut_z_at_lift_start[w]):
@@ -1086,6 +1169,23 @@ class Example:
         # Print stats for all worlds first (before assertions)
         print("\nPer-world report:")
         errors = []
+        # Tolerances
+        xy_tol = 0.02  # 20mm
+        # "Nut at the bottom" reference: from nut_bolt_hydro pre-fix data, when
+        # the nut threads fully down the bolt it ends up with its body center
+        # approximately at the bolt body center (within a few mm). Require our
+        # nut's body center to be within +/-10mm of the bolt center to count
+        # as "reached the bottom".
+        bolt_center_z = float(self.bolt_frame_pos[2])
+        nut_at_bottom_z_ref = bolt_center_z
+        nut_at_bottom_z_min = nut_at_bottom_z_ref - 0.010
+        nut_at_bottom_z_max = nut_at_bottom_z_ref + 0.010
+        print(
+            f"  bolt_center_z={bolt_center_z:.4f}  "
+            f"nut_at_bottom_z_ref={nut_at_bottom_z_ref:.4f}  "
+            f"valid range=[{nut_at_bottom_z_min:.4f}, {nut_at_bottom_z_max:.4f}]"
+        )
+
         for world_id in range(self.world_count):
             nut_body_id = world_id * self.num_bodies_per_world + self.nut_body_index
             nut_pos = body_q[nut_body_id][:3]
@@ -1101,10 +1201,16 @@ class Example:
                 nut_lift = self._nut_z_at_lift_end[world_id] - self._nut_z_at_lift_start[world_id]
                 lift_str = f"  lift={nut_lift * 1000:.1f}mm"
 
+            # Nut Z after release (when the robot let go) vs final Z
+            z_after_release = self._state_nut_z_end[world_id, TaskType.RELEASE.value]
+            descent = z_after_release - nut_pos[2] if not np.isnan(z_after_release) else np.nan
+            descent_str = f"{descent * 1000:+.2f}mm" if not np.isnan(descent) else "n/a"
+
             print(
                 f"  World {world_id}: "
                 f"nut=({nut_pos[0]:.4f}, {nut_pos[1]:.4f}, {nut_pos[2]:.4f})  "
                 f"xy_err={xy_error * 1000:.1f}mm  "
+                f"descent={descent_str}  "
                 f"force_max={f_max:.3f}N  friction_max={fr_max:.3f}N  "
                 f"slip={slip_str}{lift_str}"
             )
@@ -1112,12 +1218,46 @@ class Example:
             # Collect errors instead of asserting immediately
             if not np.all(np.isfinite(nut_pos)):
                 errors.append(f"World {world_id}: Nut has non-finite position {nut_pos}")
-            elif xy_error >= 0.02:
-                errors.append(f"World {world_id}: Nut XY too far from bolt. Error={xy_error:.4f}m (max 0.02m)")
-            elif nut_pos[2] <= table_top_z:
+                continue
+            # Phase 1: nut XY aligned with bolt
+            if xy_error >= xy_tol:
+                errors.append(f"World {world_id}: XY placement error {xy_error * 1000:.1f}mm > {xy_tol * 1000:.0f}mm")
+            # Phase 2: nut must be above the table (didn't fall through)
+            if nut_pos[2] <= table_top_z:
                 errors.append(f"World {world_id}: Nut below table. z={nut_pos[2]:.4f}")
-            elif nut_pos[2] >= table_top_z + 0.06:
-                errors.append(f"World {world_id}: Nut too high. z={nut_pos[2]:.4f}")
+            # Phase 3: nut must reach the bottom of the bolt (threaded down).
+            # The target Z band is ±10mm around the nut_bolt_hydro steady-state
+            # reference of bolt_center + 33.3mm.
+            if not (nut_at_bottom_z_min < nut_pos[2] < nut_at_bottom_z_max):
+                errors.append(
+                    f"World {world_id}: Nut did not reach the bottom of the bolt. "
+                    f"nut_z={nut_pos[2]:.4f} outside expected range "
+                    f"[{nut_at_bottom_z_min:.4f}, {nut_at_bottom_z_max:.4f}] "
+                    f"(bolt_center={bolt_center_z:.4f}, target={nut_at_bottom_z_ref:.4f})"
+                )
+
+        # Per-state report: for each state that was entered, show per-world metrics
+        print("\nPer-state report:")
+        for state in TaskType:
+            # Only print states that at least one world entered
+            visited = ~np.isnan(self._state_nut_z_start[:, state.value])
+            if not np.any(visited):
+                continue
+            print(f"  === {state.name} ===")
+            for world_id in range(self.world_count):
+                if not visited[world_id]:
+                    continue
+                nut_dz = self._state_nut_z_end[world_id, state.value] - self._state_nut_z_start[world_id, state.value]
+                ee_dz = self._state_ee_z_end[world_id, state.value] - self._state_ee_z_start[world_id, state.value]
+                slip_dz = ee_dz - nut_dz
+                f_max = self._state_force_max[world_id, state.value]
+                fr_max = self._state_friction_max[world_id, state.value]
+                print(
+                    f"    World {world_id}: "
+                    f"force_max={f_max:.3f}N  friction_max={fr_max:.3f}N  "
+                    f"nut_dz={nut_dz * 1000:+.1f}mm  ee_dz={ee_dz * 1000:+.1f}mm  "
+                    f"slip={slip_dz * 1000:+.2f}mm"
+                )
 
         if errors:
             raise AssertionError("\n".join(errors))
@@ -1128,8 +1268,41 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
-        parser.set_defaults(num_frames=1200)
+        parser.set_defaults(num_frames=1800)
         parser.set_defaults(world_count=4)
+        parser.add_argument(
+            "--grasp-margin",
+            type=float,
+            default=0.018,
+            help="Extra gripper closure past first contact with the nut [m].",
+        )
+        parser.add_argument(
+            "--finger-kh",
+            type=float,
+            default=1e11,
+            help="Hydroelastic stiffness for finger/hand/table shapes [Pa/m].",
+        )
+        parser.add_argument(
+            "--nut-kh",
+            type=float,
+            default=1e11,
+            help="Hydroelastic stiffness for the nut shape [Pa/m].",
+        )
+        parser.add_argument(
+            "--anchor-contact",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Enable HydroelasticSDF.Config.anchor_contact to preserve moment balance.",
+        )
+        parser.add_argument(
+            "--moment-matching",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help=(
+                "Enable HydroelasticSDF.Config.moment_matching to preserve max friction moment "
+                "after contact reduction (implicitly enables anchor_contact)."
+            ),
+        )
         return parser
 
 
