@@ -356,7 +356,7 @@ class Example:
         rem = self.grasp_yaw_offset % (np.pi / 3)  # remainder in [0, 60 deg)
         theta_eff = rem if rem <= np.pi / 6 else np.pi / 3 - rem
         nut_grasp_width = nut_across_flats / np.cos(theta_eff)
-        grasp_margin = 0.007  # 7mm extra closure past first contact
+        grasp_margin = 0.008  # 8mm extra closure past first contact
         self.gripper_closed_pos = max(0.0, nut_grasp_width / 2.0 - grasp_margin)
         gripper_ke = 100.0  # from joint_target_ke for finger joints
         expected_force_per_finger = gripper_ke * grasp_margin
@@ -410,8 +410,12 @@ class Example:
         # Model for IK (robot only, no nut/bolt)
         self.model_single = copy.deepcopy(robot_builder).finalize()
 
-        # Add bolt (fixed to ground) and nut (floating body)
-        nut_bolt_cfg = newton.ModelBuilder.ShapeConfig(
+        # Add bolt (fixed to ground) and nut (floating body).
+        # Bolt has very low mu so the nut can thread onto it.
+        # Nut has moderate mu so the gripper can hold it (effective nut-bolt
+        # friction = sqrt(0.5 * 0.01) = 0.07, still low enough for threading;
+        # effective nut-finger friction = sqrt(0.5 * 1.0) = 0.71, enough to grip).
+        bolt_cfg = newton.ModelBuilder.ShapeConfig(
             margin=0.0,
             mu=0.01,
             ke=1e7,
@@ -422,13 +426,14 @@ class Example:
             mu_rolling=0.0,
             is_hydroelastic=True,
         )
+        nut_cfg = replace(bolt_cfg, mu=0.5)
 
         bolt_xform = wp.transform(self.bolt_base_pos, wp.quat_identity())
         add_mesh_object(
             robot_builder,
             bolt_mesh,
             bolt_xform,
-            nut_bolt_cfg,
+            bolt_cfg,
             label="bolt",
             center_vec=bolt_center,
             floating=False,
@@ -437,13 +442,13 @@ class Example:
         self.nut_body_index = robot_builder.body_count
         nut_xform = wp.transform(
             self.nut_start_pos,
-            # wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), -np.pi / 8),
+            wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), np.pi / 8),
         )
         add_mesh_object(
             robot_builder,
             nut_mesh,
             nut_xform,
-            nut_bolt_cfg,
+            nut_cfg,
             label="nut",
             center_vec=nut_center,
             floating=True,
