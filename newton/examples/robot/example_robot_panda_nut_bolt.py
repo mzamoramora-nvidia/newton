@@ -140,6 +140,37 @@ def add_mesh_object(
         return -1
 
 
+def _transform_points_body_to_world(p_local: np.ndarray, body_idx: np.ndarray, body_q: np.ndarray) -> np.ndarray:
+    """Transform body-local points to world frame using body transforms.
+
+    Shapes on body=-1 (world body) pass their points through unchanged.
+
+    Args:
+        p_local: (N, 3) body-local points.
+        body_idx: (N,) body index per point. Use -1 for world-attached shapes.
+        body_q: (body_count, 7) body transforms as [px, py, pz, qx, qy, qz, qw].
+    """
+    out = p_local.copy()
+    has_body = body_idx >= 0
+    if not np.any(has_body):
+        return out
+    tf = body_q[body_idx[has_body]]
+    pos = tf[:, :3]
+    qx, qy, qz, qw = tf[:, 3], tf[:, 4], tf[:, 5], tf[:, 6]
+    v = p_local[has_body]
+    # Rodrigues-style quat rotation: rotated = v + 2*qw*cross(q_vec,v) + 2*cross(q_vec, cross(q_vec, v))
+    tx = 2.0 * (qy * v[:, 2] - qz * v[:, 1])
+    ty = 2.0 * (qz * v[:, 0] - qx * v[:, 2])
+    tz = 2.0 * (qx * v[:, 1] - qy * v[:, 0])
+    rx = v[:, 0] + qw * tx + (qy * tz - qz * ty)
+    ry = v[:, 1] + qw * ty + (qz * tx - qx * tz)
+    rz = v[:, 2] + qw * tz + (qx * ty - qy * tx)
+    out[has_body, 0] = pos[:, 0] + rx
+    out[has_body, 1] = pos[:, 1] + ry
+    out[has_body, 2] = pos[:, 2] + rz
+    return out
+
+
 @wp.kernel(enable_backward=False)
 def set_target_pose_kernel(
     task_schedule: wp.array[wp.int32],
@@ -503,7 +534,9 @@ class Example:
         # Collision pipeline with hydroelastic SDF
         self.rigid_contact_max = 1000 * self.world_count
         sdf_hydroelastic_config = HydroelasticSDF.Config(
-            output_contact_surface=hasattr(viewer, "renderer"),
+            # Always enabled so test_final can read hydro penetration depths
+            # even when running with --viewer null.
+            output_contact_surface=True,
             buffer_mult_iso=2,
             anchor_contact=args.anchor_contact,
             moment_matching=args.moment_matching,
@@ -584,6 +617,18 @@ class Example:
         self._state_nut_z_end = np.full((self.world_count, n_states), np.nan)
         self._state_ee_z_start = np.full((self.world_count, n_states), np.nan)
         self._state_ee_z_end = np.full((self.world_count, n_states), np.nan)
+
+        # Per-state per-world max penetration tracking, from two sources:
+        #   rigid: contacts.rigid_contact_{point0,point1,normal} dot product
+        #   hydro: hydroelastic_sdf.get_contact_surface().contact_surface_depth
+        # Three categories: nut-finger, nut-bolt, nut-table.
+        self._state_pen_rigid_nut_finger = np.zeros((self.world_count, n_states))
+        self._state_pen_rigid_nut_bolt = np.zeros((self.world_count, n_states))
+        self._state_pen_rigid_nut_table = np.zeros((self.world_count, n_states))
+        self._state_pen_hydro_nut_finger = np.zeros((self.world_count, n_states))
+        self._state_pen_hydro_nut_bolt = np.zeros((self.world_count, n_states))
+        self._state_pen_hydro_nut_table = np.zeros((self.world_count, n_states))
+        self._classify_shapes()
 
         if hasattr(self.viewer, "renderer"):
             self.viewer.set_camera(wp.vec3(0.5, 0.0, 0.5), -15, -140)
@@ -1096,6 +1141,150 @@ class Example:
         dot = min(dot, 1.0)
         self._gui_rot_err = np.degrees(2.0 * np.arccos(dot))
 
+    def _classify_shapes(self):
+        """Pre-compute shape->category boolean maps and per-shape world indices
+        so penetration contacts can be filtered per category and per world."""
+        n_shapes = self.model.shape_count
+        shape_body = self.model.shape_body.numpy()
+        body_labels = self.model.body_label
+        shape_labels = list(self.model.shape_label)  # may contain None
+        shape_world = (
+            self.model.shape_world.numpy()
+            if self.model.shape_world is not None
+            else np.full(n_shapes, -1, dtype=np.int32)
+        )
+
+        self._is_nut_shape = np.zeros(n_shapes, dtype=bool)
+        self._is_finger_shape = np.zeros(n_shapes, dtype=bool)
+        self._is_bolt_shape = np.zeros(n_shapes, dtype=bool)
+        self._is_table_shape = np.zeros(n_shapes, dtype=bool)
+
+        for s in range(n_shapes):
+            body = int(shape_body[s])
+            body_label = body_labels[body] if body >= 0 else ""
+            shape_label = shape_labels[s] if shape_labels[s] is not None else ""
+            combined = f"{body_label}/{shape_label}"
+
+            if "nut" in combined:
+                self._is_nut_shape[s] = True
+            elif "finger" in combined:
+                self._is_finger_shape[s] = True
+            elif "bolt" in combined:
+                self._is_bolt_shape[s] = True
+            elif "table" in combined:
+                self._is_table_shape[s] = True
+
+        self._shape_world = shape_world.astype(np.int32)
+
+    def _compute_rigid_penetration_per_world(self):
+        """Compute current max penetration per world per category from rigid contacts.
+
+        Returns a dict mapping category name ('nut_finger', 'nut_bolt',
+        'nut_table') to a numpy array of shape (world_count,) in metres.
+        """
+        out = {
+            "nut_finger": np.zeros(self.world_count),
+            "nut_bolt": np.zeros(self.world_count),
+            "nut_table": np.zeros(self.world_count),
+        }
+        count = int(self.contacts.rigid_contact_count.numpy()[0])
+        if count == 0:
+            return out
+
+        p0_local = self.contacts.rigid_contact_point0.numpy()[:count]
+        p1_local = self.contacts.rigid_contact_point1.numpy()[:count]
+        n = self.contacts.rigid_contact_normal.numpy()[:count]
+        s0 = self.contacts.rigid_contact_shape0.numpy()[:count]
+        s1 = self.contacts.rigid_contact_shape1.numpy()[:count]
+
+        valid = (s0 >= 0) & (s1 >= 0)
+        if not np.any(valid):
+            return out
+
+        # rigid_contact_point0/1 are in body-local frame; transform to world
+        shape_body = self.model.shape_body.numpy()
+        body_q = self.state_0.body_q.numpy()
+        b0 = shape_body[s0]
+        b1 = shape_body[s1]
+        p0 = _transform_points_body_to_world(p0_local, b0, body_q)
+        p1 = _transform_points_body_to_world(p1_local, b1, body_q)
+
+        depths = np.sum((p0 - p1) * n, axis=1)
+        self._scatter_pen_per_world(s0, s1, depths, valid, out)
+        return out
+
+    def _compute_hydro_penetration_per_world(self):
+        """Compute current max penetration per world per category from the
+        hydroelastic contact surface (per-face centroid depths).
+        """
+        out = {
+            "nut_finger": np.zeros(self.world_count),
+            "nut_bolt": np.zeros(self.world_count),
+            "nut_table": np.zeros(self.world_count),
+        }
+        hydro = self.collision_pipeline.hydroelastic_sdf
+        if hydro is None:
+            return out
+        surface = hydro.get_contact_surface()
+        if surface is None:
+            return out
+
+        face_count = int(surface.face_contact_count.numpy()[0])
+        if face_count == 0:
+            return out
+
+        depths = surface.contact_surface_depth.numpy()[:face_count]
+        shape_pair = surface.contact_surface_shape_pair.numpy()[:face_count]
+        s0 = shape_pair[:, 0]
+        s1 = shape_pair[:, 1]
+
+        valid = (s0 >= 0) & (s1 >= 0)
+        # hydro depths are negative inside (penetrating); flip sign to match rigid convention
+        pen = -depths
+        self._scatter_pen_per_world(s0, s1, pen, valid, out)
+        return out
+
+    def _scatter_pen_per_world(self, s0, s1, depths, valid, out):
+        """Classify each contact by pair category and scatter max depth per world.
+
+        Positive depth = penetrating. Only depths > 0 and valid (shape >=0) count.
+        """
+        nut0 = self._is_nut_shape[s0] & valid
+        nut1 = self._is_nut_shape[s1] & valid
+        fin0 = self._is_finger_shape[s0]
+        fin1 = self._is_finger_shape[s1]
+        bol0 = self._is_bolt_shape[s0]
+        bol1 = self._is_bolt_shape[s1]
+        tbl0 = self._is_table_shape[s0]
+        tbl1 = self._is_table_shape[s1]
+
+        is_nut_finger = (nut0 & fin1) | (nut1 & fin0)
+        is_nut_bolt = (nut0 & bol1) | (nut1 & bol0)
+        is_nut_table = (nut0 & tbl1) | (nut1 & tbl0)
+
+        # Derive per-contact world index: prefer the nut side's world; fall back
+        # to the counterpart's world when the nut shape is global (shape_world < 0).
+        nut_shape = np.where(nut0, s0, np.where(nut1, s1, 0))
+        other_shape = np.where(nut0, s1, s0)
+        nut_world = self._shape_world[nut_shape]
+        other_world = self._shape_world[other_shape]
+        world = np.where(nut_world >= 0, nut_world, other_world)
+
+        penetrating = depths > 0
+        for mask, key in (
+            (is_nut_finger & penetrating, "nut_finger"),
+            (is_nut_bolt & penetrating, "nut_bolt"),
+            (is_nut_table & penetrating, "nut_table"),
+        ):
+            if not np.any(mask):
+                continue
+            sel_world = world[mask]
+            sel_depth = depths[mask]
+            in_range = (sel_world >= 0) & (sel_world < self.world_count)
+            if not np.any(in_range):
+                continue
+            np.maximum.at(out[key], sel_world[in_range], sel_depth[in_range])
+
     def _update_contact_and_slip(self):
         """Track contact forces and vertical slippage (called periodically from step)."""
         # Update contact forces via the solver and sensor
@@ -1127,6 +1316,10 @@ class Example:
         schedule_np = self.task_schedule.numpy()
         body_q = self.state_0.body_q.numpy()
 
+        # Compute per-world per-category max penetration from both sources.
+        cur_pen_rigid = self._compute_rigid_penetration_per_world()  # dict category -> (world_count,)
+        cur_pen_hydro = self._compute_hydro_penetration_per_world()
+
         for w in range(self.world_count):
             task_type = int(schedule_np[int(tasks_np[w])])
             ee_body_id = w * self.num_bodies_per_world + self.ee_index
@@ -1143,6 +1336,26 @@ class Example:
             self._state_ee_z_end[w, task_type] = ee_z
             self._state_force_max[w, task_type] = max(self._state_force_max[w, task_type], self._cur_force[w])
             self._state_friction_max[w, task_type] = max(self._state_friction_max[w, task_type], self._cur_friction[w])
+
+            # Per-state max penetration per category per source
+            self._state_pen_rigid_nut_finger[w, task_type] = max(
+                self._state_pen_rigid_nut_finger[w, task_type], cur_pen_rigid["nut_finger"][w]
+            )
+            self._state_pen_rigid_nut_bolt[w, task_type] = max(
+                self._state_pen_rigid_nut_bolt[w, task_type], cur_pen_rigid["nut_bolt"][w]
+            )
+            self._state_pen_rigid_nut_table[w, task_type] = max(
+                self._state_pen_rigid_nut_table[w, task_type], cur_pen_rigid["nut_table"][w]
+            )
+            self._state_pen_hydro_nut_finger[w, task_type] = max(
+                self._state_pen_hydro_nut_finger[w, task_type], cur_pen_hydro["nut_finger"][w]
+            )
+            self._state_pen_hydro_nut_bolt[w, task_type] = max(
+                self._state_pen_hydro_nut_bolt[w, task_type], cur_pen_hydro["nut_bolt"][w]
+            )
+            self._state_pen_hydro_nut_table[w, task_type] = max(
+                self._state_pen_hydro_nut_table[w, task_type], cur_pen_hydro["nut_table"][w]
+            )
 
             # Record at LIFT start (first frame we see LIFT)
             if task_type == TaskType.LIFT and np.isnan(self._nut_z_at_lift_start[w]):
@@ -1212,6 +1425,18 @@ class Example:
             imgui.text(f"Slip: {self._slip[w] * 1000:.2f} mm")
         else:
             imgui.text("Slip: —")
+
+        # Max penetration per category per source, for the selected world
+        pen_rf = self._state_pen_rigid_nut_finger[w].max() * 1000.0
+        pen_rb = self._state_pen_rigid_nut_bolt[w].max() * 1000.0
+        pen_rt = self._state_pen_rigid_nut_table[w].max() * 1000.0
+        pen_hf = self._state_pen_hydro_nut_finger[w].max() * 1000.0
+        pen_hb = self._state_pen_hydro_nut_bolt[w].max() * 1000.0
+        pen_ht = self._state_pen_hydro_nut_table[w].max() * 1000.0
+        imgui.text("Max pen [mm]  (rigid | hydro)")
+        imgui.text(f"  nut-finger: {pen_rf:.3f} | {pen_hf:.3f}")
+        imgui.text(f"  nut-bolt:   {pen_rb:.3f} | {pen_hb:.3f}")
+        imgui.text(f"  nut-table:  {pen_rt:.3f} | {pen_ht:.3f}")
 
         imgui.separator()
 
@@ -1297,28 +1522,69 @@ class Example:
                     f"(bolt_center={bolt_center_z:.4f}, target={nut_at_bottom_z_ref:.4f})"
                 )
 
-        # Per-state report: for each state that was entered, show per-world metrics
+        # Per-state report: tabular format, one row per (state, world), with
+        # force/slip metrics and rigid+hydro penetration side-by-side.
         print("\nPer-state report:")
+        header_line1 = (
+            f"  {'State':<16}{'World':>6}  "
+            f"{'force':>8}  {'friction':>9}  "
+            f"{'nut_dz':>10}  {'slip':>10}  "
+            f"{'rigid pen_max [mm]':^34}  "
+            f"{'hydro pen_max [mm]':^34}"
+        )
+        header_line2 = (
+            f"  {'':<16}{'':>6}  "
+            f"{'[N]':>8}  {'[N]':>9}  "
+            f"{'[mm]':>10}  {'[mm]':>10}  "
+            f"{'nut-finger':>10} {'nut-bolt':>10} {'nut-table':>10}  "
+            f"{'nut-finger':>10} {'nut-bolt':>10} {'nut-table':>10}"
+        )
+        print(header_line1)
+        print(header_line2)
+        print("  " + "-" * (len(header_line1) - 2))
+
         for state in TaskType:
-            # Only print states that at least one world entered
             visited = ~np.isnan(self._state_nut_z_start[:, state.value])
             if not np.any(visited):
                 continue
-            print(f"  === {state.name} ===")
             for world_id in range(self.world_count):
                 if not visited[world_id]:
                     continue
-                nut_dz = self._state_nut_z_end[world_id, state.value] - self._state_nut_z_start[world_id, state.value]
-                ee_dz = self._state_ee_z_end[world_id, state.value] - self._state_ee_z_start[world_id, state.value]
+                s = state.value
+                nut_dz = self._state_nut_z_end[world_id, s] - self._state_nut_z_start[world_id, s]
+                ee_dz = self._state_ee_z_end[world_id, s] - self._state_ee_z_start[world_id, s]
                 slip_dz = ee_dz - nut_dz
-                f_max = self._state_force_max[world_id, state.value]
-                fr_max = self._state_friction_max[world_id, state.value]
+                f_max = self._state_force_max[world_id, s]
+                fr_max = self._state_friction_max[world_id, s]
+                pen_rf = self._state_pen_rigid_nut_finger[world_id, s] * 1000.0
+                pen_rb = self._state_pen_rigid_nut_bolt[world_id, s] * 1000.0
+                pen_rt = self._state_pen_rigid_nut_table[world_id, s] * 1000.0
+                pen_hf = self._state_pen_hydro_nut_finger[world_id, s] * 1000.0
+                pen_hb = self._state_pen_hydro_nut_bolt[world_id, s] * 1000.0
+                pen_ht = self._state_pen_hydro_nut_table[world_id, s] * 1000.0
                 print(
-                    f"    World {world_id}: "
-                    f"force_max={f_max:.3f}N  friction_max={fr_max:.3f}N  "
-                    f"nut_dz={nut_dz * 1000:+.1f}mm  ee_dz={ee_dz * 1000:+.1f}mm  "
-                    f"slip={slip_dz * 1000:+.2f}mm"
+                    f"  {state.name:<16}{world_id:>6}  "
+                    f"{f_max:>8.3f}  {fr_max:>9.3f}  "
+                    f"{nut_dz * 1000:>+10.2f}  {slip_dz * 1000:>+10.2f}  "
+                    f"{pen_rf:>10.3f} {pen_rb:>10.3f} {pen_rt:>10.3f}  "
+                    f"{pen_hf:>10.3f} {pen_hb:>10.3f} {pen_ht:>10.3f}"
                 )
+
+        # Informational aggregate: rigid vs hydro penetration by category
+        print("\nPenetration sources (rigid vs hydro), aggregated over all worlds and states:")
+        for name, rigid_arr, hydro_arr in (
+            ("nut-finger", self._state_pen_rigid_nut_finger, self._state_pen_hydro_nut_finger),
+            ("nut-bolt", self._state_pen_rigid_nut_bolt, self._state_pen_hydro_nut_bolt),
+            ("nut-table", self._state_pen_rigid_nut_table, self._state_pen_hydro_nut_table),
+        ):
+            r_max = float(rigid_arr.max()) * 1000.0
+            h_max = float(hydro_arr.max()) * 1000.0
+            max_abs_diff = float(np.abs(rigid_arr - hydro_arr).max()) * 1000.0
+            ratio = (r_max / h_max) if h_max > 1e-6 else float("nan")
+            print(
+                f"  {name:<10}  rigid_max={r_max:>6.3f}mm  hydro_max={h_max:>6.3f}mm  "
+                f"rigid/hydro={ratio:>5.2f}  max_abs_diff={max_abs_diff:>6.3f}mm"
+            )
 
         if errors:
             raise AssertionError("\n".join(errors))
