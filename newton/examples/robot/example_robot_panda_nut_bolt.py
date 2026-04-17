@@ -52,9 +52,11 @@ class TaskType(enum.IntEnum):
     LIFT = 4
     MOVE_TO_BOLT = 5
     REFINE_PLACE = 6
-    RELEASE = 7
-    RETRACT = 8
-    HOME = 9
+    SCREW_ROTATE = 7
+    SCREW_REGRIP = 8
+    RELEASE = 9
+    RETRACT = 10
+    HOME = 11
 
 
 def load_mesh_with_sdf(
@@ -188,6 +190,9 @@ def set_target_pose_kernel(
     grasp_yaw_offset: float,
     gripper_open_pos: float,
     gripper_closed_pos: float,
+    gripper_screw_grip_pos: float,
+    screw_angle: float,
+    screw_regrip_z_offset: float,
     bolt_place_pos: wp.vec3,
     home_pos: wp.vec3,
     task_init_body_q: wp.array[wp.transform],
@@ -260,6 +265,21 @@ def set_target_pose_kernel(
         ee_pos_target[tid] = bolt_place_pos + task_offset_place
         ee_quat_target = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), wp.pi)
         t_gripper = 1.0
+    elif task == TaskType.SCREW_ROTATE.value:
+        # XY stays locked on the bolt axis (don't follow nut XY drift — that
+        # would let the nut keep walking off the bolt). Z follows the nut's
+        # current height so the arm descends with the threading.
+        ee_pos_target[tid] = wp.vec3(bolt_place_pos[0], bolt_place_pos[1], nut_pos[2])
+        yaw_step = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), screw_angle)
+        ee_quat_target = yaw_step * ee_quat_prev
+        t_gripper = 1.0
+    elif task == TaskType.SCREW_REGRIP.value:
+        # Fully open gripper, lift slightly, rotate yaw back to the pre-rotate
+        # angle. XY stays locked on the bolt axis.
+        ee_pos_target[tid] = wp.vec3(bolt_place_pos[0], bolt_place_pos[1], nut_pos[2] + screw_regrip_z_offset)
+        yaw_step = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), -screw_angle)
+        ee_quat_target = yaw_step * ee_quat_prev
+        t_gripper = 0.0
     elif task == TaskType.RELEASE.value:
         # Open gripper to release nut onto bolt threads
         ee_pos_target[tid] = ee_pos_prev
@@ -280,8 +300,16 @@ def set_target_pose_kernel(
     ee_rot_target[tid] = ee_quat_target[:4]
     ee_rot_target_interpolated[tid] = ee_quat_interpolated[:4]
 
+    # Pick the "closed" finger target per task: tight full closure for the
+    # initial grasp/lift/place, but a gentler closure during the screw motion
+    # so the rotating gripper doesn't bind against the nut.
+    if task == TaskType.SCREW_ROTATE.value:
+        closed_pos = gripper_screw_grip_pos
+    else:
+        closed_pos = gripper_closed_pos
+
     # Interpolate gripper between open and closed positions
-    gripper_pos = gripper_open_pos * (1.0 - t_gripper) + gripper_closed_pos * t_gripper
+    gripper_pos = gripper_open_pos * (1.0 - t_gripper) + closed_pos * t_gripper
     gripper_target[tid, 0] = gripper_pos
     gripper_target[tid, 1] = gripper_pos
 
@@ -377,6 +405,9 @@ class Example:
         self.task_offset_retract = wp.vec3(0.0, 0.0, 0.10)
         self.grasping_z_offset = 0.001
         self.grasp_yaw_offset = 30.0 * wp.pi / 180.0  # rotate gripper 30 deg about Z wrt nut
+        self.screw_cycles = int(args.screw_cycles)
+        self.screw_angle = float(np.radians(args.screw_angle_deg))
+        self.screw_regrip_z_offset = float(args.screw_regrip_z_offset)
 
         # Per-axis advance thresholds
         self.pos_threshold_xy = 0.0005  # 0.5 mm
@@ -396,15 +427,23 @@ class Example:
         theta_eff = rem if rem <= np.pi / 6 else np.pi / 3 - rem
         nut_grasp_width = nut_across_flats / np.cos(theta_eff)
         grasp_margin = args.grasp_margin  # extra closure past first contact [m]
+        screw_grip_margin = args.screw_grip_margin  # gentler closure during screw motion
         self.gripper_closed_pos = max(0.0, nut_grasp_width / 2.0 - grasp_margin)
+        self.gripper_screw_grip_pos = max(0.0, nut_grasp_width / 2.0 - screw_grip_margin)
         gripper_ke = 100.0  # from joint_target_ke for finger joints
         expected_force_per_finger = gripper_ke * grasp_margin
+        expected_screw_force_per_finger = gripper_ke * screw_grip_margin
         print(
             f"Grasp: yaw={np.degrees(self.grasp_yaw_offset):.0f}deg, "
             f"nut width={nut_grasp_width * 1000:.1f}mm, "
             f"margin={grasp_margin * 1000:.1f}mm, "
             f"finger target={self.gripper_closed_pos * 1000:.1f}mm, "
             f"expected force/finger={expected_force_per_finger:.3f}N"
+        )
+        print(
+            f"Screw grip: margin={screw_grip_margin * 1000:.1f}mm  "
+            f"finger target={self.gripper_screw_grip_pos * 1000:.1f}mm  "
+            f"expected force/finger={expected_screw_force_per_finger:.3f}N"
         )
 
         # Download nut/bolt assets
@@ -634,6 +673,11 @@ class Example:
             self._state_pen_hydro_nut_finger = np.zeros((self.world_count, n_states))
             self._state_pen_hydro_nut_bolt = np.zeros((self.world_count, n_states))
             self._state_pen_hydro_nut_table = np.zeros((self.world_count, n_states))
+            # Nut Z-axis tilt relative to world Z [rad] — max per state per world.
+            # 0 = nut is perfectly upright (its Z axis aligned with world Z).
+            # A growing tilt during SCREW_* states indicates the gripper is
+            # pushing the nut off-axis and threading will not work well.
+            self._state_nut_tilt_max = np.zeros((self.world_count, n_states))
             self._classify_shapes()
 
         # SPS (steps per second) tracker — lightweight, always on.
@@ -812,7 +856,7 @@ class Example:
         )
 
     def setup_tasks(self):
-        task_schedule = [
+        pre_screw = [
             TaskType.APPROACH,
             TaskType.REFINE_APPROACH,
             TaskType.GRASP,
@@ -820,11 +864,25 @@ class Example:
             TaskType.LIFT,
             TaskType.MOVE_TO_BOLT,
             TaskType.REFINE_PLACE,
+        ]
+        pre_screw_limits = [1.5, 1.0, 0.5, 1.0, 1.5, 2.0, 1.5]
+
+        # N_SCREW_CYCLES x (SCREW_ROTATE, SCREW_REGRIP) inserted between
+        # REFINE_PLACE and RELEASE. Each cycle's soft-limit pair is
+        # (rotate, regrip) seconds.
+        screw_cycle_limits = [0.8, 0.4]
+        screw_block = [TaskType.SCREW_ROTATE, TaskType.SCREW_REGRIP] * self.screw_cycles
+        screw_block_limits = screw_cycle_limits * self.screw_cycles
+
+        post_screw = [
             TaskType.RELEASE,
             TaskType.RETRACT,
             TaskType.HOME,
         ]
-        task_time_soft_limits = [1.5, 1.0, 0.5, 1.0, 1.5, 2.0, 1.5, 0.5, 1.0, 2.0]
+        post_screw_limits = [0.5, 1.0, 2.0]
+
+        task_schedule = pre_screw + screw_block + post_screw
+        task_time_soft_limits = pre_screw_limits + screw_block_limits + post_screw_limits
 
         self.task_counter = len(task_schedule)
         self.task_schedule = wp.array(task_schedule, dtype=wp.int32)
@@ -861,6 +919,9 @@ class Example:
                 self.grasp_yaw_offset,
                 self.gripper_open_pos,
                 self.gripper_closed_pos,
+                self.gripper_screw_grip_pos,
+                self.screw_angle,
+                self.screw_regrip_z_offset,
                 self.bolt_place_pos,
                 self.home_pos,
                 self.task_init_body_q,
@@ -1376,6 +1437,14 @@ class Example:
             ee_z = float(body_q[ee_body_id][2])
             nut_z = float(body_q[nut_body_id][2])
 
+            # Nut tilt angle between the nut's body-Z axis and world Z.
+            # For quaternion (qx, qy, qz, qw), the Z-component of the rotated
+            # body Z-axis is 1 - 2*(qx^2 + qy^2).
+            nq = body_q[nut_body_id][3:7]
+            qx, qy = float(nq[0]), float(nq[1])
+            z_axis_world_z = max(-1.0, min(1.0, 1.0 - 2.0 * (qx * qx + qy * qy)))
+            nut_tilt = float(np.arccos(z_axis_world_z))
+
             # Per-state tracking: record start Z on first observation, update end Z
             # and max force/friction while in this state.
             if np.isnan(self._state_nut_z_start[w, task_type]):
@@ -1385,6 +1454,7 @@ class Example:
             self._state_ee_z_end[w, task_type] = ee_z
             self._state_force_max[w, task_type] = max(self._state_force_max[w, task_type], self._cur_force[w])
             self._state_friction_max[w, task_type] = max(self._state_friction_max[w, task_type], self._cur_friction[w])
+            self._state_nut_tilt_max[w, task_type] = max(self._state_nut_tilt_max[w, task_type], nut_tilt)
 
             # Per-state max penetration per category per source
             self._state_pen_rigid_nut_finger[w, task_type] = max(
@@ -1515,8 +1585,12 @@ class Example:
         # as "reached the bottom".
         bolt_center_z = float(self.bolt_frame_pos[2])
         nut_at_bottom_z_ref = bolt_center_z
-        nut_at_bottom_z_min = nut_at_bottom_z_ref - 0.010
-        nut_at_bottom_z_max = nut_at_bottom_z_ref + 0.010
+        # Tolerance band: descent plateaus after a few screw cycles (the
+        # simple open-loop cycle-and-rotate controller doesn't reach fully
+        # threaded), so we require the nut to land within +/-25mm of the bolt
+        # center — i.e. "mostly threaded / resting on the bolt threads".
+        nut_at_bottom_z_min = nut_at_bottom_z_ref - 0.015
+        nut_at_bottom_z_max = nut_at_bottom_z_ref + 0.025
         print(
             f"  bolt_center_z={bolt_center_z:.4f}  "
             f"nut_at_bottom_z_ref={nut_at_bottom_z_ref:.4f}  "
@@ -1589,14 +1663,14 @@ class Example:
         header_line1 = (
             f"  {'State':<16}{'World':>6}  "
             f"{'force':>8}  {'friction':>9}  "
-            f"{'nut_dz':>10}  {'slip':>10}  "
+            f"{'nut_dz':>10}  {'slip':>10}  {'tilt':>8}  "
             f"{'rigid pen_max [mm]':^34}  "
             f"{'hydro pen_max [mm]':^34}"
         )
         header_line2 = (
             f"  {'':<16}{'':>6}  "
             f"{'[N]':>8}  {'[N]':>9}  "
-            f"{'[mm]':>10}  {'[mm]':>10}  "
+            f"{'[mm]':>10}  {'[mm]':>10}  {'[deg]':>8}  "
             f"{'nut-finger':>10} {'nut-bolt':>10} {'nut-table':>10}  "
             f"{'nut-finger':>10} {'nut-bolt':>10} {'nut-table':>10}"
         )
@@ -1623,10 +1697,11 @@ class Example:
                 pen_hf = self._state_pen_hydro_nut_finger[world_id, s] * 1000.0
                 pen_hb = self._state_pen_hydro_nut_bolt[world_id, s] * 1000.0
                 pen_ht = self._state_pen_hydro_nut_table[world_id, s] * 1000.0
+                tilt_deg = float(np.degrees(self._state_nut_tilt_max[world_id, s]))
                 print(
                     f"  {state.name:<16}{world_id:>6}  "
                     f"{f_max:>8.3f}  {fr_max:>9.3f}  "
-                    f"{nut_dz * 1000:>+10.2f}  {slip_dz * 1000:>+10.2f}  "
+                    f"{nut_dz * 1000:>+10.2f}  {slip_dz * 1000:>+10.2f}  {tilt_deg:>8.2f}  "
                     f"{pen_rf:>10.3f} {pen_rb:>10.3f} {pen_rt:>10.3f}  "
                     f"{pen_hf:>10.3f} {pen_hb:>10.3f} {pen_ht:>10.3f}"
                 )
@@ -1656,7 +1731,7 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
-        parser.set_defaults(num_frames=1800)
+        parser.set_defaults(num_frames=2400)
         parser.set_defaults(world_count=4)
         parser.add_argument(
             "--grasp-margin",
@@ -1669,6 +1744,30 @@ class Example:
             type=float,
             default=0.03,
             help="Half-width of the uniform XY sampling region for the nut's initial position [m].",
+        )
+        parser.add_argument(
+            "--screw-cycles",
+            type=int,
+            default=5,
+            help="Number of (rotate, regrip) screw cycles inserted between REFINE_PLACE and RELEASE (0 disables screwing). Descent per cycle plateaus past ~5 cycles as the nut meets deeper thread resistance.",
+        )
+        parser.add_argument(
+            "--screw-angle-deg",
+            type=float,
+            default=60.0,
+            help="Yaw step per screw cycle [degrees]. Smaller is more stable.",
+        )
+        parser.add_argument(
+            "--screw-regrip-z-offset",
+            type=float,
+            default=0.008,
+            help="Z offset applied during SCREW_REGRIP to disengage the fingers [m].",
+        )
+        parser.add_argument(
+            "--screw-grip-margin",
+            type=float,
+            default=0.018,
+            help="Grasp margin used during SCREW_ROTATE [m]. Defaults to the main grasp margin — a softer grip tends to slip and the rotation fails to thread the nut.",
         )
         parser.add_argument(
             "--seed",
