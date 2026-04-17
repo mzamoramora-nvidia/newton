@@ -476,6 +476,22 @@ class Example:
         self.model = scene.finalize()
         self.num_bodies_per_world = self.model.body_count // self.world_count
 
+        # Randomize the nut's initial XY position per world by patching
+        # model.joint_q before the first eval_fk. The nut is a free body with
+        # 7 joint coords (x, y, z, qx, qy, qz, qw) placed after the 9 robot
+        # arm/gripper DOFs within each world's joint_q slice.
+        self.nut_xy_jitter = args.nut_xy_jitter
+        joint_q_per_world = self.model.joint_coord_count // self.world_count
+        nut_joint_q_offset = 9
+        rng = np.random.default_rng(args.seed)
+        xy_jitter_np = rng.uniform(-self.nut_xy_jitter, self.nut_xy_jitter, size=(self.world_count, 2)).astype(
+            np.float32
+        )
+        joint_q_view = self.model.joint_q.reshape((self.world_count, joint_q_per_world))
+        current = joint_q_view[:, nut_joint_q_offset : nut_joint_q_offset + 2].numpy()
+        updated = wp.array(current + xy_jitter_np, dtype=wp.float32)
+        wp.copy(dest=joint_q_view[:, nut_joint_q_offset : nut_joint_q_offset + 2], src=updated)
+
         # Contact sensor: must be created BEFORE Contacts so the "force" attribute is requested.
         # Sense forces on nut bodies from finger shapes.
         self.contact_sensor = SensorContact(
@@ -900,9 +916,11 @@ class Example:
         if self.show_debug_frames:
             self._log_debug_frames()
             self._log_test_zone()
+            self._log_sampling_zone()
         else:
             self.viewer.log_lines("/debug_frames", None, None, None)
             self.viewer.log_lines("/test_zone", None, None, None)
+            self.viewer.log_lines("/sampling_zone", None, None, None)
         self.viewer.end_frame()
 
     def _log_debug_frames(self):
@@ -1004,6 +1022,49 @@ class Example:
 
         self.viewer.log_lines(
             "/test_zone",
+            wp.array(starts, dtype=wp.vec3),
+            wp.array(ends, dtype=wp.vec3),
+            wp.array(colors, dtype=wp.vec3),
+        )
+
+    def _log_sampling_zone(self):
+        """Draw a yellow square outline on the table surface showing the XY region
+        from which the nut's initial position is sampled."""
+        if self.nut_xy_jitter <= 0.0:
+            self.viewer.log_lines("/sampling_zone", None, None, None)
+            return
+
+        cx = float(self.nut_start_pos[0])
+        cy = float(self.nut_start_pos[1])
+        z = float(self.table_top_center[2]) + 0.001  # just above the table
+        half = self.nut_xy_jitter
+        yellow = wp.vec3(1.0, 1.0, 0.0)
+
+        offsets = self.viewer.world_offsets.numpy() if self.viewer.world_offsets is not None else None
+
+        starts = []
+        ends = []
+        colors = []
+
+        for w in range(self.world_count):
+            off = (
+                wp.vec3(float(offsets[w][0]), float(offsets[w][1]), float(offsets[w][2]))
+                if offsets is not None
+                else wp.vec3()
+            )
+            corners = [
+                wp.vec3(cx - half, cy - half, z) + off,
+                wp.vec3(cx + half, cy - half, z) + off,
+                wp.vec3(cx + half, cy + half, z) + off,
+                wp.vec3(cx - half, cy + half, z) + off,
+            ]
+            for i in range(4):
+                starts.append(corners[i])
+                ends.append(corners[(i + 1) % 4])
+                colors.append(yellow)
+
+        self.viewer.log_lines(
+            "/sampling_zone",
             wp.array(starts, dtype=wp.vec3),
             wp.array(ends, dtype=wp.vec3),
             wp.array(colors, dtype=wp.vec3),
@@ -1275,6 +1336,18 @@ class Example:
             type=float,
             default=0.018,
             help="Extra gripper closure past first contact with the nut [m].",
+        )
+        parser.add_argument(
+            "--nut-xy-jitter",
+            type=float,
+            default=0.03,
+            help="Half-width of the uniform XY sampling region for the nut's initial position [m].",
+        )
+        parser.add_argument(
+            "--seed",
+            type=int,
+            default=42,
+            help="RNG seed for nut XY randomization.",
         )
         parser.add_argument(
             "--finger-kh",
