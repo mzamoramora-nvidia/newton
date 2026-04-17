@@ -16,6 +16,7 @@
 import argparse
 import copy
 import enum
+import time
 from dataclasses import replace
 
 import numpy as np
@@ -350,6 +351,10 @@ class Example:
 
         self.world_count = args.world_count
         self.test_mode = args.test
+        # Single flag that gates the expensive per-readback tracking path
+        # (forces, friction, slip, penetration). --test implies tracking since
+        # test_final consumes those metrics. When False, the sim runs lean.
+        self._track_stats = args.test
         self.finger_kh = args.finger_kh
         self.nut_kh = args.nut_kh
         self.viewer = viewer
@@ -523,20 +528,24 @@ class Example:
         updated = wp.array(current + xy_jitter_np, dtype=wp.float32)
         wp.copy(dest=joint_q_view[:, nut_joint_q_offset : nut_joint_q_offset + 2], src=updated)
 
-        # Contact sensor: must be created BEFORE Contacts so the "force" attribute is requested.
-        # Sense forces on nut bodies from finger shapes.
-        self.contact_sensor = SensorContact(
-            self.model,
-            sensing_obj_bodies="nut",
-            counterpart_bodies="*finger*",
-        )
+        # Contact sensor: only needed when tracking is on. Must be created
+        # BEFORE Contacts so the "force" attribute is requested on the model.
+        if self._track_stats:
+            self.contact_sensor = SensorContact(
+                self.model,
+                sensing_obj_bodies="nut",
+                counterpart_bodies="*finger*",
+            )
+        else:
+            self.contact_sensor = None
 
-        # Collision pipeline with hydroelastic SDF
+        # Collision pipeline with hydroelastic SDF.
+        # output_contact_surface is required for the imgui Show Isosurface
+        # toggle (needs a renderer) and for hydro penetration tracking.
         self.rigid_contact_max = 1000 * self.world_count
+        has_renderer = hasattr(viewer, "renderer")
         sdf_hydroelastic_config = HydroelasticSDF.Config(
-            # Always enabled so test_final can read hydro penetration depths
-            # even when running with --viewer null.
-            output_contact_surface=True,
+            output_contact_surface=self._track_stats or has_renderer,
             buffer_mult_iso=2,
             anchor_contact=args.anchor_contact,
             moment_matching=args.moment_matching,
@@ -609,26 +618,29 @@ class Example:
         self._ee_z_at_lift_end = np.full(self.world_count, np.nan)
         self._slip = np.full(self.world_count, np.nan)  # computed after lift [m]
 
-        # Per-state tracking (for per-state report in test_final)
+        # Per-state and per-penetration tracking arrays are only allocated when
+        # the expensive tracking path is enabled.
         n_states = len(TaskType)
-        self._state_force_max = np.zeros((self.world_count, n_states))
-        self._state_friction_max = np.zeros((self.world_count, n_states))
-        self._state_nut_z_start = np.full((self.world_count, n_states), np.nan)
-        self._state_nut_z_end = np.full((self.world_count, n_states), np.nan)
-        self._state_ee_z_start = np.full((self.world_count, n_states), np.nan)
-        self._state_ee_z_end = np.full((self.world_count, n_states), np.nan)
+        if self._track_stats:
+            self._state_force_max = np.zeros((self.world_count, n_states))
+            self._state_friction_max = np.zeros((self.world_count, n_states))
+            self._state_nut_z_start = np.full((self.world_count, n_states), np.nan)
+            self._state_nut_z_end = np.full((self.world_count, n_states), np.nan)
+            self._state_ee_z_start = np.full((self.world_count, n_states), np.nan)
+            self._state_ee_z_end = np.full((self.world_count, n_states), np.nan)
+            self._state_pen_rigid_nut_finger = np.zeros((self.world_count, n_states))
+            self._state_pen_rigid_nut_bolt = np.zeros((self.world_count, n_states))
+            self._state_pen_rigid_nut_table = np.zeros((self.world_count, n_states))
+            self._state_pen_hydro_nut_finger = np.zeros((self.world_count, n_states))
+            self._state_pen_hydro_nut_bolt = np.zeros((self.world_count, n_states))
+            self._state_pen_hydro_nut_table = np.zeros((self.world_count, n_states))
+            self._classify_shapes()
 
-        # Per-state per-world max penetration tracking, from two sources:
-        #   rigid: contacts.rigid_contact_{point0,point1,normal} dot product
-        #   hydro: hydroelastic_sdf.get_contact_surface().contact_surface_depth
-        # Three categories: nut-finger, nut-bolt, nut-table.
-        self._state_pen_rigid_nut_finger = np.zeros((self.world_count, n_states))
-        self._state_pen_rigid_nut_bolt = np.zeros((self.world_count, n_states))
-        self._state_pen_rigid_nut_table = np.zeros((self.world_count, n_states))
-        self._state_pen_hydro_nut_finger = np.zeros((self.world_count, n_states))
-        self._state_pen_hydro_nut_bolt = np.zeros((self.world_count, n_states))
-        self._state_pen_hydro_nut_table = np.zeros((self.world_count, n_states))
-        self._classify_shapes()
+        # SPS (steps per second) tracker — lightweight, always on.
+        self._sps_frame_count = 0
+        self._sps_last_time = time.perf_counter()
+        self._sps_samples: list[float] = []
+        self._sps_warmup_done = False
 
         if hasattr(self.viewer, "renderer"):
             self.viewer.set_camera(wp.vec3(0.5, 0.0, 0.5), -15, -140)
@@ -941,10 +953,47 @@ class Example:
         self.sim_time += self.frame_dt
         self._gui_frame += 1
 
-        # Periodic readback (avoid every-frame GPU sync)
+        # Periodic readback (avoid every-frame GPU sync). The heavy tracking
+        # path is only entered when explicitly enabled via --test.
         if self._gui_frame % self._gui_read_interval == 0:
-            self._update_gui_state()
-            self._update_contact_and_slip()
+            if self._track_stats:
+                self._update_gui_state()
+                self._update_contact_and_slip()
+            elif hasattr(self.viewer, "renderer"):
+                # Lightweight GUI updates only: task name, timer, pos/rot error.
+                self._update_gui_state()
+
+        self._update_sps()
+
+    def _update_sps(self):
+        """Print SPS every ~1s with running average and std deviation."""
+        self._sps_frame_count += 1
+        now = time.perf_counter()
+        elapsed = now - self._sps_last_time
+        if elapsed < 1.0:
+            return
+        sps = (self._sps_frame_count / elapsed) * self.world_count
+        self._sps_frame_count = 0
+        self._sps_last_time = now
+        sps_per_env = sps / self.world_count
+
+        if not self._sps_warmup_done:
+            self._sps_warmup_done = True
+            print(
+                f"[SPS] sim_time={self.sim_time:.2f}s  {sps:.1f} steps/s  "
+                f"({sps_per_env:.1f}/env, {self.world_count} worlds) (warmup)"
+            )
+            return
+
+        self._sps_samples.append(sps)
+        n = len(self._sps_samples)
+        avg = sum(self._sps_samples) / n
+        std = ((sum((s - avg) ** 2 for s in self._sps_samples) / (n - 1)) ** 0.5) if n > 1 else 0.0
+        print(
+            f"[SPS] sim_time={self.sim_time:.2f}s  {sps:.1f} steps/s  "
+            f"({sps_per_env:.1f}/env, {self.world_count} worlds)  "
+            f"avg={avg:.1f}  std={std:.1f}  n={n}"
+        )
 
     def render(self):
         self.viewer.begin_frame(self.sim_time)
@@ -1413,30 +1462,32 @@ class Example:
 
         imgui.separator()
 
-        # Contact forces for selected world
+        # Contact / force / penetration metrics are only available when tracking
+        # is enabled (via --test). Otherwise show a hint so the user knows.
         w = self._gui_selected_world
-        imgui.text(f"Contacts: {self._gui_contact_count}")
-        imgui.text(f"Total force:    {self._cur_force[w]:.3f} N  (max: {self._max_force[w]:.3f} N)")
-        imgui.text(f"Friction force: {self._cur_friction[w]:.3f} N  (max: {self._max_friction[w]:.3f} N)")
-        imgui.text(f"Finger L: {self._gui_finger_forces[0]:.3f} N  R: {self._gui_finger_forces[1]:.3f} N")
+        if self._track_stats:
+            imgui.text(f"Contacts: {self._gui_contact_count}")
+            imgui.text(f"Total force:    {self._cur_force[w]:.3f} N  (max: {self._max_force[w]:.3f} N)")
+            imgui.text(f"Friction force: {self._cur_friction[w]:.3f} N  (max: {self._max_friction[w]:.3f} N)")
+            imgui.text(f"Finger L: {self._gui_finger_forces[0]:.3f} N  R: {self._gui_finger_forces[1]:.3f} N")
 
-        # Slippage for selected world
-        if not np.isnan(self._slip[w]):
-            imgui.text(f"Slip: {self._slip[w] * 1000:.2f} mm")
+            if not np.isnan(self._slip[w]):
+                imgui.text(f"Slip: {self._slip[w] * 1000:.2f} mm")
+            else:
+                imgui.text("Slip: —")
+
+            pen_rf = self._state_pen_rigid_nut_finger[w].max() * 1000.0
+            pen_rb = self._state_pen_rigid_nut_bolt[w].max() * 1000.0
+            pen_rt = self._state_pen_rigid_nut_table[w].max() * 1000.0
+            pen_hf = self._state_pen_hydro_nut_finger[w].max() * 1000.0
+            pen_hb = self._state_pen_hydro_nut_bolt[w].max() * 1000.0
+            pen_ht = self._state_pen_hydro_nut_table[w].max() * 1000.0
+            imgui.text("Max pen [mm]  (rigid | hydro)")
+            imgui.text(f"  nut-finger: {pen_rf:.3f} | {pen_hf:.3f}")
+            imgui.text(f"  nut-bolt:   {pen_rb:.3f} | {pen_hb:.3f}")
+            imgui.text(f"  nut-table:  {pen_rt:.3f} | {pen_ht:.3f}")
         else:
-            imgui.text("Slip: —")
-
-        # Max penetration per category per source, for the selected world
-        pen_rf = self._state_pen_rigid_nut_finger[w].max() * 1000.0
-        pen_rb = self._state_pen_rigid_nut_bolt[w].max() * 1000.0
-        pen_rt = self._state_pen_rigid_nut_table[w].max() * 1000.0
-        pen_hf = self._state_pen_hydro_nut_finger[w].max() * 1000.0
-        pen_hb = self._state_pen_hydro_nut_bolt[w].max() * 1000.0
-        pen_ht = self._state_pen_hydro_nut_table[w].max() * 1000.0
-        imgui.text("Max pen [mm]  (rigid | hydro)")
-        imgui.text(f"  nut-finger: {pen_rf:.3f} | {pen_hf:.3f}")
-        imgui.text(f"  nut-bolt:   {pen_rb:.3f} | {pen_hb:.3f}")
-        imgui.text(f"  nut-table:  {pen_rt:.3f} | {pen_ht:.3f}")
+            imgui.text("Stats tracking disabled. Run with --test to enable.")
 
         imgui.separator()
 
@@ -1478,28 +1529,32 @@ class Example:
             nut_xy = nut_pos[:2]
             xy_error = float(np.linalg.norm(nut_xy - bolt_xy))
 
-            f_max = self._max_force[world_id]
-            fr_max = self._max_friction[world_id]
-            slip = self._slip[world_id]
-            slip_str = f"{slip * 1000:.2f}mm" if not np.isnan(slip) else "n/a"
-            lift_str = ""
-            if not np.isnan(slip):
-                nut_lift = self._nut_z_at_lift_end[world_id] - self._nut_z_at_lift_start[world_id]
-                lift_str = f"  lift={nut_lift * 1000:.1f}mm"
-
-            # Nut Z after release (when the robot let go) vs final Z
-            z_after_release = self._state_nut_z_end[world_id, TaskType.RELEASE.value]
-            descent = z_after_release - nut_pos[2] if not np.isnan(z_after_release) else np.nan
-            descent_str = f"{descent * 1000:+.2f}mm" if not np.isnan(descent) else "n/a"
-
-            print(
-                f"  World {world_id}: "
-                f"nut=({nut_pos[0]:.4f}, {nut_pos[1]:.4f}, {nut_pos[2]:.4f})  "
-                f"xy_err={xy_error * 1000:.1f}mm  "
-                f"descent={descent_str}  "
-                f"force_max={f_max:.3f}N  friction_max={fr_max:.3f}N  "
-                f"slip={slip_str}{lift_str}"
-            )
+            if self._track_stats:
+                f_max = self._max_force[world_id]
+                fr_max = self._max_friction[world_id]
+                slip = self._slip[world_id]
+                slip_str = f"{slip * 1000:.2f}mm" if not np.isnan(slip) else "n/a"
+                lift_str = ""
+                if not np.isnan(slip):
+                    nut_lift = self._nut_z_at_lift_end[world_id] - self._nut_z_at_lift_start[world_id]
+                    lift_str = f"  lift={nut_lift * 1000:.1f}mm"
+                z_after_release = self._state_nut_z_end[world_id, TaskType.RELEASE.value]
+                descent = z_after_release - nut_pos[2] if not np.isnan(z_after_release) else np.nan
+                descent_str = f"{descent * 1000:+.2f}mm" if not np.isnan(descent) else "n/a"
+                print(
+                    f"  World {world_id}: "
+                    f"nut=({nut_pos[0]:.4f}, {nut_pos[1]:.4f}, {nut_pos[2]:.4f})  "
+                    f"xy_err={xy_error * 1000:.1f}mm  "
+                    f"descent={descent_str}  "
+                    f"force_max={f_max:.3f}N  friction_max={fr_max:.3f}N  "
+                    f"slip={slip_str}{lift_str}"
+                )
+            else:
+                print(
+                    f"  World {world_id}: "
+                    f"nut=({nut_pos[0]:.4f}, {nut_pos[1]:.4f}, {nut_pos[2]:.4f})  "
+                    f"xy_err={xy_error * 1000:.1f}mm"
+                )
 
             # Collect errors instead of asserting immediately
             if not np.all(np.isfinite(nut_pos)):
@@ -1512,8 +1567,6 @@ class Example:
             if nut_pos[2] <= table_top_z:
                 errors.append(f"World {world_id}: Nut below table. z={nut_pos[2]:.4f}")
             # Phase 3: nut must reach the bottom of the bolt (threaded down).
-            # The target Z band is ±10mm around the nut_bolt_hydro steady-state
-            # reference of bolt_center + 33.3mm.
             if not (nut_at_bottom_z_min < nut_pos[2] < nut_at_bottom_z_max):
                 errors.append(
                     f"World {world_id}: Nut did not reach the bottom of the bolt. "
@@ -1521,6 +1574,14 @@ class Example:
                     f"[{nut_at_bottom_z_min:.4f}, {nut_at_bottom_z_max:.4f}] "
                     f"(bolt_center={bolt_center_z:.4f}, target={nut_at_bottom_z_ref:.4f})"
                 )
+
+        # Per-state report and penetration aggregate are only printed when
+        # tracking is enabled. Skip both cleanly otherwise.
+        if not self._track_stats:
+            if errors:
+                raise AssertionError("\n".join(errors))
+            print(f"test_final passed for all {self.world_count} worlds")
+            return
 
         # Per-state report: tabular format, one row per (state, world), with
         # force/slip metrics and rigid+hydro penetration side-by-side.
