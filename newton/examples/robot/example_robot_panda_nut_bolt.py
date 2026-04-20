@@ -270,14 +270,16 @@ def set_target_pose_kernel(
         # would let the nut keep walking off the bolt). Z follows the nut's
         # current height so the arm descends with the threading.
         ee_pos_target[tid] = wp.vec3(bolt_place_pos[0], bolt_place_pos[1], nut_pos[2])
-        yaw_step = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), screw_angle)
+        # Clockwise-from-above (negative about +Z) drives a right-handed thread
+        # downward. The previous sign was counterclockwise — actively unscrewing.
+        yaw_step = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), -screw_angle)
         ee_quat_target = yaw_step * ee_quat_prev
         t_gripper = 1.0
     elif task == TaskType.SCREW_REGRIP.value:
         # Fully open gripper, lift slightly, rotate yaw back to the pre-rotate
         # angle. XY stays locked on the bolt axis.
         ee_pos_target[tid] = wp.vec3(bolt_place_pos[0], bolt_place_pos[1], nut_pos[2] + screw_regrip_z_offset)
-        yaw_step = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), -screw_angle)
+        yaw_step = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), screw_angle)
         ee_quat_target = yaw_step * ee_quat_prev
         t_gripper = 0.0
     elif task == TaskType.RELEASE.value:
@@ -385,6 +387,7 @@ class Example:
         self._track_stats = args.test
         self.finger_kh = args.finger_kh
         self.nut_kh = args.nut_kh
+        self.nut_bolt_mu = float(args.nut_bolt_mu)
         self.viewer = viewer
 
         # Scene layout
@@ -489,14 +492,15 @@ class Example:
         self.model_single = copy.deepcopy(robot_builder).finalize()
 
         # Add bolt (fixed to ground) and nut (floating body).
-        # Both bolt and nut use the MuJoCo minimum mu (1e-5, MJ_MINMU floor) so
-        # the nut threads onto the bolt with the least possible friction.
+        # Both bolt and nut use the same mu (default 0.2, matches devel-example-nut-bolt).
         # MuJoCo combines pair friction as max(mu_a, mu_b), so:
-        #   effective nut-bolt friction  = max(1e-5, 1e-5) = 1e-5 (smooth threading)
-        #   effective nut-finger friction = max(1e-5, 1.0) = 1.0  (strong grip)
+        #   effective nut-bolt friction  = max(mu, mu)  = mu   (holds nut under gravity between screw cycles)
+        #   effective nut-finger friction = max(mu, 1.0) = 1.0 (strong grip)
+        # Higher mu resists sliding more (expect slower descent per screw cycle), but
+        # pure mu=1e-5 let gravity free-spin the nut after release, making Z unreliable.
         bolt_cfg = newton.ModelBuilder.ShapeConfig(
             margin=0.0,
-            mu=1e-5,
+            mu=self.nut_bolt_mu,
             ke=1e7,
             kd=1e4,
             gap=0.005,
@@ -1731,7 +1735,7 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
-        parser.set_defaults(num_frames=2400)
+        parser.set_defaults(num_frames=3000)
         parser.set_defaults(world_count=4)
         parser.add_argument(
             "--grasp-margin",
@@ -1748,14 +1752,14 @@ class Example:
         parser.add_argument(
             "--screw-cycles",
             type=int,
-            default=5,
-            help="Number of (rotate, regrip) screw cycles inserted between REFINE_PLACE and RELEASE (0 disables screwing). Descent per cycle plateaus past ~5 cycles as the nut meets deeper thread resistance.",
+            default=40,
+            help="Number of (rotate, regrip) screw cycles inserted between REFINE_PLACE and RELEASE (0 disables screwing).",
         )
         parser.add_argument(
             "--screw-angle-deg",
             type=float,
-            default=60.0,
-            help="Yaw step per screw cycle [degrees]. Smaller is more stable.",
+            default=120.0,
+            help="Yaw step per screw cycle [degrees]. Matches devel-example-nut-bolt reference (π/1.5).",
         )
         parser.add_argument(
             "--screw-regrip-z-offset",
@@ -1786,6 +1790,12 @@ class Example:
             type=float,
             default=1e11,
             help="Hydroelastic stiffness for the nut shape [Pa/m].",
+        )
+        parser.add_argument(
+            "--nut-bolt-mu",
+            type=float,
+            default=0.2,
+            help="Friction coefficient for nut and bolt shapes (matches devel-example-nut-bolt reference). Combined as max(mu_a, mu_b) — finger grip unaffected.",
         )
         parser.add_argument(
             "--anchor-contact",
