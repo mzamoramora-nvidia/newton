@@ -191,6 +191,7 @@ def set_target_pose_kernel(
     gripper_open_pos: float,
     gripper_closed_pos: float,
     gripper_screw_grip_pos: float,
+    gripper_screw_regrip_pos: float,
     screw_angle: float,
     screw_regrip_z_offset: float,
     bolt_place_pos: wp.vec3,
@@ -310,8 +311,16 @@ def set_target_pose_kernel(
     else:
         closed_pos = gripper_closed_pos
 
+    # The "open" target during SCREW_REGRIP is partial — just enough to clear
+    # the rotating hex corners — so the fingers don't have to complete a full
+    # stroke to the 6cm open position between every screw cycle.
+    if task == TaskType.SCREW_REGRIP.value:
+        open_pos = gripper_screw_regrip_pos
+    else:
+        open_pos = gripper_open_pos
+
     # Interpolate gripper between open and closed positions
-    gripper_pos = gripper_open_pos * (1.0 - t_gripper) + closed_pos * t_gripper
+    gripper_pos = open_pos * (1.0 - t_gripper) + closed_pos * t_gripper
     gripper_target[tid, 0] = gripper_pos
     gripper_target[tid, 1] = gripper_pos
 
@@ -433,6 +442,10 @@ class Example:
         screw_grip_margin = args.screw_grip_margin  # gentler closure during screw motion
         self.gripper_closed_pos = max(0.0, nut_grasp_width / 2.0 - grasp_margin)
         self.gripper_screw_grip_pos = max(0.0, nut_grasp_width / 2.0 - screw_grip_margin)
+        # Partial open for SCREW_REGRIP: hex across-corners radius + clearance.
+        # max radius = across_flats / (2 * cos(30deg)) ≈ 17.3mm; add clearance.
+        nut_corner_radius = nut_across_flats / (2.0 * np.cos(np.pi / 6.0))
+        self.gripper_screw_regrip_pos = nut_corner_radius + args.screw_regrip_clearance
         gripper_ke = 100.0  # from joint_target_ke for finger joints
         expected_force_per_finger = gripper_ke * grasp_margin
         expected_screw_force_per_finger = gripper_ke * screw_grip_margin
@@ -869,12 +882,17 @@ class Example:
             TaskType.MOVE_TO_BOLT,
             TaskType.REFINE_PLACE,
         ]
-        pre_screw_limits = [1.5, 1.0, 0.5, 1.0, 1.5, 2.0, 1.5]
+        # Tighter budgets on free-space states (APPROACH, REFINE_APPROACH) where
+        # IK converges quickly with no contact. Contact states (GRASP, STABILIZE,
+        # LIFT/MOVE_TO_BOLT carrying the nut, REFINE_PLACE) keep their original
+        # budgets since contact transients need settling time.
+        pre_screw_limits = [0.6, 0.4, 0.5, 1.0, 1.5, 2.0, 1.5]
 
         # N_SCREW_CYCLES x (SCREW_ROTATE, SCREW_REGRIP) inserted between
         # REFINE_PLACE and RELEASE. Each cycle's soft-limit pair is
-        # (rotate, regrip) seconds.
-        screw_cycle_limits = [0.8, 0.4]
+        # (rotate, regrip) seconds. Regrip budget < rotate: gripper is open,
+        # no nut load. Tighter than 0.35s overshoots the 120° yaw target.
+        screw_cycle_limits = [0.8, 0.35]
         screw_block = [TaskType.SCREW_ROTATE, TaskType.SCREW_REGRIP] * self.screw_cycles
         screw_block_limits = screw_cycle_limits * self.screw_cycles
 
@@ -883,7 +901,7 @@ class Example:
             TaskType.RETRACT,
             TaskType.HOME,
         ]
-        post_screw_limits = [0.5, 1.0, 2.0]
+        post_screw_limits = [0.5, 0.4, 0.8]
 
         task_schedule = pre_screw + screw_block + post_screw
         task_time_soft_limits = pre_screw_limits + screw_block_limits + post_screw_limits
@@ -924,6 +942,7 @@ class Example:
                 self.gripper_open_pos,
                 self.gripper_closed_pos,
                 self.gripper_screw_grip_pos,
+                self.gripper_screw_regrip_pos,
                 self.screw_angle,
                 self.screw_regrip_z_offset,
                 self.bolt_place_pos,
@@ -1764,8 +1783,14 @@ class Example:
         parser.add_argument(
             "--screw-regrip-z-offset",
             type=float,
-            default=0.008,
+            default=0.001,
             help="Z offset applied during SCREW_REGRIP to disengage the fingers [m].",
+        )
+        parser.add_argument(
+            "--screw-regrip-clearance",
+            type=float,
+            default=0.003,
+            help="Radial clearance over the hex across-corners radius for the SCREW_REGRIP finger target [m]. Partial open (vs fully retracting to --gripper-open-pos) avoids a full finger stroke per cycle.",
         )
         parser.add_argument(
             "--screw-grip-margin",
