@@ -1367,6 +1367,49 @@ class Example:
             cfg=obj_cfg,
             label=f"object_shape_{shape.name.lower()}",
         )
+
+        collider_cfg = replace(self.shape_cfg, density=0.0, is_visible=False)
+        if shape == ObjectShape.LEGO_BRICK:
+            sc_f = float(scale[0])
+            inset = 0.0001 * sc_f
+            ox = _LEGO_PITCH * 4 / 2.0 * sc_f
+            oy = _LEGO_PITCH * 2 / 2.0 * sc_f
+            center_z = (_LEGO_BRICK_HEIGHT + _LEGO_STUD_HEIGHT) / 2.0 * sc_f
+            body_bot = -center_z
+            body_top = _LEGO_BRICK_HEIGHT * sc_f - center_z
+            box_hz = 0.5 * (body_top - body_bot) - inset
+            box_cz = 0.5 * (body_bot + body_top)
+            floor_args = dict(hx=ox - inset, hy=oy - inset, hz=box_hz)
+            floor_xform = wp.transform(wp.vec3(0.0, 0.0, box_cz), wp.quat_identity())
+            wt = _LEGO_WALL_THICKNESS * sc_f
+            wall_specs = [
+                (wp.vec3(ox - 0.5 * wt, 0.0, box_cz), 0.5 * wt - inset, oy - inset, box_hz),
+                (wp.vec3(-(ox - 0.5 * wt), 0.0, box_cz), 0.5 * wt - inset, oy - inset, box_hz),
+                (wp.vec3(0.0, oy - 0.5 * wt, box_cz), ox - inset, 0.5 * wt - inset, box_hz),
+                (wp.vec3(0.0, -(oy - 0.5 * wt), box_cz), ox - inset, 0.5 * wt - inset, box_hz),
+            ]
+        else:
+            tiny = 1.0e-4
+            floor_args = dict(hx=tiny, hy=tiny, hz=tiny)
+            floor_xform = wp.transform_identity()
+            wall_specs = [
+                (wp.vec3(), tiny, tiny, tiny),
+                (wp.vec3(), tiny, tiny, tiny),
+                (wp.vec3(), tiny, tiny, tiny),
+                (wp.vec3(), tiny, tiny, tiny),
+            ]
+        builder.add_shape_box(
+            body=obj_body, **floor_args,
+            xform=floor_xform, cfg=collider_cfg,
+            label="object_collider_floor",
+        )
+        for w_pos, w_hx, w_hy, w_hz in wall_specs:
+            builder.add_shape_box(
+                body=obj_body, hx=w_hx, hy=w_hy, hz=w_hz,
+                xform=wp.transform(w_pos, wp.quat_identity()),
+                cfg=collider_cfg, label="object_collider_wall",
+            )
+
         return obj_body
 
     def _build_scene(self, robot_builder):
@@ -1500,6 +1543,7 @@ class Example:
         table_top_z = float(self.table_top[2])
         grasp_z_offset = {
             ObjectShape.BOLT: 0.02,
+            ObjectShape.BEAR: 0.01,
         }
         grasp_z_np = np.array(
             [
@@ -1528,8 +1572,8 @@ class Example:
             ObjectShape.RUBBER_DUCK: 0.10,
             ObjectShape.LEGO_BRICK: 0.15,
             ObjectShape.RJ45_PLUG: 0.10,
-            ObjectShape.BEAR: 0.15,
-            ObjectShape.NUT: 0.08,
+            ObjectShape.BEAR: 0.25,
+            ObjectShape.NUT: 0.15,
             ObjectShape.BOLT: 0.30,
         }
         stroke_mm = 85.0  # Robotiq 2F-85 full stroke
@@ -1605,9 +1649,7 @@ class Example:
 
             label = builder.shape_label[shape_idx] if shape_idx < len(builder.shape_label) else ""
             is_object = "object" in label
-            if is_object and ("nut" in label or "bolt" in label):
-                sdf_max_res = 96
-            elif is_object:
+            if is_object:
                 sdf_max_res = 96
             else:
                 sdf_max_res = 64
@@ -1658,14 +1700,18 @@ class Example:
                 short = label.split("/")[-1] if label else ""
                 is_fingertip = short in fingertip_names
                 is_object = "object" in short
+                is_table = "table" in short
 
-                if is_fingertip or is_object:
+                if is_fingertip or is_object or is_table:
                     cfg = self.shape_cfg
                     builder.shape_gap[shape_idx] = cfg.gap
                     builder.shape_material_mu[shape_idx] = cfg.mu
                     builder.shape_material_mu_torsional[shape_idx] = cfg.mu_torsional
                     builder.shape_material_mu_rolling[shape_idx] = cfg.mu_rolling
-                    builder.shape_material_kh[shape_idx] = self.kh
+                    if is_table:
+                        builder.shape_material_kh[shape_idx] = 1e10
+                    else:
+                        builder.shape_material_kh[shape_idx] = self.kh
                     builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
                     if is_fingertip:
                         builder.shape_flags[shape_idx] &= ~newton.ShapeFlags.VISIBLE
@@ -1721,9 +1767,9 @@ class Example:
             solver="newton",
             integrator="implicitfast",
             cone="elliptic",
-            iterations=50,
-            ls_iterations=100,
-            impratio=10.0,
+            iterations=100,
+            ls_iterations=200,
+            impratio=50.0,
             njmax=nconmax_per_world,
             nconmax=nconmax_per_world,
         )
