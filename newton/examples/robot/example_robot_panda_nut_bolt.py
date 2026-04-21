@@ -43,6 +43,45 @@ SDF_NARROW_BAND_NUT_BOLT = (-0.005, 0.005)
 SDF_MAX_RESOLUTION_GRIPPER = 64
 SDF_NARROW_BAND_GRIPPER = (-0.01, 0.01)
 
+# Scene layout (metres, world frame)
+TABLE_HEIGHT = 0.1
+TABLE_HALF_EXTENT = 0.4
+TABLE_POS = wp.vec3(0.0, -0.5, 0.5 * TABLE_HEIGHT)
+TABLE_TOP_CENTER = TABLE_POS + wp.vec3(0.0, 0.0, 0.5 * TABLE_HEIGHT)
+ROBOT_BASE_POS = TABLE_TOP_CENTER + wp.vec3(-0.5, 0.0, 0.0)
+BOLT_BASE_POS = TABLE_TOP_CENTER + wp.vec3(0.1, 0.0, 0.0)
+NUT_START_POS = TABLE_TOP_CENTER + wp.vec3(0.05, 0.15, 0.0)
+
+# EE task offsets — added to per-task anchor poses.
+TASK_OFFSET_APPROACH = wp.vec3(0.0, 0.0, 0.04)
+TASK_OFFSET_LIFT = wp.vec3(0.0, 0.0, 0.15)
+TASK_OFFSET_BOLT_APPROACH = wp.vec3(0.0, 0.0, 0.06)
+TASK_OFFSET_PLACE = wp.vec3(0.0, 0.0, 0.001)
+TASK_OFFSET_RETRACT = wp.vec3(0.0, 0.0, 0.10)
+
+# Grasp geometry
+GRASP_YAW_OFFSET_DEG = 30.0  # gripper yaw relative to nut, about Z
+GRASPING_Z_OFFSET = 0.001
+NUT_ACROSS_FLATS = 0.030   # M20 nut, 30 mm across flats
+GRIPPER_OPEN_POS = 0.06    # per-finger full-open position [m]
+GRIPPER_KE = 100.0         # must match joint_target_ke for finger joints
+
+# IK convergence thresholds for the task-FSM advance condition.
+POS_THRESHOLD_XY = 0.0005    # 0.5 mm
+POS_THRESHOLD_Z = 0.00075    # 0.75 mm
+ROT_THRESHOLD_DEG = 0.5
+
+# Collision pipeline buffer sizing (per world).
+RIGID_CONTACT_MAX_PER_WORLD = 1000
+
+# Task-FSM soft time budgets [seconds].
+#   Pre-screw covers APPROACH, REFINE_APPROACH, GRASP, STABILIZE, LIFT,
+#   MOVE_TO_BOLT, REFINE_PLACE. Screw cycles repeat (rotate, regrip).
+#   Post-screw covers RELEASE, RETRACT, HOME.
+PRE_SCREW_LIMITS = [0.6, 0.4, 0.5, 1.0, 1.5, 2.0, 1.5]
+SCREW_CYCLE_LIMITS = [0.8, 0.35]
+POST_SCREW_LIMITS = [0.5, 0.4, 0.8]
+
 
 class TaskType(enum.IntEnum):
     APPROACH = 0
@@ -479,57 +518,51 @@ class Example:
         self.nut_bolt_mu = float(args.nut_bolt_mu)
         self.viewer = viewer
 
-        # Scene layout
-        self.table_height = 0.1
-        self.table_pos = wp.vec3(0.0, -0.5, 0.5 * self.table_height)
-        self.table_top_center = self.table_pos + wp.vec3(0.0, 0.0, 0.5 * self.table_height)
-        self.robot_base_pos = self.table_top_center + wp.vec3(-0.5, 0.0, 0.0)
+        # Scene layout — see module-level TABLE_/ROBOT_/BOLT_/NUT_* constants.
+        self.table_height = TABLE_HEIGHT
+        self.table_pos = TABLE_POS
+        self.table_top_center = TABLE_TOP_CENTER
+        self.robot_base_pos = ROBOT_BASE_POS
+        self.bolt_base_pos = BOLT_BASE_POS
+        self.nut_start_pos = NUT_START_POS
 
-        # Bolt and nut positions on the table
-        self.bolt_base_pos = self.table_top_center + wp.vec3(0.1, 0.0, 0.0)
-        self.nut_start_pos = self.table_top_center + wp.vec3(0.05, 0.15, 0.0)
-
-        # Task offsets
-        self.task_offset_approach = wp.vec3(0.0, 0.0, 0.04)
-        self.task_offset_lift = wp.vec3(0.0, 0.0, 0.15)
-        self.task_offset_bolt_approach = wp.vec3(0.0, 0.0, 0.06)
-        self.task_offset_place = wp.vec3(0.0, 0.0, 0.001)
-        self.task_offset_retract = wp.vec3(0.0, 0.0, 0.10)
-        self.grasping_z_offset = 0.001
-        self.grasp_yaw_offset = float(wp.radians(30.0))  # rotate gripper 30 deg about Z wrt nut
+        # Task offsets — see module-level TASK_OFFSET_* constants.
+        self.task_offset_approach = TASK_OFFSET_APPROACH
+        self.task_offset_lift = TASK_OFFSET_LIFT
+        self.task_offset_bolt_approach = TASK_OFFSET_BOLT_APPROACH
+        self.task_offset_place = TASK_OFFSET_PLACE
+        self.task_offset_retract = TASK_OFFSET_RETRACT
+        self.grasping_z_offset = GRASPING_Z_OFFSET
+        self.grasp_yaw_offset = float(wp.radians(GRASP_YAW_OFFSET_DEG))
         self.screw_cycles = int(args.screw_cycles)
         self.screw_angle = float(wp.radians(float(args.screw_angle_deg)))
         self.screw_regrip_z_offset = float(args.screw_regrip_z_offset)
         self.max_nut_tilt_deg = float(args.max_nut_tilt_deg)
 
-        # Per-axis advance thresholds
-        self.pos_threshold_xy = 0.0005  # 0.5 mm
-        self.pos_threshold_z = 0.00075  # 0.75 mm (tighter for vertical precision)
-        self.rot_threshold_deg = 0.5  # degrees
+        # Per-axis IK-settle thresholds (module constants).
+        self.pos_threshold_xy = POS_THRESHOLD_XY
+        self.pos_threshold_z = POS_THRESHOLD_Z
+        self.rot_threshold_deg = ROT_THRESHOLD_DEG
 
-        # Gripper open/closed positions [m per finger]
-        # Panda gripper: each finger travels 0 (closed) to 0.04m (open), we use 0.06 as open target
-        self.gripper_open_pos = 0.06
-        # Grasp margin: close to nut half-width minus a margin to avoid over-squeezing.
-        # For a regular hex nut, the grasp width depends on the angle relative to the flats.
-        # width(theta) = across_flats / cos(theta_eff), where theta_eff is the angle from
-        # the nearest flat normal (0 to 30 deg range due to 6-fold symmetry).
-        nut_across_flats = 0.030  # M20 nut, 30mm
-        # theta_eff: angle from the nearest flat normal (0-30 deg, 6-fold symmetry)
+        # Gripper geometry. Panda fingers travel 0 (closed) to 0.04 m (open);
+        # GRIPPER_OPEN_POS=0.06 is the slightly-overcommanded open target.
+        self.gripper_open_pos = GRIPPER_OPEN_POS
+        # Grasp margin closes past first contact to produce a known squeeze
+        # force. For a regular hex nut, the grasp width depends on the angle
+        # from the nearest flat normal (0-30 deg, 6-fold symmetry).
         rem = self.grasp_yaw_offset % (wp.pi / 3.0)  # remainder in [0, 60 deg)
         theta_eff = rem if rem <= wp.pi / 6.0 else wp.pi / 3.0 - rem
-        nut_grasp_width = nut_across_flats / float(wp.cos(theta_eff))
+        nut_grasp_width = NUT_ACROSS_FLATS / float(wp.cos(theta_eff))
         grasp_margin = args.grasp_margin  # extra closure past first contact [m]
         screw_grip_margin = args.screw_grip_margin  # gentler closure during screw motion
         self.gripper_closed_pos = max(0.0, nut_grasp_width / 2.0 - grasp_margin)
         self.gripper_screw_grip_pos = max(0.0, nut_grasp_width / 2.0 - screw_grip_margin)
         # Partial open for SCREW_REGRIP: hex across-corners radius + clearance.
         # max radius = across_flats / (2 * cos(30deg)) ≈ 17.3mm; add clearance.
-        nut_corner_radius = nut_across_flats / (2.0 * float(wp.cos(wp.pi / 6.0)))
+        nut_corner_radius = NUT_ACROSS_FLATS / (2.0 * float(wp.cos(wp.pi / 6.0)))
         self.gripper_screw_regrip_pos = nut_corner_radius + args.screw_regrip_clearance
-        gripper_ke = 100.0  # from joint_target_ke for finger joints
-        expected_force_per_finger = gripper_ke * grasp_margin
-        expected_screw_force_per_finger = gripper_ke * screw_grip_margin
+        expected_force_per_finger = GRIPPER_KE * grasp_margin
+        expected_screw_force_per_finger = GRIPPER_KE * screw_grip_margin
         print(
             f"Grasp: yaw={float(wp.degrees(self.grasp_yaw_offset)):.0f}deg, "
             f"nut width={nut_grasp_width * 1000:.1f}mm, "
@@ -544,126 +577,7 @@ class Example:
         )
 
         # Download nut/bolt assets
-        print("Downloading nut/bolt assets...")
-        asset_path = newton.examples.download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
-        bolt_file = str(asset_path / f"factory_bolt_{ASSEMBLY_STR}.obj")
-        nut_file = str(asset_path / f"factory_nut_{ASSEMBLY_STR}_subdiv_3x.obj")
-
-        # Load nut/bolt meshes with SDF
-        bolt_mesh, bolt_center, bolt_half_extents = load_mesh_with_sdf(
-            bolt_file,
-            gap=0.005,
-            max_resolution=SDF_MAX_RESOLUTION_NUT_BOLT,
-            narrow_band_range=SDF_NARROW_BAND_NUT_BOLT,
-        )
-        nut_mesh, nut_center, _nut_half_extents = load_mesh_with_sdf(
-            nut_file,
-            gap=0.005,
-            max_resolution=SDF_MAX_RESOLUTION_NUT_BOLT,
-            narrow_band_range=SDF_NARROW_BAND_NUT_BOLT,
-        )
-
-        # Compute placement position above bolt top
-        bolt_effective_center = wp.vec3(
-            self.bolt_base_pos[0] + float(bolt_center[0]),
-            self.bolt_base_pos[1] + float(bolt_center[1]),
-            self.bolt_base_pos[2] + float(bolt_center[2]),
-        )
-        self.bolt_place_pos = wp.vec3(
-            bolt_effective_center[0],
-            bolt_effective_center[1],
-            bolt_effective_center[2] + float(bolt_half_extents[2]) + 0.005,
-        )
-
-        # Store bolt frame for debug visualization (static, identity rotation)
-        self.bolt_frame_pos = bolt_effective_center
-
-        # Build robot with table, gravity compensation, and hydroelastic fingers
-        robot_builder = self.build_franka_with_table()
-        self.robot_body_count = robot_builder.body_count
-
-        # Model for IK (robot only, no nut/bolt)
-        self.model_single = copy.deepcopy(robot_builder).finalize()
-
-        # Add bolt (fixed to ground) and nut (floating body).
-        # Both bolt and nut use the same mu (default 0.2, matches devel-example-nut-bolt).
-        # MuJoCo combines pair friction as max(mu_a, mu_b), so:
-        #   effective nut-bolt friction  = max(mu, mu)  = mu   (holds nut under gravity between screw cycles)
-        #   effective nut-finger friction = max(mu, 1.0) = 1.0 (strong grip)
-        # Higher mu resists sliding more (expect slower descent per screw cycle), but
-        # pure mu=1e-5 let gravity free-spin the nut after release, making Z unreliable.
-        bolt_cfg = newton.ModelBuilder.ShapeConfig(
-            margin=0.0,
-            mu=self.nut_bolt_mu,
-            ke=1e7,
-            kd=1e4,
-            gap=0.005,
-            density=8000.0,
-            mu_torsional=0.0,
-            mu_rolling=0.0,
-            is_hydroelastic=True,
-        )
-        nut_cfg = replace(bolt_cfg, kh=self.nut_kh)
-
-        bolt_xform = wp.transform(self.bolt_base_pos, wp.quat_identity())
-        add_mesh_object(
-            robot_builder,
-            bolt_mesh,
-            bolt_xform,
-            bolt_cfg,
-            label="bolt",
-            center_vec=bolt_center,
-            floating=False,
-        )
-
-        self.nut_body_index = robot_builder.body_count
-        nut_xform = wp.transform(
-            self.nut_start_pos,
-            # wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), np.pi / 8),
-        )
-        add_mesh_object(
-            robot_builder,
-            nut_mesh,
-            nut_xform,
-            nut_cfg,
-            label="nut",
-            center_vec=nut_center,
-            floating=True,
-        )
-
-        # Build multi-world scene
-        scene = newton.ModelBuilder()
-        scene.replicate(robot_builder, self.world_count)
-        ground_shape_idx = scene.add_ground_plane()
-
-        # Filter out collisions between the robot base and the ground plane.
-        # Robot sits on the table above ground; ground contacts are spurious.
-        base_link_suffixes = ("/fr3_link0", "/fr3_link1")
-        for shape_idx, body_idx in enumerate(scene.shape_body):
-            if body_idx < 0:
-                continue
-            label = scene.body_label[body_idx]
-            if label.endswith(base_link_suffixes):
-                scene.add_shape_collision_filter_pair(shape_idx, ground_shape_idx)
-
-        self.model = scene.finalize()
-        self.num_bodies_per_world = self.model.body_count // self.world_count
-
-        # Randomize the nut's initial XY position per world by patching
-        # model.joint_q before the first eval_fk. The nut is a free body with
-        # 7 joint coords (x, y, z, qx, qy, qz, qw) placed after the 9 robot
-        # arm/gripper DOFs within each world's joint_q slice.
-        self.nut_xy_jitter = args.nut_xy_jitter
-        joint_q_per_world = self.model.joint_coord_count // self.world_count
-        nut_joint_q_offset = 9
-        rng = np.random.default_rng(args.seed)
-        xy_jitter_np = rng.uniform(-self.nut_xy_jitter, self.nut_xy_jitter, size=(self.world_count, 2)).astype(
-            np.float32
-        )
-        joint_q_view = self.model.joint_q.reshape((self.world_count, joint_q_per_world))
-        current = joint_q_view[:, nut_joint_q_offset : nut_joint_q_offset + 2].numpy()
-        updated = wp.array(current + xy_jitter_np, dtype=wp.float32)
-        wp.copy(dest=joint_q_view[:, nut_joint_q_offset : nut_joint_q_offset + 2], src=updated)
+        self.build_scene(args)
 
         # Contact sensor: only needed when tracking is on. Must be created
         # BEFORE Contacts so the "force" attribute is requested on the model.
@@ -681,7 +595,7 @@ class Example:
         # pressure field). It's required for the imgui Show Isosurface toggle
         # and for hydro penetration tracking (--test). Default off even when a
         # viewer is present — pass --show-isosurface to opt in at startup.
-        self.rigid_contact_max = 1000 * self.world_count
+        self.rigid_contact_max = RIGID_CONTACT_MAX_PER_WORLD * self.world_count
         want_iso = self._track_stats or args.show_isosurface
         sdf_hydroelastic_config = HydroelasticSDF.Config(
             output_contact_surface=want_iso,
@@ -801,6 +715,122 @@ class Example:
 
         self.capture()
 
+    def build_scene(self, args):
+        """Assemble the scene: download nut/bolt assets, build the robot +
+        table builder (via :meth:`build_franka_with_table`), add nut and bolt
+        shapes, replicate across worlds, add the ground plane, and finalize
+        ``self.model``. Also patches the nut's initial XY per world.
+        """
+        # Download IsaacGymEnvs mesh assets.
+        print("Downloading nut/bolt assets...")
+        asset_path = newton.examples.download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
+        bolt_file = str(asset_path / f"factory_bolt_{ASSEMBLY_STR}.obj")
+        nut_file = str(asset_path / f"factory_nut_{ASSEMBLY_STR}_subdiv_3x.obj")
+
+        # Load nut/bolt meshes with SDF (high resolution for threaded geometry).
+        bolt_mesh, bolt_center, bolt_half_extents = load_mesh_with_sdf(
+            bolt_file,
+            gap=0.005,
+            max_resolution=SDF_MAX_RESOLUTION_NUT_BOLT,
+            narrow_band_range=SDF_NARROW_BAND_NUT_BOLT,
+        )
+        nut_mesh, nut_center, _nut_half_extents = load_mesh_with_sdf(
+            nut_file,
+            gap=0.005,
+            max_resolution=SDF_MAX_RESOLUTION_NUT_BOLT,
+            narrow_band_range=SDF_NARROW_BAND_NUT_BOLT,
+        )
+
+        # Cached bolt-top pose for IK target + debug-frame drawing.
+        bolt_effective_center = wp.vec3(
+            self.bolt_base_pos[0] + float(bolt_center[0]),
+            self.bolt_base_pos[1] + float(bolt_center[1]),
+            self.bolt_base_pos[2] + float(bolt_center[2]),
+        )
+        self.bolt_place_pos = wp.vec3(
+            bolt_effective_center[0],
+            bolt_effective_center[1],
+            bolt_effective_center[2] + float(bolt_half_extents[2]) + 0.005,
+        )
+        self.bolt_frame_pos = bolt_effective_center
+
+        # Robot + table (gravity compensation, hydroelastic fingers, coarse SDFs on arm).
+        robot_builder = self.build_franka_with_table()
+        self.robot_body_count = robot_builder.body_count
+
+        # Arm-only model for IK (no nut/bolt).
+        self.model_single = copy.deepcopy(robot_builder).finalize()
+
+        # Nut + bolt shape config. Both use the same mu (default 0.2, matches
+        # devel-example-nut-bolt). MuJoCo combines pair friction as
+        # max(mu_a, mu_b), so:
+        #   effective nut-bolt friction  = max(mu, mu)  = mu   (holds nut under gravity between screw cycles)
+        #   effective nut-finger friction = max(mu, 1.0) = 1.0 (strong grip)
+        # pure mu=1e-5 let gravity free-spin the nut after release, making Z
+        # unreliable. Higher mu resists sliding (slower descent per cycle).
+        bolt_cfg = newton.ModelBuilder.ShapeConfig(
+            margin=0.0,
+            mu=self.nut_bolt_mu,
+            ke=1e7,
+            kd=1e4,
+            gap=0.005,
+            density=8000.0,
+            mu_torsional=0.0,
+            mu_rolling=0.0,
+            is_hydroelastic=True,
+        )
+        nut_cfg = replace(bolt_cfg, kh=self.nut_kh)
+
+        add_mesh_object(
+            robot_builder,
+            bolt_mesh,
+            wp.transform(self.bolt_base_pos, wp.quat_identity()),
+            bolt_cfg,
+            label="bolt",
+            center_vec=bolt_center,
+            floating=False,
+        )
+        self.nut_body_index = robot_builder.body_count
+        add_mesh_object(
+            robot_builder,
+            nut_mesh,
+            wp.transform(self.nut_start_pos),
+            nut_cfg,
+            label="nut",
+            center_vec=nut_center,
+            floating=True,
+        )
+
+        # Replicate into a multi-world scene + ground plane, then filter out
+        # spurious ground contacts on the robot base (the robot sits on the table).
+        scene = newton.ModelBuilder()
+        scene.replicate(robot_builder, self.world_count)
+        ground_shape_idx = scene.add_ground_plane()
+        base_link_suffixes = ("/fr3_link0", "/fr3_link1")
+        for shape_idx, body_idx in enumerate(scene.shape_body):
+            if body_idx < 0:
+                continue
+            if scene.body_label[body_idx].endswith(base_link_suffixes):
+                scene.add_shape_collision_filter_pair(shape_idx, ground_shape_idx)
+
+        self.model = scene.finalize()
+        self.num_bodies_per_world = self.model.body_count // self.world_count
+
+        # Randomize the nut's initial XY per world. The nut is a free body with
+        # 7 joint coords (x, y, z, qx, qy, qz, qw) placed after the 9 robot
+        # arm/gripper DOFs within each world's joint_q slice.
+        self.nut_xy_jitter = args.nut_xy_jitter
+        joint_q_per_world = self.model.joint_coord_count // self.world_count
+        nut_joint_q_offset = 9
+        rng = np.random.default_rng(args.seed)
+        xy_jitter_np = rng.uniform(-self.nut_xy_jitter, self.nut_xy_jitter, size=(self.world_count, 2)).astype(
+            np.float32
+        )
+        joint_q_view = self.model.joint_q.reshape((self.world_count, joint_q_per_world))
+        current = joint_q_view[:, nut_joint_q_offset : nut_joint_q_offset + 2].numpy()
+        updated = wp.array(current + xy_jitter_np, dtype=wp.float32)
+        wp.copy(dest=joint_q_view[:, nut_joint_q_offset : nut_joint_q_offset + 2], src=updated)
+
     def build_franka_with_table(self):
         builder = newton.ModelBuilder()
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
@@ -918,8 +948,8 @@ class Example:
 
         # Table (hydroelastic mesh on world body)
         table_mesh = newton.Mesh.create_box(
-            0.4,
-            0.4,
+            TABLE_HALF_EXTENT,
+            TABLE_HALF_EXTENT,
             0.5 * self.table_height,
             duplicate_vertices=True,
             compute_normals=False,
@@ -994,26 +1024,18 @@ class Example:
             TaskType.MOVE_TO_BOLT,
             TaskType.REFINE_PLACE,
         ]
-        # Tighter budgets on free-space states (APPROACH, REFINE_APPROACH) where
-        # IK converges quickly with no contact. Contact states (GRASP, STABILIZE,
-        # LIFT/MOVE_TO_BOLT carrying the nut, REFINE_PLACE) keep their original
-        # budgets since contact transients need settling time.
-        pre_screw_limits = [0.6, 0.4, 0.5, 1.0, 1.5, 2.0, 1.5]
-
-        # N_SCREW_CYCLES x (SCREW_ROTATE, SCREW_REGRIP) inserted between
-        # REFINE_PLACE and RELEASE. Each cycle's soft-limit pair is
-        # (rotate, regrip) seconds. Regrip budget < rotate: gripper is open,
-        # no nut load. Tighter than 0.35s overshoots the 120° yaw target.
-        screw_cycle_limits = [0.8, 0.35]
+        # Time budgets live in module-level PRE_SCREW_LIMITS, SCREW_CYCLE_LIMITS,
+        # POST_SCREW_LIMITS. Screw cycles repeat (rotate, regrip) per cycle.
+        pre_screw_limits = PRE_SCREW_LIMITS
         screw_block = [TaskType.SCREW_ROTATE, TaskType.SCREW_REGRIP] * self.screw_cycles
-        screw_block_limits = screw_cycle_limits * self.screw_cycles
+        screw_block_limits = SCREW_CYCLE_LIMITS * self.screw_cycles
 
         post_screw = [
             TaskType.RELEASE,
             TaskType.RETRACT,
             TaskType.HOME,
         ]
-        post_screw_limits = [0.5, 0.4, 0.8]
+        post_screw_limits = POST_SCREW_LIMITS
 
         task_schedule = pre_screw + screw_block + post_screw
         task_time_soft_limits = pre_screw_limits + screw_block_limits + post_screw_limits
