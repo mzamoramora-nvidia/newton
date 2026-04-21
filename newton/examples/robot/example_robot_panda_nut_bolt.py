@@ -143,36 +143,6 @@ def add_mesh_object(
         return -1
 
 
-def _transform_points_body_to_world(p_local: np.ndarray, body_idx: np.ndarray, body_q: np.ndarray) -> np.ndarray:
-    """Transform body-local points to world frame using body transforms.
-
-    Shapes on body=-1 (world body) pass their points through unchanged.
-
-    Args:
-        p_local: (N, 3) body-local points.
-        body_idx: (N,) body index per point. Use -1 for world-attached shapes.
-        body_q: (body_count, 7) body transforms as [px, py, pz, qx, qy, qz, qw].
-    """
-    out = p_local.copy()
-    has_body = body_idx >= 0
-    if not np.any(has_body):
-        return out
-    tf = body_q[body_idx[has_body]]
-    pos = tf[:, :3]
-    qx, qy, qz, qw = tf[:, 3], tf[:, 4], tf[:, 5], tf[:, 6]
-    v = p_local[has_body]
-    # Rodrigues-style quat rotation: rotated = v + 2*qw*cross(q_vec,v) + 2*cross(q_vec, cross(q_vec, v))
-    tx = 2.0 * (qy * v[:, 2] - qz * v[:, 1])
-    ty = 2.0 * (qz * v[:, 0] - qx * v[:, 2])
-    tz = 2.0 * (qx * v[:, 1] - qy * v[:, 0])
-    rx = v[:, 0] + qw * tx + (qy * tz - qz * ty)
-    ry = v[:, 1] + qw * ty + (qz * tx - qx * tz)
-    rz = v[:, 2] + qw * tz + (qx * ty - qy * tx)
-    out[has_body, 0] = pos[:, 0] + rx
-    out[has_body, 1] = pos[:, 1] + ry
-    out[has_body, 2] = pos[:, 2] + rz
-    return out
-
 
 @wp.kernel(enable_backward=False)
 def set_target_pose_kernel(
@@ -379,6 +349,116 @@ def advance_task_kernel(
             task_init_body_q[body_id] = body_q[body_id]
 
 
+# Shape categories used by the penetration kernels. Pair categories are the
+# output slot index: 0=nut_finger, 1=nut_bolt, 2=nut_table.
+SHAPE_CAT_OTHER = 0
+SHAPE_CAT_NUT = 1
+SHAPE_CAT_FINGER = 2
+SHAPE_CAT_BOLT = 3
+SHAPE_CAT_TABLE = 4
+
+
+@wp.func
+def _classify_pair_nut_x(cat0: int, cat1: int) -> int:
+    """Return pair category index (0=nut_finger, 1=nut_bolt, 2=nut_table) or -1
+    if the pair is not a tracked nut-vs-X contact."""
+    # Put the nut on the left.
+    a = cat0
+    b = cat1
+    if b == SHAPE_CAT_NUT:
+        a = cat1
+        b = cat0
+    if a != SHAPE_CAT_NUT:
+        return -1
+    if b == SHAPE_CAT_FINGER:
+        return 0
+    if b == SHAPE_CAT_BOLT:
+        return 1
+    if b == SHAPE_CAT_TABLE:
+        return 2
+    return -1
+
+
+@wp.kernel(enable_backward=False)
+def update_rigid_penetration_kernel(
+    contact_count: wp.array[wp.int32],
+    contact_point0: wp.array[wp.vec3],
+    contact_point1: wp.array[wp.vec3],
+    contact_normal: wp.array[wp.vec3],
+    contact_shape0: wp.array[wp.int32],
+    contact_shape1: wp.array[wp.int32],
+    shape_body: wp.array[wp.int32],
+    shape_world: wp.array[wp.int32],
+    shape_category: wp.array[wp.int32],
+    body_q: wp.array[wp.transform],
+    # output (wc, 3) — pair categories: 0=nut_finger, 1=nut_bolt, 2=nut_table
+    pen_rigid: wp.array2d[float],
+):
+    tid = wp.tid()
+    if tid >= contact_count[0]:
+        return
+    s0 = contact_shape0[tid]
+    s1 = contact_shape1[tid]
+    if s0 < 0 or s1 < 0:
+        return
+    pair_cat = _classify_pair_nut_x(shape_category[s0], shape_category[s1])
+    if pair_cat < 0:
+        return
+
+    # Transform contact points from body-local to world and compute depth.
+    b0 = shape_body[s0]
+    b1 = shape_body[s1]
+    p0 = contact_point0[tid]
+    p1 = contact_point1[tid]
+    if b0 >= 0:
+        p0 = wp.transform_point(body_q[b0], p0)
+    if b1 >= 0:
+        p1 = wp.transform_point(body_q[b1], p1)
+    depth = wp.dot(p0 - p1, contact_normal[tid])
+    if depth <= 0.0:
+        return
+
+    world = shape_world[s0]
+    if world < 0:
+        world = shape_world[s1]
+    if world < 0 or world >= pen_rigid.shape[0]:
+        return
+    wp.atomic_max(pen_rigid, world, pair_cat, depth)
+
+
+@wp.kernel(enable_backward=False)
+def update_hydro_penetration_kernel(
+    face_count: wp.array[wp.int32],
+    face_depth: wp.array[float],
+    face_shape_pair: wp.array[wp.vec2i],
+    shape_world: wp.array[wp.int32],
+    shape_category: wp.array[wp.int32],
+    # output (wc, 3)
+    pen_hydro: wp.array2d[float],
+):
+    tid = wp.tid()
+    if tid >= face_count[0]:
+        return
+    pair = face_shape_pair[tid]
+    s0 = pair[0]
+    s1 = pair[1]
+    if s0 < 0 or s1 < 0:
+        return
+    pair_cat = _classify_pair_nut_x(shape_category[s0], shape_category[s1])
+    if pair_cat < 0:
+        return
+    # Hydro depth is negative when penetrating; flip sign to match rigid convention.
+    depth = -face_depth[tid]
+    if depth <= 0.0:
+        return
+    world = shape_world[s0]
+    if world < 0:
+        world = shape_world[s1]
+    if world < 0 or world >= pen_hydro.shape[0]:
+        return
+    wp.atomic_max(pen_hydro, world, pair_cat, depth)
+
+
 class Example:
     def __init__(self, viewer, args):
         self.fps = 60
@@ -416,9 +496,9 @@ class Example:
         self.task_offset_place = wp.vec3(0.0, 0.0, 0.001)
         self.task_offset_retract = wp.vec3(0.0, 0.0, 0.10)
         self.grasping_z_offset = 0.001
-        self.grasp_yaw_offset = 30.0 * wp.pi / 180.0  # rotate gripper 30 deg about Z wrt nut
+        self.grasp_yaw_offset = float(wp.radians(30.0))  # rotate gripper 30 deg about Z wrt nut
         self.screw_cycles = int(args.screw_cycles)
-        self.screw_angle = float(np.radians(args.screw_angle_deg))
+        self.screw_angle = float(wp.radians(float(args.screw_angle_deg)))
         self.screw_regrip_z_offset = float(args.screw_regrip_z_offset)
         self.max_nut_tilt_deg = float(args.max_nut_tilt_deg)
 
@@ -436,22 +516,22 @@ class Example:
         # the nearest flat normal (0 to 30 deg range due to 6-fold symmetry).
         nut_across_flats = 0.030  # M20 nut, 30mm
         # theta_eff: angle from the nearest flat normal (0-30 deg, 6-fold symmetry)
-        rem = self.grasp_yaw_offset % (np.pi / 3)  # remainder in [0, 60 deg)
-        theta_eff = rem if rem <= np.pi / 6 else np.pi / 3 - rem
-        nut_grasp_width = nut_across_flats / np.cos(theta_eff)
+        rem = self.grasp_yaw_offset % (wp.pi / 3.0)  # remainder in [0, 60 deg)
+        theta_eff = rem if rem <= wp.pi / 6.0 else wp.pi / 3.0 - rem
+        nut_grasp_width = nut_across_flats / float(wp.cos(theta_eff))
         grasp_margin = args.grasp_margin  # extra closure past first contact [m]
         screw_grip_margin = args.screw_grip_margin  # gentler closure during screw motion
         self.gripper_closed_pos = max(0.0, nut_grasp_width / 2.0 - grasp_margin)
         self.gripper_screw_grip_pos = max(0.0, nut_grasp_width / 2.0 - screw_grip_margin)
         # Partial open for SCREW_REGRIP: hex across-corners radius + clearance.
         # max radius = across_flats / (2 * cos(30deg)) ≈ 17.3mm; add clearance.
-        nut_corner_radius = nut_across_flats / (2.0 * np.cos(np.pi / 6.0))
+        nut_corner_radius = nut_across_flats / (2.0 * float(wp.cos(wp.pi / 6.0)))
         self.gripper_screw_regrip_pos = nut_corner_radius + args.screw_regrip_clearance
         gripper_ke = 100.0  # from joint_target_ke for finger joints
         expected_force_per_finger = gripper_ke * grasp_margin
         expected_screw_force_per_finger = gripper_ke * screw_grip_margin
         print(
-            f"Grasp: yaw={np.degrees(self.grasp_yaw_offset):.0f}deg, "
+            f"Grasp: yaw={float(wp.degrees(self.grasp_yaw_offset)):.0f}deg, "
             f"nut width={nut_grasp_width * 1000:.1f}mm, "
             f"margin={grasp_margin * 1000:.1f}mm, "
             f"finger target={self.gripper_closed_pos * 1000:.1f}mm, "
@@ -702,6 +782,10 @@ class Example:
             # pushing the nut off-axis and threading will not work well.
             self._state_nut_tilt_max = np.zeros((self.world_count, n_states))
             self._classify_shapes()
+            # GPU output buffers for the penetration-reduction kernels.
+            # Columns: 0=nut_finger, 1=nut_bolt, 2=nut_table.
+            self._pen_rigid_current_wp = wp.zeros((self.world_count, 3), dtype=float)
+            self._pen_hydro_current_wp = wp.zeros((self.world_count, 3), dtype=float)
 
         # SPS (steps per second) tracker — lightweight, always on.
         self._sps_frame_count = 0
@@ -1295,169 +1379,109 @@ class Example:
         ee_target = self.ee_pos_target.numpy()[w]
         self._gui_pos_err = ee_target - ee_pos
 
-        # EE rotation error (degrees)
-        ee_quat = body_q[ee_body_id][3:7]
-        target_vec4 = self.ee_rot_target.numpy()[w]
-        # q_rel = q_current * inv(q_target)
-        q_cur = ee_quat
-        q_tgt = target_vec4
-        dot = abs(np.dot(q_cur, q_tgt))
-        dot = min(dot, 1.0)
-        self._gui_rot_err = np.degrees(2.0 * np.arccos(dot))
+        # EE rotation error via Warp quaternion math:
+        #   q_err = q_current * inv(q_target); angle = 2 * acos(|q_err.w|).
+        q_cur = wp.quat(body_q[ee_body_id][3:7])
+        q_tgt = wp.quat(self.ee_rot_target.numpy()[w])
+        q_err = q_cur * wp.quat_inverse(q_tgt)
+        w_abs = min(1.0, abs(float(q_err[3])))
+        self._gui_rot_err = float(wp.degrees(2.0 * wp.acos(w_abs)))
 
     def _classify_shapes(self):
-        """Pre-compute shape->category boolean maps and per-shape world indices
-        so penetration contacts can be filtered per category and per world."""
+        """Pre-compute the per-shape category (nut / finger / bolt / table /
+        other) and the per-shape world index on the GPU, so penetration
+        kernels can classify and route contacts without host-side work."""
         n_shapes = self.model.shape_count
-        # Cache the host copy of shape_body so per-frame tracking doesn't sync.
-        self._shape_body_np = self.model.shape_body.numpy()
-        shape_body = self._shape_body_np
+        shape_body_np = self.model.shape_body.numpy()
         body_labels = self.model.body_label
         shape_labels = list(self.model.shape_label)  # may contain None
-        shape_world = (
+        shape_world_np = (
             self.model.shape_world.numpy()
             if self.model.shape_world is not None
             else np.full(n_shapes, -1, dtype=np.int32)
-        )
+        ).astype(np.int32)
 
-        self._is_nut_shape = np.zeros(n_shapes, dtype=bool)
-        self._is_finger_shape = np.zeros(n_shapes, dtype=bool)
-        self._is_bolt_shape = np.zeros(n_shapes, dtype=bool)
-        self._is_table_shape = np.zeros(n_shapes, dtype=bool)
-
+        category = np.full(n_shapes, SHAPE_CAT_OTHER, dtype=np.int32)
         for s in range(n_shapes):
-            body = int(shape_body[s])
+            body = int(shape_body_np[s])
             body_label = body_labels[body] if body >= 0 else ""
             shape_label = shape_labels[s] if shape_labels[s] is not None else ""
             combined = f"{body_label}/{shape_label}"
 
             if "nut" in combined:
-                self._is_nut_shape[s] = True
+                category[s] = SHAPE_CAT_NUT
             elif "finger" in combined:
-                self._is_finger_shape[s] = True
+                category[s] = SHAPE_CAT_FINGER
             elif "bolt" in combined:
-                self._is_bolt_shape[s] = True
+                category[s] = SHAPE_CAT_BOLT
             elif "table" in combined:
-                self._is_table_shape[s] = True
+                category[s] = SHAPE_CAT_TABLE
 
-        self._shape_world = shape_world.astype(np.int32)
+        # Upload category and world maps to the GPU for the penetration kernels.
+        self._shape_category_wp = wp.array(category, dtype=wp.int32)
+        self._shape_world_wp = wp.array(shape_world_np, dtype=wp.int32)
 
-    def _compute_rigid_penetration_per_world(self, body_q_np=None, contact_count=None):
-        """Compute current max penetration per world per category from rigid contacts.
-
-        Args:
-            body_q_np: Optional pre-fetched host copy of ``state_0.body_q`` to
-                avoid a redundant GPU-CPU sync when the caller already has it.
-            contact_count: Optional pre-fetched rigid contact count to avoid a
-                redundant scalar sync.
-
-        Returns a dict mapping category name ('nut_finger', 'nut_bolt',
-        'nut_table') to a numpy array of shape (world_count,) in metres.
+    def _pen_result_dict(self, pen_wc3_np):
+        """Convert a (world_count, 3) numpy array into the per-category dict
+        expected by the per-state tracking loop. Column order matches
+        SHAPE_CAT_* pair indices: 0=nut_finger, 1=nut_bolt, 2=nut_table.
         """
-        out = {
-            "nut_finger": np.zeros(self.world_count),
-            "nut_bolt": np.zeros(self.world_count),
-            "nut_table": np.zeros(self.world_count),
+        return {
+            "nut_finger": pen_wc3_np[:, 0],
+            "nut_bolt": pen_wc3_np[:, 1],
+            "nut_table": pen_wc3_np[:, 2],
         }
-        count = contact_count if contact_count is not None else int(self.contacts.rigid_contact_count.numpy()[0])
-        if count == 0:
-            return out
 
-        p0_local = self.contacts.rigid_contact_point0.numpy()[:count]
-        p1_local = self.contacts.rigid_contact_point1.numpy()[:count]
-        n = self.contacts.rigid_contact_normal.numpy()[:count]
-        s0 = self.contacts.rigid_contact_shape0.numpy()[:count]
-        s1 = self.contacts.rigid_contact_shape1.numpy()[:count]
-
-        valid = (s0 >= 0) & (s1 >= 0)
-        if not np.any(valid):
-            return out
-
-        # rigid_contact_point0/1 are in body-local frame; transform to world.
-        # shape_body is cached statically; body_q is passed in from the frame
-        # tracking call so we don't re-sync the same buffer twice per frame.
-        shape_body = self._shape_body_np
-        body_q = body_q_np if body_q_np is not None else self.state_0.body_q.numpy()
-        b0 = shape_body[s0]
-        b1 = shape_body[s1]
-        p0 = _transform_points_body_to_world(p0_local, b0, body_q)
-        p1 = _transform_points_body_to_world(p1_local, b1, body_q)
-
-        depths = np.sum((p0 - p1) * n, axis=1)
-        self._scatter_pen_per_world(s0, s1, depths, valid, out)
-        return out
+    def _compute_rigid_penetration_per_world(self):
+        """Reduce rigid contacts on the GPU into a (world_count, 3) array of
+        per-world per-category max penetration depth, then sync once.
+        """
+        self._pen_rigid_current_wp.zero_()
+        wp.launch(
+            update_rigid_penetration_kernel,
+            dim=self.rigid_contact_max,
+            inputs=[
+                self.contacts.rigid_contact_count,
+                self.contacts.rigid_contact_point0,
+                self.contacts.rigid_contact_point1,
+                self.contacts.rigid_contact_normal,
+                self.contacts.rigid_contact_shape0,
+                self.contacts.rigid_contact_shape1,
+                self.model.shape_body,
+                self._shape_world_wp,
+                self._shape_category_wp,
+                self.state_0.body_q,
+            ],
+            outputs=[self._pen_rigid_current_wp],
+        )
+        return self._pen_result_dict(self._pen_rigid_current_wp.numpy())
 
     def _compute_hydro_penetration_per_world(self):
-        """Compute current max penetration per world per category from the
-        hydroelastic contact surface (per-face centroid depths).
+        """Reduce hydroelastic face depths on the GPU into a per-world
+        per-category max-penetration dict, same layout as the rigid helper.
         """
-        out = {
-            "nut_finger": np.zeros(self.world_count),
-            "nut_bolt": np.zeros(self.world_count),
-            "nut_table": np.zeros(self.world_count),
-        }
+        empty = np.zeros((self.world_count, 3), dtype=np.float32)
         hydro = self.collision_pipeline.hydroelastic_sdf
         if hydro is None:
-            return out
+            return self._pen_result_dict(empty)
         surface = hydro.get_contact_surface()
         if surface is None:
-            return out
+            return self._pen_result_dict(empty)
 
-        face_count = int(surface.face_contact_count.numpy()[0])
-        if face_count == 0:
-            return out
-
-        depths = surface.contact_surface_depth.numpy()[:face_count]
-        shape_pair = surface.contact_surface_shape_pair.numpy()[:face_count]
-        s0 = shape_pair[:, 0]
-        s1 = shape_pair[:, 1]
-
-        valid = (s0 >= 0) & (s1 >= 0)
-        # hydro depths are negative inside (penetrating); flip sign to match rigid convention
-        pen = -depths
-        self._scatter_pen_per_world(s0, s1, pen, valid, out)
-        return out
-
-    def _scatter_pen_per_world(self, s0, s1, depths, valid, out):
-        """Classify each contact by pair category and scatter max depth per world.
-
-        Positive depth = penetrating. Only depths > 0 and valid (shape >=0) count.
-        """
-        nut0 = self._is_nut_shape[s0] & valid
-        nut1 = self._is_nut_shape[s1] & valid
-        fin0 = self._is_finger_shape[s0]
-        fin1 = self._is_finger_shape[s1]
-        bol0 = self._is_bolt_shape[s0]
-        bol1 = self._is_bolt_shape[s1]
-        tbl0 = self._is_table_shape[s0]
-        tbl1 = self._is_table_shape[s1]
-
-        is_nut_finger = (nut0 & fin1) | (nut1 & fin0)
-        is_nut_bolt = (nut0 & bol1) | (nut1 & bol0)
-        is_nut_table = (nut0 & tbl1) | (nut1 & tbl0)
-
-        # Derive per-contact world index: prefer the nut side's world; fall back
-        # to the counterpart's world when the nut shape is global (shape_world < 0).
-        nut_shape = np.where(nut0, s0, np.where(nut1, s1, 0))
-        other_shape = np.where(nut0, s1, s0)
-        nut_world = self._shape_world[nut_shape]
-        other_world = self._shape_world[other_shape]
-        world = np.where(nut_world >= 0, nut_world, other_world)
-
-        penetrating = depths > 0
-        for mask, key in (
-            (is_nut_finger & penetrating, "nut_finger"),
-            (is_nut_bolt & penetrating, "nut_bolt"),
-            (is_nut_table & penetrating, "nut_table"),
-        ):
-            if not np.any(mask):
-                continue
-            sel_world = world[mask]
-            sel_depth = depths[mask]
-            in_range = (sel_world >= 0) & (sel_world < self.world_count)
-            if not np.any(in_range):
-                continue
-            np.maximum.at(out[key], sel_world[in_range], sel_depth[in_range])
+        self._pen_hydro_current_wp.zero_()
+        wp.launch(
+            update_hydro_penetration_kernel,
+            dim=surface.contact_surface_depth.shape[0],
+            inputs=[
+                surface.face_contact_count,
+                surface.contact_surface_depth,
+                surface.contact_surface_shape_pair,
+                self._shape_world_wp,
+                self._shape_category_wp,
+            ],
+            outputs=[self._pen_hydro_current_wp],
+        )
+        return self._pen_result_dict(self._pen_hydro_current_wp.numpy())
 
     def _update_contact_and_slip(self):
         """Track contact forces and vertical slippage (called periodically from step)."""
@@ -1492,12 +1516,8 @@ class Example:
         schedule_np = self._task_schedule_np
         body_q = self.state_0.body_q.numpy()
 
-        # Compute per-world per-category max penetration from both sources.
-        # Forward the contact count we already synced at the top of this method
-        # to skip a redundant scalar readback inside the rigid helper.
-        cur_pen_rigid = self._compute_rigid_penetration_per_world(
-            body_q_np=body_q, contact_count=self._gui_contact_count
-        )
+        # Per-world per-category max penetration — reduced on the GPU, synced once each.
+        cur_pen_rigid = self._compute_rigid_penetration_per_world()
         cur_pen_hydro = self._compute_hydro_penetration_per_world()
 
         for w in range(self.world_count):
@@ -1507,13 +1527,10 @@ class Example:
             ee_z = float(body_q[ee_body_id][2])
             nut_z = float(body_q[nut_body_id][2])
 
-            # Nut tilt angle between the nut's body-Z axis and world Z.
-            # For quaternion (qx, qy, qz, qw), the Z-component of the rotated
-            # body Z-axis is 1 - 2*(qx^2 + qy^2).
-            nq = body_q[nut_body_id][3:7]
-            qx, qy = float(nq[0]), float(nq[1])
-            z_axis_world_z = max(-1.0, min(1.0, 1.0 - 2.0 * (qx * qx + qy * qy)))
-            nut_tilt = float(np.arccos(z_axis_world_z))
+            # Nut tilt: angle between the nut's body-Z axis and world Z.
+            nut_quat = wp.quat(body_q[nut_body_id][3:7])
+            z_axis_world = wp.quat_rotate(nut_quat, wp.vec3(0.0, 0.0, 1.0))
+            nut_tilt = float(wp.acos(max(-1.0, min(1.0, float(z_axis_world[2])))))
 
             # Per-state tracking: record start Z on first observation, update end Z
             # and max force/friction while in this state.
@@ -1678,13 +1695,14 @@ class Example:
             nut_body_id = world_id * self.num_bodies_per_world + self.nut_body_index
             nut_pos = body_q[nut_body_id][:3]
             nut_xy = nut_pos[:2]
-            xy_error = float(np.linalg.norm(nut_xy - bolt_xy))
-            # Final-frame nut tilt: angle between the nut's body Z axis and
-            # world Z. For quaternion (qx, qy, qz, qw), the Z-component of the
-            # rotated body Z-axis is 1 - 2*(qx^2 + qy^2).
-            nut_q = body_q[nut_body_id][3:7]
-            z_axis_world_z = max(-1.0, min(1.0, 1.0 - 2.0 * (float(nut_q[0]) ** 2 + float(nut_q[1]) ** 2)))
-            nut_tilt_deg = float(np.degrees(np.arccos(z_axis_world_z)))
+            dx = float(nut_xy[0] - bolt_xy[0])
+            dy = float(nut_xy[1] - bolt_xy[1])
+            xy_error = float(wp.sqrt(dx * dx + dy * dy))
+            # Final-frame nut tilt via Warp quaternion rotation: rotate world-Z
+            # by the nut quaternion and read the z component.
+            nut_quat = wp.quat(body_q[nut_body_id][3:7])
+            z_axis_world = wp.quat_rotate(nut_quat, wp.vec3(0.0, 0.0, 1.0))
+            nut_tilt_deg = float(wp.degrees(wp.acos(max(-1.0, min(1.0, float(z_axis_world[2]))))))
 
             if self._track_stats:
                 f_max = self._max_force[world_id]
@@ -1790,7 +1808,7 @@ class Example:
                 pen_hf = self._state_pen_hydro_nut_finger[world_id, s] * 1000.0
                 pen_hb = self._state_pen_hydro_nut_bolt[world_id, s] * 1000.0
                 pen_ht = self._state_pen_hydro_nut_table[world_id, s] * 1000.0
-                tilt_deg = float(np.degrees(self._state_nut_tilt_max[world_id, s]))
+                tilt_deg = float(wp.degrees(float(self._state_nut_tilt_max[world_id, s])))
                 print(
                     f"  {state.name:<16}{world_id:>6}  "
                     f"{f_max:>8.3f}  {fr_max:>9.3f}  "
