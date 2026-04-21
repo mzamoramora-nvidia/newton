@@ -1343,15 +1343,18 @@ class Example:
             self._world_y_half[world_id] = hs
             self._world_z_half[world_id] = hs
 
+        if shape == ObjectShape.NUT:
+            obj_rot = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), math.pi)
+        elif shape == ObjectShape.RJ45_PLUG:
+            obj_rot = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), math.pi / 2.0)
+            self._world_y_half[world_id] = float(extents[0]) / 2.0 * sc
+        else:
+            obj_rot = wp.quat_identity()
+
         tt = self.table_top
         z_gap = 0.0005
         z_half = self._world_z_half[world_id]
         obj_z = float(tt[2]) + z_half + z_gap
-
-        if shape == ObjectShape.NUT:
-            obj_rot = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), math.pi)
-        else:
-            obj_rot = wp.quat_identity()
 
         obj_xform = wp.transform(wp.vec3(float(tt[0]), float(tt[1]), obj_z), obj_rot)
         obj_body = builder.add_body(xform=obj_xform, label="object")
@@ -1495,9 +1498,13 @@ class Example:
         # the pads cover the top of the object rather than the gripper body.
         grasp_clearance = 0.05
         table_top_z = float(self.table_top[2])
+        grasp_z_offset = {
+            ObjectShape.BOLT: 0.02,
+        }
         grasp_z_np = np.array(
             [
                 table_top_z + 0.001 + max(0.0, 2.0 * self._world_z_half[i] - grasp_clearance)
+                + grasp_z_offset.get(self.world_shapes[i], 0.0)
                 for i in range(wc)
             ],
             dtype=np.float32,
@@ -1523,7 +1530,7 @@ class Example:
             ObjectShape.RJ45_PLUG: 0.10,
             ObjectShape.BEAR: 0.15,
             ObjectShape.NUT: 0.08,
-            ObjectShape.BOLT: 0.12,
+            ObjectShape.BOLT: 0.30,
         }
         stroke_mm = 85.0  # Robotiq 2F-85 full stroke
         grasp_ctrl_list = []
