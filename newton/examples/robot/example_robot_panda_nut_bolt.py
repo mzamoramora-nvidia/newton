@@ -498,6 +498,55 @@ def update_hydro_penetration_kernel(
     wp.atomic_max(pen_hydro, world, pair_cat, depth)
 
 
+@wp.kernel(enable_backward=False)
+def update_debug_frame_lines_kernel(
+    world_offsets: wp.array[wp.vec3],
+    ee_pos_target: wp.array[wp.vec3],
+    ee_rot_target: wp.array[wp.vec4],
+    body_q: wp.array[wp.transform],
+    bolt_frame_pos: wp.vec3,
+    nut_body_index: int,
+    num_bodies_per_world: int,
+    axis_len: float,
+    # output: 9 * world_count vec3s — per world, 3 frames (bolt, EE, nut), 3 axes each.
+    starts: wp.array[wp.vec3],
+    ends: wp.array[wp.vec3],
+):
+    w = wp.tid()
+    off = world_offsets[w]
+    base = w * 9
+
+    # Bolt frame (identity rotation, static position).
+    bolt_pos = bolt_frame_pos + off
+    starts[base + 0] = bolt_pos
+    ends[base + 0] = bolt_pos + wp.vec3(axis_len, 0.0, 0.0)
+    starts[base + 1] = bolt_pos
+    ends[base + 1] = bolt_pos + wp.vec3(0.0, axis_len, 0.0)
+    starts[base + 2] = bolt_pos
+    ends[base + 2] = bolt_pos + wp.vec3(0.0, 0.0, axis_len)
+
+    # EE target frame.
+    ee_pos = ee_pos_target[w] + off
+    ee_q = wp.quaternion(ee_rot_target[w][:3], ee_rot_target[w][3])
+    starts[base + 3] = ee_pos
+    ends[base + 3] = ee_pos + wp.quat_rotate(ee_q, wp.vec3(axis_len, 0.0, 0.0))
+    starts[base + 4] = ee_pos
+    ends[base + 4] = ee_pos + wp.quat_rotate(ee_q, wp.vec3(0.0, axis_len, 0.0))
+    starts[base + 5] = ee_pos
+    ends[base + 5] = ee_pos + wp.quat_rotate(ee_q, wp.vec3(0.0, 0.0, axis_len))
+
+    # Nut frame.
+    nut_xform = body_q[w * num_bodies_per_world + nut_body_index]
+    nut_pos = wp.transform_get_translation(nut_xform) + off
+    nut_q = wp.transform_get_rotation(nut_xform)
+    starts[base + 6] = nut_pos
+    ends[base + 6] = nut_pos + wp.quat_rotate(nut_q, wp.vec3(axis_len, 0.0, 0.0))
+    starts[base + 7] = nut_pos
+    ends[base + 7] = nut_pos + wp.quat_rotate(nut_q, wp.vec3(0.0, axis_len, 0.0))
+    starts[base + 8] = nut_pos
+    ends[base + 8] = nut_pos + wp.quat_rotate(nut_q, wp.vec3(0.0, 0.0, axis_len))
+
+
 class Example:
     def __init__(self, viewer, args):
         self.fps = 60
@@ -713,6 +762,7 @@ class Example:
             self.viewer.show_hydro_contact_surface = self.show_isosurface
             self.viewer.register_ui_callback(self.render_ui, position="side")
 
+        self._setup_line_buffers()
         self.capture()
 
     def build_scene(self, args):
@@ -1238,151 +1288,125 @@ class Example:
             self.viewer.log_lines("/sampling_zone", None, None, None)
         self.viewer.end_frame()
 
+    def _setup_line_buffers(self):
+        """Allocate the line buffers used by :meth:`_log_debug_frames`,
+        :meth:`_log_test_zone`, and :meth:`_log_sampling_zone` once. The
+        static buffers (test/sampling zones, all colors) are filled here;
+        :meth:`_log_debug_frames` refreshes its starts/ends via a kernel
+        each frame so no per-frame host-side allocation is needed.
+        """
+        wc = self.world_count
+        # Cache world offsets on the GPU. set_world_offsets was called once
+        # during viewer setup, so this is static for the run.
+        if self.viewer.world_offsets is not None:
+            self._world_offsets_wp = wp.clone(self.viewer.world_offsets)
+        else:
+            self._world_offsets_wp = wp.zeros(wc, dtype=wp.vec3)
+        offsets_np = self._world_offsets_wp.numpy()
+
+        # ---- /debug_frames: 9 segments/world (bolt + EE + nut, each 3 axes).
+        self._lines_debug_axis_len = 0.05
+        self._lines_debug_starts = wp.zeros(9 * wc, dtype=wp.vec3)
+        self._lines_debug_ends = wp.zeros(9 * wc, dtype=wp.vec3)
+        # Colors are static: R, G, B per frame, 3 frames per world.
+        rgb = [wp.vec3(1.0, 0.0, 0.0), wp.vec3(0.0, 1.0, 0.0), wp.vec3(0.0, 0.0, 1.0)]
+        self._lines_debug_colors = wp.array(rgb * (3 * wc), dtype=wp.vec3)
+
+        # ---- /test_zone: 8 segments/world (two squares x 4 edges).
+        bolt_center_z = float(self.bolt_frame_pos[2])
+        cx = float(self.bolt_frame_pos[0])
+        cy = float(self.bolt_frame_pos[1])
+        half = 0.03  # 60 mm square side
+        green = wp.vec3(0.0, 1.0, 0.0)
+        test_starts, test_ends = [], []
+        for w in range(wc):
+            off = wp.vec3(float(offsets_np[w][0]), float(offsets_np[w][1]), float(offsets_np[w][2]))
+            for z in (bolt_center_z - 0.010, bolt_center_z + 0.010):
+                corners = [
+                    wp.vec3(cx - half, cy - half, z) + off,
+                    wp.vec3(cx + half, cy - half, z) + off,
+                    wp.vec3(cx + half, cy + half, z) + off,
+                    wp.vec3(cx - half, cy + half, z) + off,
+                ]
+                for i in range(4):
+                    test_starts.append(corners[i])
+                    test_ends.append(corners[(i + 1) % 4])
+        self._lines_test_starts = wp.array(test_starts, dtype=wp.vec3)
+        self._lines_test_ends = wp.array(test_ends, dtype=wp.vec3)
+        self._lines_test_colors = wp.array([green] * (8 * wc), dtype=wp.vec3)
+
+        # ---- /sampling_zone: 4 segments/world, only when jitter > 0.
+        if self.nut_xy_jitter > 0.0:
+            sx = float(self.nut_start_pos[0])
+            sy = float(self.nut_start_pos[1])
+            sz = float(self.table_top_center[2]) + 0.001
+            sh = float(self.nut_xy_jitter)
+            yellow = wp.vec3(1.0, 1.0, 0.0)
+            sample_starts, sample_ends = [], []
+            for w in range(wc):
+                off = wp.vec3(float(offsets_np[w][0]), float(offsets_np[w][1]), float(offsets_np[w][2]))
+                corners = [
+                    wp.vec3(sx - sh, sy - sh, sz) + off,
+                    wp.vec3(sx + sh, sy - sh, sz) + off,
+                    wp.vec3(sx + sh, sy + sh, sz) + off,
+                    wp.vec3(sx - sh, sy + sh, sz) + off,
+                ]
+                for i in range(4):
+                    sample_starts.append(corners[i])
+                    sample_ends.append(corners[(i + 1) % 4])
+            self._lines_sampling_starts = wp.array(sample_starts, dtype=wp.vec3)
+            self._lines_sampling_ends = wp.array(sample_ends, dtype=wp.vec3)
+            self._lines_sampling_colors = wp.array([yellow] * (4 * wc), dtype=wp.vec3)
+        else:
+            self._lines_sampling_starts = None
+            self._lines_sampling_ends = None
+            self._lines_sampling_colors = None
+
     def _log_debug_frames(self):
-        """Draw bolt, EE IK target, and nut frames as RGB axis lines per world."""
-        axis_len = 0.05
-        axes = [
-            (wp.vec3(1.0, 0.0, 0.0), wp.vec3(1.0, 0.0, 0.0)),  # X axis, red
-            (wp.vec3(0.0, 1.0, 0.0), wp.vec3(0.0, 1.0, 0.0)),  # Y axis, green
-            (wp.vec3(0.0, 0.0, 1.0), wp.vec3(0.0, 0.0, 1.0)),  # Z axis, blue
-        ]
-
-        starts = []
-        ends = []
-        colors = []
-
-        def add_frame(pos, q):
-            for axis_dir, color in axes:
-                starts.append(pos)
-                ends.append(pos + wp.quat_rotate(q, axis_dir) * axis_len)
-                colors.append(color)
-
-        # Read world offsets
-        offsets = self.viewer.world_offsets.numpy() if self.viewer.world_offsets is not None else None
-
-        # Read EE targets and body transforms (GPU -> CPU)
-        ee_pos_np = self.ee_pos_target_interpolated.numpy()
-        ee_rot_np = self.ee_rot_target_interpolated.numpy()
-        body_q_np = self.state_0.body_q.numpy()
-
-        for w in range(self.world_count):
-            off = (
-                wp.vec3(float(offsets[w][0]), float(offsets[w][1]), float(offsets[w][2]))
-                if offsets is not None
-                else wp.vec3()
-            )
-
-            # Bolt frame (static, identity rotation)
-            add_frame(self.bolt_frame_pos + off, wp.quat_identity())
-
-            # EE IK target frame
-            e = ee_pos_np[w]
-            eq = ee_rot_np[w]
-            add_frame(
-                wp.vec3(float(e[0]), float(e[1]), float(e[2])) + off,
-                wp.quat(float(eq[0]), float(eq[1]), float(eq[2]), float(eq[3])),
-            )
-
-            # Nut frame (dynamic body)
-            nq = body_q_np[w * self.num_bodies_per_world + self.nut_body_index]
-            add_frame(
-                wp.vec3(float(nq[0]), float(nq[1]), float(nq[2])) + off,
-                wp.quat(float(nq[3]), float(nq[4]), float(nq[5]), float(nq[6])),
-            )
-
+        """Refresh the debug-frame line buffers via a kernel and log them."""
+        wp.launch(
+            update_debug_frame_lines_kernel,
+            dim=self.world_count,
+            inputs=[
+                self._world_offsets_wp,
+                self.ee_pos_target_interpolated,
+                self.ee_rot_target_interpolated,
+                self.state_0.body_q,
+                self.bolt_frame_pos,
+                self.nut_body_index,
+                self.num_bodies_per_world,
+                self._lines_debug_axis_len,
+            ],
+            outputs=[self._lines_debug_starts, self._lines_debug_ends],
+        )
         self.viewer.log_lines(
             "/debug_frames",
-            wp.array(starts, dtype=wp.vec3),
-            wp.array(ends, dtype=wp.vec3),
-            wp.array(colors, dtype=wp.vec3),
+            self._lines_debug_starts,
+            self._lines_debug_ends,
+            self._lines_debug_colors,
         )
 
     def _log_test_zone(self):
-        """Draw two square outlines at the min and max Z levels that would pass the
-        'nut reached the bottom of the bolt' test, centered on the bolt XY per world."""
-        bolt_center_z = float(self.bolt_frame_pos[2])
-        z_min = bolt_center_z - 0.010
-        z_max = bolt_center_z + 0.010
-        half = 0.03  # 60mm square side
-        cx = float(self.bolt_frame_pos[0])
-        cy = float(self.bolt_frame_pos[1])
-        green = wp.vec3(0.0, 1.0, 0.0)  # pass-zone color
-
-        offsets = self.viewer.world_offsets.numpy() if self.viewer.world_offsets is not None else None
-
-        starts = []
-        ends = []
-        colors = []
-
-        def add_square(z, off):
-            corners = [
-                wp.vec3(cx - half, cy - half, z) + off,
-                wp.vec3(cx + half, cy - half, z) + off,
-                wp.vec3(cx + half, cy + half, z) + off,
-                wp.vec3(cx - half, cy + half, z) + off,
-            ]
-            for i in range(4):
-                starts.append(corners[i])
-                ends.append(corners[(i + 1) % 4])
-                colors.append(green)
-
-        for w in range(self.world_count):
-            off = (
-                wp.vec3(float(offsets[w][0]), float(offsets[w][1]), float(offsets[w][2]))
-                if offsets is not None
-                else wp.vec3()
-            )
-            add_square(z_min, off)
-            add_square(z_max, off)
-
+        """Draw two square outlines at the min and max Z levels that would pass
+        the 'nut reached the bottom of the bolt' test. Entirely static."""
         self.viewer.log_lines(
             "/test_zone",
-            wp.array(starts, dtype=wp.vec3),
-            wp.array(ends, dtype=wp.vec3),
-            wp.array(colors, dtype=wp.vec3),
+            self._lines_test_starts,
+            self._lines_test_ends,
+            self._lines_test_colors,
         )
 
     def _log_sampling_zone(self):
-        """Draw a yellow square outline on the table surface showing the XY region
-        from which the nut's initial position is sampled."""
-        if self.nut_xy_jitter <= 0.0:
+        """Draw a yellow square showing the XY region the nut is sampled from.
+        Entirely static; omitted when jitter is zero."""
+        if self._lines_sampling_starts is None:
             self.viewer.log_lines("/sampling_zone", None, None, None)
             return
-
-        cx = float(self.nut_start_pos[0])
-        cy = float(self.nut_start_pos[1])
-        z = float(self.table_top_center[2]) + 0.001  # just above the table
-        half = self.nut_xy_jitter
-        yellow = wp.vec3(1.0, 1.0, 0.0)
-
-        offsets = self.viewer.world_offsets.numpy() if self.viewer.world_offsets is not None else None
-
-        starts = []
-        ends = []
-        colors = []
-
-        for w in range(self.world_count):
-            off = (
-                wp.vec3(float(offsets[w][0]), float(offsets[w][1]), float(offsets[w][2]))
-                if offsets is not None
-                else wp.vec3()
-            )
-            corners = [
-                wp.vec3(cx - half, cy - half, z) + off,
-                wp.vec3(cx + half, cy - half, z) + off,
-                wp.vec3(cx + half, cy + half, z) + off,
-                wp.vec3(cx - half, cy + half, z) + off,
-            ]
-            for i in range(4):
-                starts.append(corners[i])
-                ends.append(corners[(i + 1) % 4])
-                colors.append(yellow)
-
         self.viewer.log_lines(
             "/sampling_zone",
-            wp.array(starts, dtype=wp.vec3),
-            wp.array(ends, dtype=wp.vec3),
-            wp.array(colors, dtype=wp.vec3),
+            self._lines_sampling_starts,
+            self._lines_sampling_ends,
+            self._lines_sampling_colors,
         )
 
     def _update_gui_state(self):
