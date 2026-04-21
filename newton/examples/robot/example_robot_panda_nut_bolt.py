@@ -420,6 +420,7 @@ class Example:
         self.screw_cycles = int(args.screw_cycles)
         self.screw_angle = float(np.radians(args.screw_angle_deg))
         self.screw_regrip_z_offset = float(args.screw_regrip_z_offset)
+        self.max_nut_tilt_deg = float(args.max_nut_tilt_deg)
 
         # Per-axis advance thresholds
         self.pos_threshold_xy = 0.0005  # 0.5 mm
@@ -596,12 +597,14 @@ class Example:
             self.contact_sensor = None
 
         # Collision pipeline with hydroelastic SDF.
-        # output_contact_surface is required for the imgui Show Isosurface
-        # toggle (needs a renderer) and for hydro penetration tracking.
+        # output_contact_surface is expensive (per-frame triangulation of the
+        # pressure field). It's required for the imgui Show Isosurface toggle
+        # and for hydro penetration tracking (--test). Default off even when a
+        # viewer is present — pass --show-isosurface to opt in at startup.
         self.rigid_contact_max = 1000 * self.world_count
-        has_renderer = hasattr(viewer, "renderer")
+        want_iso = self._track_stats or args.show_isosurface
         sdf_hydroelastic_config = HydroelasticSDF.Config(
-            output_contact_surface=self._track_stats or has_renderer,
+            output_contact_surface=want_iso,
             buffer_mult_iso=2,
             anchor_contact=args.anchor_contact,
             moment_matching=args.moment_matching,
@@ -647,7 +650,10 @@ class Example:
         # Viewer
         self.viewer.set_model(self.model)
         self.viewer.picking_enabled = False
-        self.show_isosurface = False
+        # The GUI toggle only governs rendering. Computation of the contact
+        # surface is gated on --show-isosurface at init (above) because the
+        # collision pipeline buffers are allocated there.
+        self.show_isosurface = args.show_isosurface
         self.show_debug_frames = True
         self.show_single_world = False
 
@@ -800,9 +806,31 @@ class Example:
                 non_finger_shape_indices.append(shape_idx)
 
         # Convert non-finger shapes to convex hulls
-        builder.approximate_meshes(
-            method="convex_hull", shape_indices=non_finger_shape_indices, keep_visual_shapes=True
-        )
+        # builder.approximate_meshes(
+        #     method="convex_hull", shape_indices=non_finger_shape_indices, keep_visual_shapes=True
+        # )
+
+        # Attach coarse (non-hydroelastic) SDFs to every non-finger mesh shape.
+        # Without an SDF, mesh-vs-{mesh,primitive} collision must walk the BVH
+        # for every query point, which dominates frame time. A low-res SDF
+        # gives O(1) distance lookups at ~1 MB per shape — see the Newton
+        # collisions docs.
+        for shape_idx in non_finger_shape_indices:
+            if builder.shape_type[shape_idx] != newton.GeoType.MESH:
+                continue
+            mesh = builder.shape_source[shape_idx]
+            if mesh is None or mesh.sdf is not None:
+                continue
+            shape_scale = np.asarray(builder.shape_scale[shape_idx], dtype=np.float32)
+            if not np.allclose(shape_scale, 1.0):
+                mesh = mesh.copy(vertices=mesh.vertices * shape_scale, recompute_inertia=True)
+                builder.shape_source[shape_idx] = mesh
+                builder.shape_scale[shape_idx] = (1.0, 1.0, 1.0)
+            mesh.build_sdf(
+                max_resolution=SDF_MAX_RESOLUTION_GRIPPER,
+                narrow_band_range=SDF_NARROW_BAND_GRIPPER,
+                margin=shape_cfg.gap,
+            )
 
         # Table (hydroelastic mesh on world body)
         table_mesh = newton.Mesh.create_box(
@@ -1644,11 +1672,19 @@ class Example:
             f"valid range=[{nut_at_bottom_z_min:.4f}, {nut_at_bottom_z_max:.4f}]"
         )
 
+        max_tilt_deg = float(self.max_nut_tilt_deg)
+
         for world_id in range(self.world_count):
             nut_body_id = world_id * self.num_bodies_per_world + self.nut_body_index
             nut_pos = body_q[nut_body_id][:3]
             nut_xy = nut_pos[:2]
             xy_error = float(np.linalg.norm(nut_xy - bolt_xy))
+            # Final-frame nut tilt: angle between the nut's body Z axis and
+            # world Z. For quaternion (qx, qy, qz, qw), the Z-component of the
+            # rotated body Z-axis is 1 - 2*(qx^2 + qy^2).
+            nut_q = body_q[nut_body_id][3:7]
+            z_axis_world_z = max(-1.0, min(1.0, 1.0 - 2.0 * (float(nut_q[0]) ** 2 + float(nut_q[1]) ** 2)))
+            nut_tilt_deg = float(np.degrees(np.arccos(z_axis_world_z)))
 
             if self._track_stats:
                 f_max = self._max_force[world_id]
@@ -1666,6 +1702,7 @@ class Example:
                     f"  World {world_id}: "
                     f"nut=({nut_pos[0]:.4f}, {nut_pos[1]:.4f}, {nut_pos[2]:.4f})  "
                     f"xy_err={xy_error * 1000:.1f}mm  "
+                    f"tilt={nut_tilt_deg:.2f}deg  "
                     f"descent={descent_str}  "
                     f"force_max={f_max:.3f}N  friction_max={fr_max:.3f}N  "
                     f"slip={slip_str}{lift_str}"
@@ -1674,7 +1711,8 @@ class Example:
                 print(
                     f"  World {world_id}: "
                     f"nut=({nut_pos[0]:.4f}, {nut_pos[1]:.4f}, {nut_pos[2]:.4f})  "
-                    f"xy_err={xy_error * 1000:.1f}mm"
+                    f"xy_err={xy_error * 1000:.1f}mm  "
+                    f"tilt={nut_tilt_deg:.2f}deg"
                 )
 
             # Collect errors instead of asserting immediately
@@ -1694,6 +1732,14 @@ class Example:
                     f"nut_z={nut_pos[2]:.4f} outside expected range "
                     f"[{nut_at_bottom_z_min:.4f}, {nut_at_bottom_z_max:.4f}] "
                     f"(bolt_center={bolt_center_z:.4f}, target={nut_at_bottom_z_ref:.4f})"
+                )
+            # Phase 4: nut body-Z axis must stay close to world Z (upright).
+            # A threaded nut that ends up tipped means the screw motion got
+            # weird — e.g. stepped off the threads or rocked sideways.
+            if nut_tilt_deg > max_tilt_deg:
+                errors.append(
+                    f"World {world_id}: Nut tilt {nut_tilt_deg:.2f}deg exceeds "
+                    f"limit {max_tilt_deg:.2f}deg (body-Z drifted from world-Z)."
                 )
 
         # Per-state report and penetration aggregate are only printed when
@@ -1845,6 +1891,18 @@ class Example:
             type=float,
             default=0.2,
             help="Friction coefficient for nut and bolt shapes (matches devel-example-nut-bolt reference). Combined as max(mu_a, mu_b) — finger grip unaffected.",
+        )
+        parser.add_argument(
+            "--max-nut-tilt-deg",
+            type=float,
+            default=2.0,
+            help="Fail test_final if the nut's body-Z axis is tilted more than this many degrees from world Z at the end of the simulation. Catches runs where the nut stepped off the threads and ended up rocked.",
+        )
+        parser.add_argument(
+            "--show-isosurface",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Compute and render the hydroelastic contact surface (isosurface). Off by default — the triangulation runs every step and is the single most expensive optional feature. --test forces it on for hydro penetration tracking.",
         )
         parser.add_argument(
             "--anchor-contact",
