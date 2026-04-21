@@ -908,6 +908,9 @@ class Example:
 
         self.task_counter = len(task_schedule)
         self.task_schedule = wp.array(task_schedule, dtype=wp.int32)
+        # Cache the host copy — task_schedule is immutable after setup, so
+        # per-frame tracking can read from here instead of syncing each frame.
+        self._task_schedule_np = np.asarray(task_schedule, dtype=np.int32)
         self.task_time_soft_limits = wp.array(task_time_soft_limits, dtype=float)
 
         self.task_init_body_q = wp.clone(self.state_0.body_q)
@@ -1254,7 +1257,7 @@ class Example:
 
         # Current task name and timer
         task_val = int(self.task_idx.numpy()[w])
-        self._gui_task_name = TaskType(self.task_schedule.numpy()[task_val]).name
+        self._gui_task_name = TaskType(self._task_schedule_np[task_val]).name
         self._gui_task_timer = float(self.task_time_elapsed.numpy()[w])
 
         # EE position error (target vs actual)
@@ -1278,7 +1281,9 @@ class Example:
         """Pre-compute shape->category boolean maps and per-shape world indices
         so penetration contacts can be filtered per category and per world."""
         n_shapes = self.model.shape_count
-        shape_body = self.model.shape_body.numpy()
+        # Cache the host copy of shape_body so per-frame tracking doesn't sync.
+        self._shape_body_np = self.model.shape_body.numpy()
+        shape_body = self._shape_body_np
         body_labels = self.model.body_label
         shape_labels = list(self.model.shape_label)  # may contain None
         shape_world = (
@@ -1309,8 +1314,14 @@ class Example:
 
         self._shape_world = shape_world.astype(np.int32)
 
-    def _compute_rigid_penetration_per_world(self):
+    def _compute_rigid_penetration_per_world(self, body_q_np=None, contact_count=None):
         """Compute current max penetration per world per category from rigid contacts.
+
+        Args:
+            body_q_np: Optional pre-fetched host copy of ``state_0.body_q`` to
+                avoid a redundant GPU-CPU sync when the caller already has it.
+            contact_count: Optional pre-fetched rigid contact count to avoid a
+                redundant scalar sync.
 
         Returns a dict mapping category name ('nut_finger', 'nut_bolt',
         'nut_table') to a numpy array of shape (world_count,) in metres.
@@ -1320,7 +1331,7 @@ class Example:
             "nut_bolt": np.zeros(self.world_count),
             "nut_table": np.zeros(self.world_count),
         }
-        count = int(self.contacts.rigid_contact_count.numpy()[0])
+        count = contact_count if contact_count is not None else int(self.contacts.rigid_contact_count.numpy()[0])
         if count == 0:
             return out
 
@@ -1334,9 +1345,11 @@ class Example:
         if not np.any(valid):
             return out
 
-        # rigid_contact_point0/1 are in body-local frame; transform to world
-        shape_body = self.model.shape_body.numpy()
-        body_q = self.state_0.body_q.numpy()
+        # rigid_contact_point0/1 are in body-local frame; transform to world.
+        # shape_body is cached statically; body_q is passed in from the frame
+        # tracking call so we don't re-sync the same buffer twice per frame.
+        shape_body = self._shape_body_np
+        body_q = body_q_np if body_q_np is not None else self.state_0.body_q.numpy()
         b0 = shape_body[s0]
         b1 = shape_body[s1]
         p0 = _transform_points_body_to_world(p0_local, b0, body_q)
@@ -1444,13 +1457,19 @@ class Example:
             for c in range(min(n_cols, 2)):
                 self._gui_finger_forces[c] = float(np.linalg.norm(fm[w, c]))
 
-        # Slippage + per-state tracking: snapshot Z positions at state entry/exit
+        # Slippage + per-state tracking: snapshot Z positions at state entry/exit.
+        # task_schedule is static — read once from the cached host copy. body_q is
+        # fetched once per tracking call and passed into the penetration helpers.
         tasks_np = self.task_idx.numpy()
-        schedule_np = self.task_schedule.numpy()
+        schedule_np = self._task_schedule_np
         body_q = self.state_0.body_q.numpy()
 
         # Compute per-world per-category max penetration from both sources.
-        cur_pen_rigid = self._compute_rigid_penetration_per_world()  # dict category -> (world_count,)
+        # Forward the contact count we already synced at the top of this method
+        # to skip a redundant scalar readback inside the rigid helper.
+        cur_pen_rigid = self._compute_rigid_penetration_per_world(
+            body_q_np=body_q, contact_count=self._gui_contact_count
+        )
         cur_pen_hydro = self._compute_hydro_penetration_per_world()
 
         for w in range(self.world_count):
@@ -1544,12 +1563,17 @@ class Example:
         ok_x = "*" if abs(err[0]) < limit_xy else " "
         ok_y = "*" if abs(err[1]) < limit_xy else " "
         ok_z = "*" if abs(err[2]) < limit_z else " "
-        imgui.text(f"Pos x:{err[0]:+.2f}mm {ok_x}  y:{err[1]:+.2f}mm {ok_y}  z:{err[2]:+.2f}mm {ok_z}")
-        imgui.text(f"  limit: xy<{limit_xy:.2f}mm  z<{limit_z:.2f}mm")
+        imgui.separator()
+        imgui.text("Pos err:")
+        imgui.text(f" x:{err[0]:+.2f}mm {ok_x}|y:{err[1]:+.2f}mm {ok_y}|z:{err[2]:+.2f}mm {ok_z}")
+        imgui.text(f" limits: xy<{limit_xy:.2f}mm  z<{limit_z:.2f}mm")
 
         # Rotation error with threshold check
         ok_r = "*" if self._gui_rot_err < self.rot_threshold_deg else " "
-        imgui.text(f"Rot err: {self._gui_rot_err:.2f} deg {ok_r}  limit<{self.rot_threshold_deg:.1f}")
+        imgui.separator()
+        imgui.text("Rot err:")
+        imgui.text(f"{self._gui_rot_err:.2f} deg {ok_r}  limit<{self.rot_threshold_deg:.1f}")
+        imgui.separator()
 
         imgui.text(f"Frame: {self._gui_frame}  Sim: {self.sim_time:.2f}s")
 
@@ -1755,7 +1779,7 @@ class Example:
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
         parser.set_defaults(num_frames=3000)
-        parser.set_defaults(world_count=4)
+        parser.set_defaults(world_count=1)
         parser.add_argument(
             "--grasp-margin",
             type=float,
