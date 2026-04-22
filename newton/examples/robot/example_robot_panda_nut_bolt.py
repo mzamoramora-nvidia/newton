@@ -60,14 +60,20 @@ TASK_OFFSET_RETRACT = wp.vec3(0.0, 0.0, 0.10)
 
 # Grasp geometry
 GRASP_YAW_OFFSET_DEG = 30.0  # gripper yaw relative to nut, about Z
-GRASPING_Z_OFFSET = 0.001
-GRIPPER_OPEN_POS = 0.06    # per-finger full-open position [m]
-GRIPPER_KE = 100.0         # must match joint_target_ke for finger joints
+GRIPPER_OPEN_POS = 0.06  # per-finger full-open position [m]
+GRIPPER_KE = 100.0  # must match joint_target_ke for finger joints
 
 
 @dataclass(frozen=True)
 class AssemblyParams:
-    """Per-assembly geometry and tuning defaults [m]."""
+    """Per-assembly geometry and tuning defaults [m].
+
+    ``test_zone_z_{min,max}_offset`` are the Z bounds (relative to
+    ``bolt_center_z``) of the nut-final-position acceptance band used by
+    :meth:`Example.test_final` and drawn as squares in the viewer. They
+    are tunable at runtime via the ImGui panel ("Test zone Z"); these
+    defaults are the values found via that tuning.
+    """
 
     assembly_str: str
     nut_across_flats: float
@@ -75,6 +81,9 @@ class AssemblyParams:
     grasp_margin: float
     screw_grip_margin: float
     screw_regrip_clearance: float
+    grasping_z_offset: float
+    test_zone_z_min_offset: float
+    test_zone_z_max_offset: float
 
 
 ASSEMBLIES: dict[str, AssemblyParams] = {
@@ -85,6 +94,9 @@ ASSEMBLIES: dict[str, AssemblyParams] = {
         grasp_margin=0.018,
         screw_grip_margin=0.018,
         screw_regrip_clearance=0.003,
+        grasping_z_offset=0.001,
+        test_zone_z_min_offset=-0.008,
+        test_zone_z_max_offset=0.025,
     ),
     "m16_loose": AssemblyParams(
         assembly_str="m16_loose",
@@ -93,12 +105,15 @@ ASSEMBLIES: dict[str, AssemblyParams] = {
         grasp_margin=0.014,
         screw_grip_margin=0.014,
         screw_regrip_clearance=0.002,
+        grasping_z_offset=0.004,
+        test_zone_z_min_offset=-0.002,
+        test_zone_z_max_offset=0.012,
     ),
 }
 
 # IK convergence thresholds for the task-FSM advance condition.
-POS_THRESHOLD_XY = 0.0005    # 0.5 mm
-POS_THRESHOLD_Z = 0.00075    # 0.75 mm
+POS_THRESHOLD_XY = 0.0005  # 0.5 mm
+POS_THRESHOLD_Z = 0.00075  # 0.75 mm
 ROT_THRESHOLD_DEG = 0.5
 
 # Collision pipeline buffer sizing (per world).
@@ -210,7 +225,6 @@ def add_mesh_object(
             body=-1, mesh=mesh, scale=(scale, scale, scale), xform=transform, cfg=shape_cfg, label=label
         )
         return -1
-
 
 
 @wp.kernel(enable_backward=False)
@@ -608,9 +622,13 @@ class Example:
         # Assembly-specific parameters (M20 or M16).
         self.assembly = ASSEMBLIES[args.assembly]
         grasp_margin = args.grasp_margin if args.grasp_margin is not None else self.assembly.grasp_margin
-        screw_grip_margin = args.screw_grip_margin if args.screw_grip_margin is not None else self.assembly.screw_grip_margin
+        screw_grip_margin = (
+            args.screw_grip_margin if args.screw_grip_margin is not None else self.assembly.screw_grip_margin
+        )
         screw_regrip_clearance = (
-            args.screw_regrip_clearance if args.screw_regrip_clearance is not None else self.assembly.screw_regrip_clearance
+            args.screw_regrip_clearance
+            if args.screw_regrip_clearance is not None
+            else self.assembly.screw_regrip_clearance
         )
 
         # Task offsets — see module-level TASK_OFFSET_* constants.
@@ -619,7 +637,7 @@ class Example:
         self.task_offset_bolt_approach = wp.vec3(0.0, 0.0, self.assembly.task_offset_bolt_approach_z)
         self.task_offset_place = TASK_OFFSET_PLACE
         self.task_offset_retract = TASK_OFFSET_RETRACT
-        self.grasping_z_offset = GRASPING_Z_OFFSET
+        self.grasping_z_offset = self.assembly.grasping_z_offset
         self.grasp_yaw_offset = float(wp.radians(GRASP_YAW_OFFSET_DEG))
         self.screw_cycles = int(args.screw_cycles)
         self.screw_angle = float(wp.radians(float(args.screw_angle_deg)))
@@ -837,6 +855,18 @@ class Example:
             bolt_effective_center[2] + float(bolt_half_extents[2]) + 0.005,
         )
         self.bolt_frame_pos = bolt_effective_center
+
+        # Test-zone Z bounds (offsets from bolt_center_z [m]) come from the
+        # assembly defaults and are tunable at runtime via the ImGui panel.
+        # The /test_zone squares drawn in the viewer follow these values.
+        self.test_zone_z_min_offset = self.assembly.test_zone_z_min_offset
+        self.test_zone_z_max_offset = self.assembly.test_zone_z_max_offset
+        print(
+            f"Bolt: center_z={float(bolt_effective_center[2]):.4f}  "
+            f"top_z={float(bolt_effective_center[2]) + float(bolt_half_extents[2]):.4f}  "
+            f"test_zone min={float(bolt_effective_center[2]) + self.test_zone_z_min_offset:.4f}  "
+            f"max={float(bolt_effective_center[2]) + self.test_zone_z_max_offset:.4f}"
+        )
 
         # Robot + table (gravity compensation, hydroelastic fingers, coarse SDFs on arm).
         robot_builder = self.build_franka_with_table()
@@ -1347,27 +1377,11 @@ class Example:
         self._lines_debug_colors = wp.array(rgb * (3 * wc), dtype=wp.vec3)
 
         # ---- /test_zone: 8 segments/world (two squares x 4 edges).
-        bolt_center_z = float(self.bolt_frame_pos[2])
-        cx = float(self.bolt_frame_pos[0])
-        cy = float(self.bolt_frame_pos[1])
-        half = 0.03  # 60 mm square side
-        green = wp.vec3(0.0, 1.0, 0.0)
-        test_starts, test_ends = [], []
-        for w in range(wc):
-            off = wp.vec3(float(offsets_np[w][0]), float(offsets_np[w][1]), float(offsets_np[w][2]))
-            for z in (bolt_center_z - 0.010, bolt_center_z + 0.010):
-                corners = [
-                    wp.vec3(cx - half, cy - half, z) + off,
-                    wp.vec3(cx + half, cy - half, z) + off,
-                    wp.vec3(cx + half, cy + half, z) + off,
-                    wp.vec3(cx - half, cy + half, z) + off,
-                ]
-                for i in range(4):
-                    test_starts.append(corners[i])
-                    test_ends.append(corners[(i + 1) % 4])
-        self._lines_test_starts = wp.array(test_starts, dtype=wp.vec3)
-        self._lines_test_ends = wp.array(test_ends, dtype=wp.vec3)
-        self._lines_test_colors = wp.array([green] * (8 * wc), dtype=wp.vec3)
+        # Z levels follow the tunable test_zone_z_{min,max}_offset so the
+        # on-screen squares match what test_final actually checks.
+        self._test_zone_world_offsets_np = offsets_np
+        self._rebuild_test_zone_lines()
+        self._lines_test_colors = wp.array([wp.vec3(0.0, 1.0, 0.0)] * (8 * wc), dtype=wp.vec3)
 
         # ---- /sampling_zone: 4 segments/world, only when jitter > 0.
         if self.nut_xy_jitter > 0.0:
@@ -1422,13 +1436,43 @@ class Example:
 
     def _log_test_zone(self):
         """Draw two square outlines at the min and max Z levels that would pass
-        the 'nut reached the bottom of the bolt' test. Entirely static."""
+        the 'nut reached the bottom of the bolt' test. Buffers are rebuilt
+        only when :attr:`test_zone_z_min_offset` / :attr:`test_zone_z_max_offset`
+        change via the ImGui panel."""
         self.viewer.log_lines(
             "/test_zone",
             self._lines_test_starts,
             self._lines_test_ends,
             self._lines_test_colors,
         )
+
+    def _rebuild_test_zone_lines(self):
+        """Rebuild /test_zone line buffers from the current Z-offset settings."""
+        bolt_center_z = float(self.bolt_frame_pos[2])
+        cx = float(self.bolt_frame_pos[0])
+        cy = float(self.bolt_frame_pos[1])
+        half = 0.03  # 60 mm square side
+        z_lo = bolt_center_z + self.test_zone_z_min_offset
+        z_hi = bolt_center_z + self.test_zone_z_max_offset
+        starts, ends = [], []
+        for w in range(self.world_count):
+            off = wp.vec3(
+                float(self._test_zone_world_offsets_np[w][0]),
+                float(self._test_zone_world_offsets_np[w][1]),
+                float(self._test_zone_world_offsets_np[w][2]),
+            )
+            for z in (z_lo, z_hi):
+                corners = [
+                    wp.vec3(cx - half, cy - half, z) + off,
+                    wp.vec3(cx + half, cy - half, z) + off,
+                    wp.vec3(cx + half, cy + half, z) + off,
+                    wp.vec3(cx - half, cy + half, z) + off,
+                ]
+                for i in range(4):
+                    starts.append(corners[i])
+                    ends.append(corners[(i + 1) % 4])
+        self._lines_test_starts = wp.array(starts, dtype=wp.vec3)
+        self._lines_test_ends = wp.array(ends, dtype=wp.vec3)
 
     def _log_sampling_zone(self):
         """Draw a yellow square showing the XY region the nut is sampled from.
@@ -1739,6 +1783,19 @@ class Example:
             self.viewer.show_hydro_contact_surface = self.show_isosurface
         _, self.show_debug_frames = imgui.checkbox("Show Debug Frames", self.show_debug_frames)
 
+        imgui.separator()
+        imgui.text("Test zone Z (mm, rel. bolt center):")
+        min_mm = self.test_zone_z_min_offset * 1000.0
+        max_mm = self.test_zone_z_max_offset * 1000.0
+        changed_min, new_min_mm = imgui.slider_float("Z min", min_mm, -30.0, 30.0, "%.1f")
+        changed_max, new_max_mm = imgui.slider_float("Z max", max_mm, -30.0, 60.0, "%.1f")
+        if changed_min:
+            self.test_zone_z_min_offset = new_min_mm / 1000.0
+        if changed_max:
+            self.test_zone_z_max_offset = new_max_mm / 1000.0
+        if changed_min or changed_max:
+            self._rebuild_test_zone_lines()
+
     def test_final(self):
         body_q = self.state_0.body_q.numpy()
 
@@ -1750,23 +1807,17 @@ class Example:
         errors = []
         # Tolerances
         xy_tol = 0.02  # 20mm
-        # "Nut at the bottom" reference: from nut_bolt_hydro pre-fix data, when
-        # the nut threads fully down the bolt it ends up with its body center
-        # approximately at the bolt body center (within a few mm). Require our
-        # nut's body center to be within +/-10mm of the bolt center to count
-        # as "reached the bottom".
+        # Nut-z acceptance band. Offsets relative to bolt_center_z come
+        # from the assembly defaults and are user-tunable from the ImGui
+        # panel.
         bolt_center_z = float(self.bolt_frame_pos[2])
-        nut_at_bottom_z_ref = bolt_center_z
-        # Tolerance band: descent plateaus after a few screw cycles (the
-        # simple open-loop cycle-and-rotate controller doesn't reach fully
-        # threaded), so we require the nut to land within +/-25mm of the bolt
-        # center — i.e. "mostly threaded / resting on the bolt threads".
-        nut_at_bottom_z_min = nut_at_bottom_z_ref - 0.015
-        nut_at_bottom_z_max = nut_at_bottom_z_ref + 0.025
+        nut_at_bottom_z_min = bolt_center_z + float(self.test_zone_z_min_offset)
+        nut_at_bottom_z_max = bolt_center_z + float(self.test_zone_z_max_offset)
         print(
             f"  bolt_center_z={bolt_center_z:.4f}  "
-            f"nut_at_bottom_z_ref={nut_at_bottom_z_ref:.4f}  "
-            f"valid range=[{nut_at_bottom_z_min:.4f}, {nut_at_bottom_z_max:.4f}]"
+            f"valid range=[{nut_at_bottom_z_min:.4f}, {nut_at_bottom_z_max:.4f}] "
+            f"(offsets min={self.test_zone_z_min_offset * 1000:+.1f}mm  "
+            f"max={self.test_zone_z_max_offset * 1000:+.1f}mm)"
         )
 
         max_tilt_deg = float(self.max_nut_tilt_deg)
@@ -1829,7 +1880,7 @@ class Example:
                     f"World {world_id}: Nut did not reach the bottom of the bolt. "
                     f"nut_z={nut_pos[2]:.4f} outside expected range "
                     f"[{nut_at_bottom_z_min:.4f}, {nut_at_bottom_z_max:.4f}] "
-                    f"(bolt_center={bolt_center_z:.4f}, target={nut_at_bottom_z_ref:.4f})"
+                    f"(bolt_center={bolt_center_z:.4f})"
                 )
             # Phase 4: nut body-Z axis must stay close to world Z (upright).
             # A threaded nut that ends up tipped means the screw motion got
