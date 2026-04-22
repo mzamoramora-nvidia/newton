@@ -4,12 +4,13 @@
 ###########################################################################
 # Example Robot Panda Nut Bolt
 #
-# Demonstrates a Franka Panda robot picking up an M20 nut and placing it
+# Demonstrates a Franka Panda robot picking up a nut and placing it
 # on a bolt using hydroelastic contacts, gravity compensation, and
 # IK-based control. The nut threads onto the bolt under gravity after
-# release.
+# release. Supports M20 (default) and M16 assemblies via --assembly.
 #
 # Command: python -m newton.examples robot_panda_nut_bolt --world-count 4
+# Command: python -m newton.examples robot_panda_nut_bolt --assembly m16_loose
 #
 ###########################################################################
 
@@ -17,7 +18,7 @@ import argparse
 import copy
 import enum
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import numpy as np
 import trimesh
@@ -31,7 +32,6 @@ from newton.geometry import HydroelasticSDF
 from newton.sensors import SensorContact
 
 # IsaacGymEnvs nut/bolt assets
-ASSEMBLY_STR = "m20_loose"
 ISAACGYM_ENVS_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"
 ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
 
@@ -55,16 +55,46 @@ NUT_START_POS = TABLE_TOP_CENTER + wp.vec3(0.05, 0.15, 0.0)
 # EE task offsets — added to per-task anchor poses.
 TASK_OFFSET_APPROACH = wp.vec3(0.0, 0.0, 0.04)
 TASK_OFFSET_LIFT = wp.vec3(0.0, 0.0, 0.15)
-TASK_OFFSET_BOLT_APPROACH = wp.vec3(0.0, 0.0, 0.06)
 TASK_OFFSET_PLACE = wp.vec3(0.0, 0.0, 0.001)
 TASK_OFFSET_RETRACT = wp.vec3(0.0, 0.0, 0.10)
 
 # Grasp geometry
 GRASP_YAW_OFFSET_DEG = 30.0  # gripper yaw relative to nut, about Z
 GRASPING_Z_OFFSET = 0.001
-NUT_ACROSS_FLATS = 0.030   # M20 nut, 30 mm across flats
 GRIPPER_OPEN_POS = 0.06    # per-finger full-open position [m]
 GRIPPER_KE = 100.0         # must match joint_target_ke for finger joints
+
+
+@dataclass(frozen=True)
+class AssemblyParams:
+    """Per-assembly geometry and tuning defaults [m]."""
+
+    assembly_str: str
+    nut_across_flats: float
+    task_offset_bolt_approach_z: float
+    grasp_margin: float
+    screw_grip_margin: float
+    screw_regrip_clearance: float
+
+
+ASSEMBLIES: dict[str, AssemblyParams] = {
+    "m20_loose": AssemblyParams(
+        assembly_str="m20_loose",
+        nut_across_flats=0.030,
+        task_offset_bolt_approach_z=0.06,
+        grasp_margin=0.018,
+        screw_grip_margin=0.018,
+        screw_regrip_clearance=0.003,
+    ),
+    "m16_loose": AssemblyParams(
+        assembly_str="m16_loose",
+        nut_across_flats=0.024,
+        task_offset_bolt_approach_z=0.04,
+        grasp_margin=0.014,
+        screw_grip_margin=0.014,
+        screw_regrip_clearance=0.002,
+    ),
+}
 
 # IK convergence thresholds for the task-FSM advance condition.
 POS_THRESHOLD_XY = 0.0005    # 0.5 mm
@@ -575,10 +605,18 @@ class Example:
         self.bolt_base_pos = BOLT_BASE_POS
         self.nut_start_pos = NUT_START_POS
 
+        # Assembly-specific parameters (M20 or M16).
+        self.assembly = ASSEMBLIES[args.assembly]
+        grasp_margin = args.grasp_margin if args.grasp_margin is not None else self.assembly.grasp_margin
+        screw_grip_margin = args.screw_grip_margin if args.screw_grip_margin is not None else self.assembly.screw_grip_margin
+        screw_regrip_clearance = (
+            args.screw_regrip_clearance if args.screw_regrip_clearance is not None else self.assembly.screw_regrip_clearance
+        )
+
         # Task offsets — see module-level TASK_OFFSET_* constants.
         self.task_offset_approach = TASK_OFFSET_APPROACH
         self.task_offset_lift = TASK_OFFSET_LIFT
-        self.task_offset_bolt_approach = TASK_OFFSET_BOLT_APPROACH
+        self.task_offset_bolt_approach = wp.vec3(0.0, 0.0, self.assembly.task_offset_bolt_approach_z)
         self.task_offset_place = TASK_OFFSET_PLACE
         self.task_offset_retract = TASK_OFFSET_RETRACT
         self.grasping_z_offset = GRASPING_Z_OFFSET
@@ -596,22 +634,17 @@ class Example:
         # Gripper geometry. Panda fingers travel 0 (closed) to 0.04 m (open);
         # GRIPPER_OPEN_POS=0.06 is the slightly-overcommanded open target.
         self.gripper_open_pos = GRIPPER_OPEN_POS
-        # Grasp margin closes past first contact to produce a known squeeze
-        # force. For a regular hex nut, the grasp width depends on the angle
-        # from the nearest flat normal (0-30 deg, 6-fold symmetry).
-        rem = self.grasp_yaw_offset % (wp.pi / 3.0)  # remainder in [0, 60 deg)
+        nut_across_flats = self.assembly.nut_across_flats
+        rem = self.grasp_yaw_offset % (wp.pi / 3.0)
         theta_eff = rem if rem <= wp.pi / 6.0 else wp.pi / 3.0 - rem
-        nut_grasp_width = NUT_ACROSS_FLATS / float(wp.cos(theta_eff))
-        grasp_margin = args.grasp_margin  # extra closure past first contact [m]
-        screw_grip_margin = args.screw_grip_margin  # gentler closure during screw motion
+        nut_grasp_width = nut_across_flats / float(wp.cos(theta_eff))
         self.gripper_closed_pos = max(0.0, nut_grasp_width / 2.0 - grasp_margin)
         self.gripper_screw_grip_pos = max(0.0, nut_grasp_width / 2.0 - screw_grip_margin)
-        # Partial open for SCREW_REGRIP: hex across-corners radius + clearance.
-        # max radius = across_flats / (2 * cos(30deg)) ≈ 17.3mm; add clearance.
-        nut_corner_radius = NUT_ACROSS_FLATS / (2.0 * float(wp.cos(wp.pi / 6.0)))
-        self.gripper_screw_regrip_pos = nut_corner_radius + args.screw_regrip_clearance
+        nut_corner_radius = nut_across_flats / (2.0 * float(wp.cos(wp.pi / 6.0)))
+        self.gripper_screw_regrip_pos = nut_corner_radius + screw_regrip_clearance
         expected_force_per_finger = GRIPPER_KE * grasp_margin
         expected_screw_force_per_finger = GRIPPER_KE * screw_grip_margin
+        print(f"Assembly: {self.assembly.assembly_str}, nut across flats={nut_across_flats * 1000:.0f}mm")
         print(
             f"Grasp: yaw={float(wp.degrees(self.grasp_yaw_offset)):.0f}deg, "
             f"nut width={nut_grasp_width * 1000:.1f}mm, "
@@ -772,10 +805,11 @@ class Example:
         ``self.model``. Also patches the nut's initial XY per world.
         """
         # Download IsaacGymEnvs mesh assets.
-        print("Downloading nut/bolt assets...")
+        assembly_str = self.assembly.assembly_str
+        print(f"Downloading nut/bolt assets ({assembly_str})...")
         asset_path = newton.examples.download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
-        bolt_file = str(asset_path / f"factory_bolt_{ASSEMBLY_STR}.obj")
-        nut_file = str(asset_path / f"factory_nut_{ASSEMBLY_STR}_subdiv_3x.obj")
+        bolt_file = str(asset_path / f"factory_bolt_{assembly_str}.obj")
+        nut_file = str(asset_path / f"factory_nut_{assembly_str}_subdiv_3x.obj")
 
         # Load nut/bolt meshes with SDF (high resolution for threaded geometry).
         bolt_mesh, bolt_center, bolt_half_extents = load_mesh_with_sdf(
@@ -1891,10 +1925,17 @@ class Example:
         parser.set_defaults(num_frames=3000)
         parser.set_defaults(world_count=1)
         parser.add_argument(
+            "--assembly",
+            type=str,
+            default="m20_loose",
+            choices=list(ASSEMBLIES.keys()),
+            help="Nut-bolt assembly type. m20_loose (default, original) or m16_loose (matches Isaac Lab Factory).",
+        )
+        parser.add_argument(
             "--grasp-margin",
             type=float,
-            default=0.018,
-            help="Extra gripper closure past first contact with the nut [m].",
+            default=None,
+            help="Extra gripper closure past first contact with the nut [m]. Default depends on assembly.",
         )
         parser.add_argument(
             "--nut-xy-jitter",
@@ -1923,14 +1964,14 @@ class Example:
         parser.add_argument(
             "--screw-regrip-clearance",
             type=float,
-            default=0.003,
-            help="Radial clearance over the hex across-corners radius for the SCREW_REGRIP finger target [m]. Partial open (vs fully retracting to --gripper-open-pos) avoids a full finger stroke per cycle.",
+            default=None,
+            help="Radial clearance over the hex across-corners radius for the SCREW_REGRIP finger target [m]. Default depends on assembly.",
         )
         parser.add_argument(
             "--screw-grip-margin",
             type=float,
-            default=0.018,
-            help="Grasp margin used during SCREW_ROTATE [m]. Defaults to the main grasp margin — a softer grip tends to slip and the rotation fails to thread the nut.",
+            default=None,
+            help="Grasp margin used during SCREW_ROTATE [m]. Default depends on assembly.",
         )
         parser.add_argument(
             "--seed",
