@@ -205,6 +205,90 @@ def step_clip_target_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def reduce_pos_err_mm_kernel(
+    pos_err: wp.array[wp.vec3],
+    out_mm: wp.array[float],
+):
+    """Per-world: ||pos_err|| in millimetres."""
+    w = wp.tid()
+    out_mm[w] = wp.length(pos_err[w]) * 1000.0
+
+
+@wp.kernel(enable_backward=False)
+def reduce_rot_err_deg_kernel(
+    rot_err: wp.array[wp.vec3],
+    out_deg: wp.array[float],
+):
+    """Per-world: ||rot_err|| (radians) converted to degrees via wp.degrees."""
+    w = wp.tid()
+    out_deg[w] = wp.degrees(wp.length(rot_err[w]))
+
+
+@wp.kernel(enable_backward=False)
+def reduce_arm_torque_norm_kernel(
+    arm_torque: wp.array2d(dtype=float),  # (W, n_arm_dofs)
+    n_arm_dofs: int,
+    out_norm: wp.array[float],
+):
+    """Per-world: Euclidean norm of the arm-DOF torque vector."""
+    w = wp.tid()
+    s = float(0.0)
+    for d in range(n_arm_dofs):
+        v = arm_torque[w, d]
+        s += v * v
+    out_norm[w] = wp.sqrt(s)
+
+
+@wp.kernel(enable_backward=False)
+def reduce_h_symmetry_resid_kernel(
+    h_full: wp.array3d(dtype=float),  # (W, n_dofs, n_dofs)
+    n_arm_dofs: int,
+    out: wp.array[float],
+):
+    """Frobenius residual ``||H - H^T||_F / ||H||_F`` over the arm sub-block."""
+    w = wp.tid()
+    sym_sq = float(0.0)
+    norm_sq = float(0.0)
+    for i in range(n_arm_dofs):
+        for j in range(n_arm_dofs):
+            a = h_full[w, i, j]
+            b = h_full[w, j, i]
+            d = a - b
+            sym_sq += d * d
+            norm_sq += a * a
+    out[w] = wp.sqrt(sym_sq) / wp.max(wp.sqrt(norm_sq), 1.0e-9)
+
+
+@wp.kernel(enable_backward=False)
+def reduce_pos_distance_mm_kernel(
+    a: wp.array[wp.vec3],
+    b: wp.array[wp.vec3],
+    out_mm: wp.array[float],
+):
+    """Per-world: ``||a - b||`` in millimetres."""
+    w = wp.tid()
+    out_mm[w] = wp.length(a[w] - b[w]) * 1000.0
+
+
+@wp.kernel(enable_backward=False)
+def apply_disturbance_force_kernel(
+    body_f: wp.array[wp.spatial_vector],
+    disturbance_force: wp.array[wp.vec3],
+    ee_body_index: int,
+    num_bodies_per_world: int,
+):
+    """Write ``disturbance_force[w]`` into ``body_f`` at the EE body's COM.
+
+    ``body_f`` is a wrench in world frame referenced at COM (see Newton state
+    docs). Torque components are zeroed.
+    """
+    w = wp.tid()
+    body_idx = w * num_bodies_per_world + ee_body_index
+    f = disturbance_force[w]
+    body_f[body_idx] = wp.spatial_vector(f[0], f[1], f[2], 0.0, 0.0, 0.0)
+
+
+@wp.kernel(enable_backward=False)
 def compute_pose_error_kernel(
     tcp_pos: wp.array[wp.vec3],
     tcp_quat: wp.array[wp.vec4],
