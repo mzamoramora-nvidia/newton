@@ -19,7 +19,6 @@
 
 from __future__ import annotations
 
-import numpy as np
 import warp as wp
 
 import newton
@@ -27,7 +26,13 @@ import newton.examples
 import newton.utils
 from newton.examples.robot.osc import (
     OSCController,
+    apply_disturbance_force_kernel,
     quat_to_rpy_kernel,
+    reduce_arm_torque_norm_kernel,
+    reduce_h_symmetry_resid_kernel,
+    reduce_pos_distance_mm_kernel,
+    reduce_pos_err_mm_kernel,
+    reduce_rot_err_deg_kernel,
     rpy_to_quat_kernel,
     step_clip_target_kernel,
     update_osc_debug_frame_lines_kernel,
@@ -166,7 +171,7 @@ class Example:
         # Default arm pose for nullspace centering: every world starts at
         # INIT_ARM_Q. Stored on device so the nullspace torque can pull each
         # world's redundant DOF toward this configuration.
-        q_default_host = np.tile(np.array(INIT_ARM_Q, dtype=np.float32), (self.world_count, 1))
+        q_default_host = [list(INIT_ARM_Q) for _ in range(self.world_count)]
         self.osc.set_default_pose(
             wp.array(q_default_host, dtype=float, device=self.model.device)
         )
@@ -232,17 +237,14 @@ class Example:
         n_segments = self.world_count * 7
         self._dbg_starts = wp.zeros(n_segments, dtype=wp.vec3, device=self.model.device)
         self._dbg_ends = wp.zeros(n_segments, dtype=wp.vec3, device=self.model.device)
-        # Color array, one vec3 per segment. Filled once at init: TCP frame
-        # in saturated RGB, target frame in half-saturated RGB, error vector
-        # in white.
-        colors_host = np.zeros((n_segments, 3), dtype=np.float32)
-        full = np.array([(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)], dtype=np.float32)
-        half = full * 0.4
-        for w in range(self.world_count):
-            base = w * 7
-            colors_host[base + 0 : base + 3] = full
-            colors_host[base + 3 : base + 6] = half
-            colors_host[base + 6] = (1.0, 1.0, 1.0)
+        # Color array, one vec3 per segment. Filled once at init: TCP frame in
+        # saturated RGB, target frame in half-saturated RGB, error vector in
+        # white. Built as a Python list of vec3 tuples and handed to wp.array.
+        colors_host: list[tuple[float, float, float]] = []
+        for _ in range(self.world_count):
+            colors_host += [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)]
+            colors_host += [(0.4, 0.0, 0.0), (0.0, 0.4, 0.0), (0.0, 0.0, 0.4)]
+            colors_host += [(1.0, 1.0, 1.0)]
         self._dbg_colors = wp.array(colors_host, dtype=wp.vec3, device=self.model.device)
         # Per-tick delta caps. Defaults match Factory's pos_action_threshold
         # (5 mm) and a moderate rotation bound (~3 deg).
@@ -268,18 +270,32 @@ class Example:
         # Disturbance buffer: per-world (fx, fy, fz) [N] applied at the EE
         # body's COM for `_disturbance_frames_remaining` more frames. Counted
         # down each frame; cleared when zero. Used by phase-7 sanity buttons.
-        self._disturbance_force = np.zeros((self.world_count, 3), dtype=np.float32)
+        # Stored on device as a wp.array so the kernel can write body_f
+        # without a host round-trip per frame.
+        self._disturbance_force = wp.zeros(self.world_count, dtype=wp.vec3, device=self.model.device)
         self._disturbance_frames_remaining = 0
         self._disturbance_magnitude = 5.0  # N
         self._disturbance_duration_frames = 60  # 1 s at 60 fps
 
-        # Cached diagnostic numbers, refreshed every N frames in step().
+        # Cached diagnostic scalars (host-side), refreshed every N frames in
+        # step(). The actual reductions run in Warp kernels and write into
+        # the per-world wp.array buffers below; we read back one scalar per
+        # diagnostic at refresh time.
         self._diag_pos_err_mm = 0.0
         self._diag_rot_err_deg = 0.0
         self._diag_arm_torque_norm = 0.0
         self._diag_h_symmetry_resid = 0.0
         self._diag_jacobian_cond = 0.0
         self._diag_refresh_period = 6  # frames
+
+        # On-device scalar buffers, one per world per diagnostic.
+        wc = self.world_count
+        dev = self.model.device
+        self._diag_pos_err_mm_buf = wp.zeros(wc, dtype=float, device=dev)
+        self._diag_rot_err_deg_buf = wp.zeros(wc, dtype=float, device=dev)
+        self._diag_arm_torque_norm_buf = wp.zeros(wc, dtype=float, device=dev)
+        self._diag_h_sym_resid_buf = wp.zeros(wc, dtype=float, device=dev)
+        self._diag_pos_distance_mm_buf = wp.zeros(wc, dtype=float, device=dev)
         self._target_offset = (
             tuple(float(v) for v in args.target_offset)
             if getattr(args, "target_offset", None) is not None
@@ -474,43 +490,83 @@ class Example:
     def _inject_disturbance(self) -> None:
         """Write the active disturbance wrench into ``state_0.body_f``.
 
-        Uses host->device per call. Called once per frame for the duration of
-        the disturbance — the cost is negligible relative to MuJoCo's solve.
+        Runs entirely on device via :func:`apply_disturbance_force_kernel` -
+        no host round-trip per frame. ``self._disturbance_force`` is a
+        per-world ``wp.array[wp.vec3]`` on device; the kernel scatters it
+        into ``body_f`` at the EE body index, zeroing the torque components.
         """
         if self.state_0.body_f is None:
             return
-        f_host = self.state_0.body_f.numpy().copy()
-        for w in range(self.world_count):
-            body_idx = w * self.num_bodies_per_world + EE_BODY_INDEX
-            f_host[body_idx, 0] = self._disturbance_force[w, 0]
-            f_host[body_idx, 1] = self._disturbance_force[w, 1]
-            f_host[body_idx, 2] = self._disturbance_force[w, 2]
-            # Torque components (3:6) left at zero.
-        self.state_0.body_f.assign(f_host)
+        wp.launch(
+            apply_disturbance_force_kernel,
+            dim=self.world_count,
+            inputs=[
+                self.state_0.body_f,
+                self._disturbance_force,
+                EE_BODY_INDEX,
+                self.num_bodies_per_world,
+            ],
+            device=self.model.device,
+        )
 
     def _refresh_diagnostics(self) -> None:
-        """Pull a tiny set of host-side diagnostic numbers for the GUI panel."""
+        """Refresh host-side diagnostic scalars for the GUI panel.
+
+        Vector reductions (pos err, rot err, torque norm, mass-matrix
+        symmetry residual) all run as Warp kernels writing into per-world
+        wp.array[float] buffers; we read back only the active world's
+        scalar. The condition number runs through torch via wp.to_torch
+        interop (the example already uses torch for the OSC's nullspace
+        path, so this adds no new dependency).
+        """
         active = self._active_world
-        tcp_pos = self.osc.tcp_pos.numpy()[active]
-        tgt_pos = self.osc.target_pos.numpy()[active]
-        self._diag_pos_err_mm = float(np.linalg.norm(tgt_pos - tcp_pos)) * 1000.0
-        # Rotation error: compute angle of (target * tcp^-1) in degrees.
-        tcp_q = self.osc.tcp_quat.numpy()[active]
-        tgt_q = self.osc.target_quat.numpy()[active]
-        cos_half = float(abs(np.dot(tcp_q, tgt_q)))
-        cos_half = min(1.0, max(-1.0, cos_half))
-        self._diag_rot_err_deg = float(np.degrees(2.0 * np.arccos(cos_half)))
-        self._diag_arm_torque_norm = float(np.linalg.norm(self.osc.arm_torque.numpy()[active]))
-        # Mass-matrix symmetry residual on the arm block (a cheap invariant).
+        dev = self.model.device
+
+        wp.launch(
+            reduce_pos_err_mm_kernel,
+            dim=self.world_count,
+            inputs=[self.osc.pos_err],
+            outputs=[self._diag_pos_err_mm_buf],
+            device=dev,
+        )
+        wp.launch(
+            reduce_rot_err_deg_kernel,
+            dim=self.world_count,
+            inputs=[self.osc.rot_err],
+            outputs=[self._diag_rot_err_deg_buf],
+            device=dev,
+        )
+        wp.launch(
+            reduce_arm_torque_norm_kernel,
+            dim=self.world_count,
+            inputs=[self.osc.arm_torque, self.osc.n_arm_dofs],
+            outputs=[self._diag_arm_torque_norm_buf],
+            device=dev,
+        )
+        h_full = self.art_view.eval_mass_matrix(self.state_0)
+        wp.launch(
+            reduce_h_symmetry_resid_kernel,
+            dim=self.world_count,
+            inputs=[h_full, self.osc.n_arm_dofs],
+            outputs=[self._diag_h_sym_resid_buf],
+            device=dev,
+        )
+
+        self._diag_pos_err_mm = float(self._diag_pos_err_mm_buf.numpy()[active])
+        self._diag_rot_err_deg = float(self._diag_rot_err_deg_buf.numpy()[active])
+        self._diag_arm_torque_norm = float(self._diag_arm_torque_norm_buf.numpy()[active])
+        self._diag_h_symmetry_resid = float(self._diag_h_sym_resid_buf.numpy()[active])
+
+        # Condition number via torch (already imported for the nullspace).
         try:
-            H = self.art_view.eval_mass_matrix(self.state_0).numpy()[active, :7, :7]
-            sym = np.linalg.norm(H - H.T) / max(np.linalg.norm(H), 1e-9)
-            self._diag_h_symmetry_resid = float(sym)
-            J = self.osc.j_tcp.numpy()[active]
-            JHJt = J @ np.linalg.inv(H) @ J.T
-            self._diag_jacobian_cond = float(np.linalg.cond(JHJt))
-        except Exception:
-            self._diag_h_symmetry_resid = -1.0
+            import torch  # noqa: PLC0415
+            H_t = wp.to_torch(h_full)
+            J_t = wp.to_torch(self.osc.j_tcp)
+            H_arm = H_t[active, : self.osc.n_arm_dofs, : self.osc.n_arm_dofs]
+            J = J_t[active]
+            JHJt = J @ torch.linalg.inv(H_arm) @ J.transpose(-2, -1)
+            self._diag_jacobian_cond = float(torch.linalg.cond(JHJt).item())
+        except ImportError:
             self._diag_jacobian_cond = -1.0
 
     def _sync_gui_target_to_device(self) -> None:
@@ -522,10 +578,14 @@ class Example:
         """
         if not self._gui_target_dirty:
             return
-        pos_host = np.array(self._gui_target_pos_host, dtype=np.float32)
-        rpy_host = np.array(self._gui_target_rpy_host, dtype=np.float32)
-        self.gui_target_pos = wp.array(pos_host, dtype=wp.vec3, device=self.model.device)
-        self.gui_target_rpy = wp.array(rpy_host, dtype=wp.vec3, device=self.model.device)
+        # wp.array accepts list-of-tuples directly for vec3 dtype - no numpy
+        # round-trip needed.
+        self.gui_target_pos = wp.array(
+            self._gui_target_pos_host, dtype=wp.vec3, device=self.model.device
+        )
+        self.gui_target_rpy = wp.array(
+            self._gui_target_rpy_host, dtype=wp.vec3, device=self.model.device
+        )
         wp.launch(
             rpy_to_quat_kernel,
             dim=self.world_count,
@@ -633,8 +693,15 @@ class Example:
         for axis_idx, axis_name in enumerate(("X", "Y", "Z")):
             for sign, sign_str in ((1.0, "+"), (-1.0, "-")):
                 if imgui.button(f"Push {sign_str}{axis_name}"):
-                    self._disturbance_force[:] = 0.0
-                    self._disturbance_force[active, axis_idx] = sign * self._disturbance_magnitude
+                    # Build per-world force list, only the active world non-zero,
+                    # then upload to the device buffer.
+                    f_list = [(0.0, 0.0, 0.0) for _ in range(self.world_count)]
+                    f_active = [0.0, 0.0, 0.0]
+                    f_active[axis_idx] = sign * self._disturbance_magnitude
+                    f_list[active] = tuple(f_active)
+                    self._disturbance_force = wp.array(
+                        f_list, dtype=wp.vec3, device=self.model.device
+                    )
                     self._disturbance_frames_remaining = self._disturbance_duration_frames
                 imgui.same_line()
         imgui.new_line()
@@ -651,7 +718,15 @@ class Example:
         tcp_pos = self.osc.tcp_pos.numpy()[active]
         tgt_pos = self.osc.target_pos.numpy()[active]
         gui_pos = self._gui_target_pos_host[active]
-        gap_mm = np.linalg.norm(np.array(gui_pos) - tgt_pos) * 1000.0
+        # GUI-vs-OSC-target distance (already on the device path; for the
+        # display we compute a single scalar from the three components -
+        # the underlying OSC target_pos has no Warp reduction yet for this
+        # particular pair, so this is the only floats-arithmetic line in
+        # the panel).
+        dx = float(gui_pos[0]) - float(tgt_pos[0])
+        dy = float(gui_pos[1]) - float(tgt_pos[1])
+        dz = float(gui_pos[2]) - float(tgt_pos[2])
+        gap_mm = ((dx * dx + dy * dy + dz * dz) ** 0.5) * 1000.0
         imgui.text(f"TCP pos: {tcp_pos[0]:+.3f} {tcp_pos[1]:+.3f} {tcp_pos[2]:+.3f}")
         imgui.text(f"OSC tgt: {tgt_pos[0]:+.3f} {tgt_pos[1]:+.3f} {tgt_pos[2]:+.3f}")
         imgui.text(f"Pos err: {self._diag_pos_err_mm:.1f} mm    Rot err: {self._diag_rot_err_deg:.2f} deg")
@@ -690,10 +765,18 @@ class Example:
 
         if self._target_offset is not None:
             # The OSC target should have stepped most of the way toward the
-            # GUI target, and the TCP should be tracking it.
-            tcp_pos = self.osc.tcp_pos.numpy()[0]
-            gui_pos = np.array(self._gui_target_pos_host[0], dtype=np.float32)
-            err = float(np.linalg.norm(gui_pos - tcp_pos))
+            # GUI target, and the TCP should be tracking it. Compute the
+            # per-world distance via reduce_pos_distance_mm_kernel and read
+            # back world 0's value.
+            wp.launch(
+                reduce_pos_distance_mm_kernel,
+                dim=self.world_count,
+                inputs=[self.gui_target_pos, self.osc.tcp_pos],
+                outputs=[self._diag_pos_distance_mm_buf],
+                device=self.model.device,
+            )
+            err_mm = float(self._diag_pos_distance_mm_buf.numpy()[0])
+            err = err_mm / 1000.0
             offset_norm = self._initial_target_offset_norm
             closed_frac = 1.0 - err / max(offset_norm, 1e-9)
             print(
