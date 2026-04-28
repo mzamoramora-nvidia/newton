@@ -27,6 +27,7 @@ import newton.utils
 from newton.examples.robot.osc import (
     OSCController,
     apply_disturbance_force_kernel,
+    pack_diagnostics_kernel,
     quat_to_rpy_kernel,
     reduce_arm_torque_norm_kernel,
     reduce_h_symmetry_resid_kernel,
@@ -296,6 +297,13 @@ class Example:
         self._diag_arm_torque_norm_buf = wp.zeros(wc, dtype=float, device=dev)
         self._diag_h_sym_resid_buf = wp.zeros(wc, dtype=float, device=dev)
         self._diag_pos_distance_mm_buf = wp.zeros(wc, dtype=float, device=dev)
+        # Packed buffer: 4 scalars per world (pos err mm, rot err deg, torque
+        # norm, H sym resid). One readback per refresh instead of four.
+        self._diag_packed_buf = wp.zeros((wc, 4), dtype=float, device=dev)
+        # Cached host-side TCP / target pose for the UI panel - refreshed at
+        # the diagnostic rate so the render thread doesn't trigger device syncs.
+        self._diag_tcp_pos_host = (0.0, 0.0, 0.0)
+        self._diag_target_pos_host = (0.0, 0.0, 0.0)
         self._target_offset = (
             tuple(float(v) for v in args.target_offset)
             if getattr(args, "target_offset", None) is not None
@@ -445,19 +453,24 @@ class Example:
         if self._gui_frame % self._diag_refresh_period == 0:
             self._refresh_diagnostics()
 
-        if self.test_mode:
-            tcp_z = float(self.osc.tcp_pos.numpy()[0][2])
+        # Test-mode logging is gated on the diagnostic refresh tick - the
+        # host readback inside _refresh_diagnostics already pulled tcp_pos
+        # for the cached UI scalars, so reusing _diag_tcp_pos_host here
+        # avoids an extra .numpy() per frame.
+        if self.test_mode and self._gui_frame % self._diag_refresh_period == 0:
+            tcp_z = float(self._diag_tcp_pos_host[2])
             if self._initial_tcp_z is None:
                 self._initial_tcp_z = tcp_z
                 print(f"[osc-test] initial TCP z = {tcp_z:.4f} m", flush=True)
-            # Print every 10 frames (~6 Hz at 60 fps) to keep the log light.
-            if self._gui_frame % 10 == 0:
-                drop = (self._initial_tcp_z - tcp_z) * 1000.0
-                print(
-                    f"[osc-test] t={self.sim_time:5.2f}s  TCP z={tcp_z:.4f} m  drop={drop:+6.2f} mm",
-                    flush=True,
-                )
-            self._gui_frame += 1
+            drop = (self._initial_tcp_z - tcp_z) * 1000.0
+            print(
+                f"[osc-test] t={self.sim_time:5.2f}s  TCP z={tcp_z:.4f} m  drop={drop:+6.2f} mm",
+                flush=True,
+            )
+        # Always advance the frame counter - it gates the control_decimation
+        # OSC tick and the diagnostic refresh, neither of which should be
+        # bound to test mode.
+        self._gui_frame += 1
 
     # ------------------------------------------------------------------
     # Rendering / GUI
@@ -543,24 +556,53 @@ class Example:
             outputs=[self._diag_arm_torque_norm_buf],
             device=dev,
         )
-        h_full = self.art_view.eval_mass_matrix(self.state_0)
+        # Reuse the OSC's preallocated H buffer; eval_mass_matrix writes
+        # into it without allocating a fresh array.
+        self.art_view.eval_mass_matrix(
+            self.state_0,
+            H=self.osc.h_full,
+            J=self.osc.j_full,
+            body_I_s=self.osc._body_I_s,
+            joint_S_s=self.osc._joint_S_s,
+        )
         wp.launch(
             reduce_h_symmetry_resid_kernel,
             dim=self.world_count,
-            inputs=[h_full, self.osc.n_arm_dofs],
+            inputs=[self.osc.h_full, self.osc.n_arm_dofs],
             outputs=[self._diag_h_sym_resid_buf],
             device=dev,
         )
 
-        self._diag_pos_err_mm = float(self._diag_pos_err_mm_buf.numpy()[active])
-        self._diag_rot_err_deg = float(self._diag_rot_err_deg_buf.numpy()[active])
-        self._diag_arm_torque_norm = float(self._diag_arm_torque_norm_buf.numpy()[active])
-        self._diag_h_symmetry_resid = float(self._diag_h_sym_resid_buf.numpy()[active])
+        # Pack the four scalars and read back once per refresh.
+        wp.launch(
+            pack_diagnostics_kernel,
+            dim=self.world_count,
+            inputs=[
+                self._diag_pos_err_mm_buf,
+                self._diag_rot_err_deg_buf,
+                self._diag_arm_torque_norm_buf,
+                self._diag_h_sym_resid_buf,
+            ],
+            outputs=[self._diag_packed_buf],
+            device=dev,
+        )
+        packed = self._diag_packed_buf.numpy()[active]
+        self._diag_pos_err_mm = float(packed[0])
+        self._diag_rot_err_deg = float(packed[1])
+        self._diag_arm_torque_norm = float(packed[2])
+        self._diag_h_symmetry_resid = float(packed[3])
+
+        # Cache TCP / target pose for the render-thread UI - one readback at
+        # diag rate, none on every UI tick.
+        tcp_pos_np = self.osc.tcp_pos.numpy()[active]
+        tgt_pos_np = self.osc.target_pos.numpy()[active]
+        self._diag_tcp_pos_host = (float(tcp_pos_np[0]), float(tcp_pos_np[1]), float(tcp_pos_np[2]))
+        self._diag_target_pos_host = (float(tgt_pos_np[0]), float(tgt_pos_np[1]), float(tgt_pos_np[2]))
 
         # Condition number via torch (already imported for the nullspace).
         try:
             import torch  # noqa: PLC0415
-            H_t = wp.to_torch(h_full)
+            H_t = wp.to_torch(self.osc.h_full)
             J_t = wp.to_torch(self.osc.j_tcp)
             H_arm = H_t[active, : self.osc.n_arm_dofs, : self.osc.n_arm_dofs]
             J = J_t[active]
@@ -575,17 +617,14 @@ class Example:
         Skipped when nothing changed since the last sync to keep the per-tick
         cost down. Also recomputes the quaternion from RPY each time so the
         OSC's clipped slerp has a consistent target.
+
+        Writes happen in place via ``wp.array.assign`` on the buffers that
+        were allocated once in ``__init__`` - no per-tick allocation.
         """
         if not self._gui_target_dirty:
             return
-        # wp.array accepts list-of-tuples directly for vec3 dtype - no numpy
-        # round-trip needed.
-        self.gui_target_pos = wp.array(
-            self._gui_target_pos_host, dtype=wp.vec3, device=self.model.device
-        )
-        self.gui_target_rpy = wp.array(
-            self._gui_target_rpy_host, dtype=wp.vec3, device=self.model.device
-        )
+        self.gui_target_pos.assign(self._gui_target_pos_host)
+        self.gui_target_rpy.assign(self._gui_target_rpy_host)
         wp.launch(
             rpy_to_quat_kernel,
             dim=self.world_count,
@@ -693,15 +732,13 @@ class Example:
         for axis_idx, axis_name in enumerate(("X", "Y", "Z")):
             for sign, sign_str in ((1.0, "+"), (-1.0, "-")):
                 if imgui.button(f"Push {sign_str}{axis_name}"):
-                    # Build per-world force list, only the active world non-zero,
-                    # then upload to the device buffer.
+                    # Build per-world force list with only the active world set,
+                    # then assign in-place into the preallocated device buffer.
                     f_list = [(0.0, 0.0, 0.0) for _ in range(self.world_count)]
                     f_active = [0.0, 0.0, 0.0]
                     f_active[axis_idx] = sign * self._disturbance_magnitude
                     f_list[active] = tuple(f_active)
-                    self._disturbance_force = wp.array(
-                        f_list, dtype=wp.vec3, device=self.model.device
-                    )
+                    self._disturbance_force.assign(f_list)
                     self._disturbance_frames_remaining = self._disturbance_duration_frames
                 imgui.same_line()
         imgui.new_line()
@@ -715,8 +752,10 @@ class Example:
 
         imgui.separator()
         imgui.text("Diagnostics (active world)")
-        tcp_pos = self.osc.tcp_pos.numpy()[active]
-        tgt_pos = self.osc.target_pos.numpy()[active]
+        # Read cached host scalars (refreshed at the diagnostic rate). No
+        # device sync on the render thread.
+        tcp_pos = self._diag_tcp_pos_host
+        tgt_pos = self._diag_target_pos_host
         gui_pos = self._gui_target_pos_host[active]
         # GUI-vs-OSC-target distance (already on the device path; for the
         # display we compute a single scalar from the three components -

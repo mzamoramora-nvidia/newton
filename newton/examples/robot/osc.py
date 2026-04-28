@@ -260,6 +260,22 @@ def reduce_h_symmetry_resid_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def pack_diagnostics_kernel(
+    pos_err_mm: wp.array[float],
+    rot_err_deg: wp.array[float],
+    arm_torque_norm: wp.array[float],
+    h_sym_resid: wp.array[float],
+    out: wp.array2d(dtype=float),  # (world_count, 4)
+):
+    """Pack four scalar diagnostics into one (W, 4) buffer for a single readback."""
+    w = wp.tid()
+    out[w, 0] = pos_err_mm[w]
+    out[w, 1] = rot_err_deg[w]
+    out[w, 2] = arm_torque_norm[w]
+    out[w, 3] = h_sym_resid[w]
+
+
+@wp.kernel(enable_backward=False)
 def reduce_pos_distance_mm_kernel(
     a: wp.array[wp.vec3],
     b: wp.array[wp.vec3],
@@ -523,6 +539,34 @@ class OSCController:
         self.kp_null = 5.0  # scalar gain on (q_default - q)
         self.kd_null = 1.0  # scalar gain on -qd
 
+        # Pre-allocated outputs for Newton's eval_jacobian / eval_mass_matrix.
+        # Without these the underlying calls would allocate a fresh wp.array
+        # per OSC tick. Sizing comes from the Model so we don't need to know
+        # the joint topology here.
+        n_joints_per_art = model.max_joints_per_articulation
+        n_dofs_per_art = model.max_dofs_per_articulation
+        self.j_full = wp.zeros(
+            (world_count, n_joints_per_art * 6, n_dofs_per_art),
+            dtype=float,
+            device=self.device,
+        )
+        self.h_full = wp.zeros(
+            (world_count, n_dofs_per_art, n_dofs_per_art),
+            dtype=float,
+            device=self.device,
+        )
+        # Temporaries that eval_jacobian / eval_mass_matrix would otherwise
+        # allocate internally on each call.
+        self._joint_S_s = wp.zeros(
+            model.joint_dof_count, dtype=wp.spatial_vector, device=self.device
+        )
+        self._body_I_s = wp.zeros(
+            model.body_count, dtype=wp.spatial_matrix, device=self.device
+        )
+        # Cached torch identity for the nullspace path; allocated lazily on
+        # first call so we never import torch unless nullspace is in use.
+        self._torch_eye_arm = None
+
     def update_tcp_state(self, state) -> None:
         """Refresh per-world TCP pose, velocity, and EE-link COM from ``state``."""
         wp.launch(
@@ -547,15 +591,17 @@ class OSCController:
         )
 
     def update_tcp_jacobian(self, state) -> None:
-        """Compute the full Jacobian via ArticulationView and shift to TCP frame."""
-        # ArticulationView.eval_jacobian returns shape
-        # (articulation_count == world_count, n_joints_per_art*6, n_dofs).
-        j_full = self.view.eval_jacobian(state)
+        """Compute the full Jacobian via ArticulationView and shift to TCP frame.
+
+        Writes into the pre-allocated ``self.j_full`` rather than allocating
+        a fresh array each call.
+        """
+        self.view.eval_jacobian(state, J=self.j_full, joint_S_s=self._joint_S_s)
         wp.launch(
             shift_jacobian_com_to_tcp_kernel,
             dim=(self.world_count, self.n_arm_dofs),
             inputs=[
-                j_full,
+                self.j_full,
                 self.com_world,
                 self.tcp_pos,
                 self.ee_joint_in_art,
@@ -608,8 +654,11 @@ class OSCController:
         except ImportError:
             return  # nullspace silently disabled when torch is unavailable.
 
-        H_full = self.view.eval_mass_matrix(state)  # (W, n_dofs, n_dofs)
-        H_t = wp.to_torch(H_full)
+        # eval_mass_matrix writes into self.h_full (pre-allocated).
+        self.view.eval_mass_matrix(
+            state, H=self.h_full, J=self.j_full, body_I_s=self._body_I_s, joint_S_s=self._joint_S_s
+        )
+        H_t = wp.to_torch(self.h_full)
         H_arm = H_t[..., : self.n_arm_dofs, : self.n_arm_dofs]
         J = wp.to_torch(self.j_tcp)  # (W, 6, 7)
         arm_torque_t = wp.to_torch(self.arm_torque)  # (W, 7), shared memory
@@ -627,8 +676,10 @@ class OSCController:
         Jt = J.transpose(-2, -1)
         Lambda = torch.linalg.inv(J @ H_inv @ Jt)
         Jbar = Lambda @ J @ H_inv  # (W, 6, 7)
-        eye = torch.eye(self.n_arm_dofs, device=H_arm.device, dtype=H_arm.dtype)
-        N_T = eye.expand_as(H_arm) - Jt @ Jbar  # (W, 7, 7)
+        # Cached identity matrix - allocated once on first call.
+        if self._torch_eye_arm is None:
+            self._torch_eye_arm = torch.eye(self.n_arm_dofs, device=H_arm.device, dtype=H_arm.dtype)
+        N_T = self._torch_eye_arm.expand_as(H_arm) - Jt @ Jbar  # (W, 7, 7)
 
         u_null = self.kp_null * (q_default - q_arm) - self.kd_null * qd_arm  # (W, 7)
         tau_null = (N_T @ (H_arm @ u_null.unsqueeze(-1))).squeeze(-1)  # (W, 7)
