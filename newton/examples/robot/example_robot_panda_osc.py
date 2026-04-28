@@ -39,7 +39,6 @@ from newton.examples.robot.osc import (
     update_osc_debug_frame_lines_kernel,
 )
 
-
 # Scene layout (metres, world frame). Lifted from example_robot_panda_nut_bolt.
 TABLE_HEIGHT = 0.1
 TABLE_HALF_EXTENT = 0.4
@@ -150,13 +149,21 @@ class Example:
         # Articulation view for J/M.
         self.art_view = newton.selection.ArticulationView(self.model, "fr3")
 
-        # Resolve the TCP local offset relative to the EE body frame. Newton's
-        # body_q is the link frame, so any URDF-fixed offset between the link
-        # origin and the TCP needs to be applied. The Menagerie-derived URDF
-        # makes fr3_hand_tcp a fixed-joint child of fr3_hand, so its body_q
-        # *is* the TCP frame and the local offset is identity. We capture this
-        # explicitly so we can revisit if the URDF changes.
-        tcp_offset_local = wp.transform_identity()
+        # TCP local offset relative to the EE body (fr3_hand_tcp).
+        #
+        # The Newton URDF places fr3_hand_tcp 0.1035 m below fr3_hand at the
+        # gripper-opening *center* (between the fingers, midway along their
+        # length). IsaacLab's Factory USD uses panda_fingertip_centered,
+        # which sits 0.1121 m below panda_hand at the *fingertip tips*. Both
+        # bodies are between the fingers in the lateral direction; they
+        # differ only by ~half a finger length along the gripper extension
+        # axis. To make our OSC operate at the same physical point as
+        # Factory's policy (fingertip midpoint), shift the operating point
+        # by +0.0086 m along the local +Z of fr3_hand_tcp. The
+        # scripts/probe_fingertip.py probe in IsaacLab measured the 0.1121
+        # at the Franka init pose; subtracting the Newton URDF's 0.1035
+        # gives this delta.
+        tcp_offset_local = wp.transform(wp.vec3(0.0, 0.0, 0.0086), wp.quat_identity())
 
         self.osc = OSCController(
             model=self.model,
@@ -173,9 +180,7 @@ class Example:
         # INIT_ARM_Q. Stored on device so the nullspace torque can pull each
         # world's redundant DOF toward this configuration.
         q_default_host = [list(INIT_ARM_Q) for _ in range(self.world_count)]
-        self.osc.set_default_pose(
-            wp.array(q_default_host, dtype=float, device=self.model.device)
-        )
+        self.osc.set_default_pose(wp.array(q_default_host, dtype=float, device=self.model.device))
         # Phase 6: enable nullspace damping by default. The dominant role is
         # damping (kd_null) on joint velocities — this kills the slow growing
         # oscillation in the redundant DOF without fighting the task target.
@@ -190,12 +195,8 @@ class Example:
         # Critically damped: Kd = 2 * sqrt(Kp).
         kp_init_arr = [200.0, 200.0, 200.0, 50.0, 50.0, 50.0]
         kd_init_arr = [2.0 * (k**0.5) for k in kp_init_arr]
-        kp_host = wp.array(
-            [kp_init_arr] * self.world_count, dtype=float, device=self.model.device
-        )
-        kd_host = wp.array(
-            [kd_init_arr] * self.world_count, dtype=float, device=self.model.device
-        )
+        kp_host = wp.array([kp_init_arr] * self.world_count, dtype=float, device=self.model.device)
+        kd_host = wp.array([kd_init_arr] * self.world_count, dtype=float, device=self.model.device)
         self.osc.set_gains(kp_host, kd_host)
 
         # Seed target = current TCP pose so the OSC has zero error at startup.
@@ -305,9 +306,7 @@ class Example:
         self._diag_tcp_pos_host = (0.0, 0.0, 0.0)
         self._diag_target_pos_host = (0.0, 0.0, 0.0)
         self._target_offset = (
-            tuple(float(v) for v in args.target_offset)
-            if getattr(args, "target_offset", None) is not None
-            else None
+            tuple(float(v) for v in args.target_offset) if getattr(args, "target_offset", None) is not None else None
         )
         if self._target_offset is not None:
             # Push the offset into the GUI host state so step-clip drives the
@@ -316,9 +315,7 @@ class Example:
                 for i in range(3):
                     self._gui_target_pos_host[w][i] += self._target_offset[i]
             self._gui_target_dirty = True
-            self._initial_target_offset_norm = float(
-                (sum(v * v for v in self._target_offset)) ** 0.5
-            )
+            self._initial_target_offset_norm = float((sum(v * v for v in self._target_offset)) ** 0.5)
 
         self.capture()
 
@@ -602,6 +599,7 @@ class Example:
         # Condition number via torch (already imported for the nullspace).
         try:
             import torch  # noqa: PLC0415
+
             H_t = wp.to_torch(self.osc.h_full)
             J_t = wp.to_torch(self.osc.j_tcp)
             H_arm = H_t[active, : self.osc.n_arm_dofs, : self.osc.n_arm_dofs]
@@ -651,9 +649,7 @@ class Example:
 
         # World selector.
         if self.world_count > 1:
-            changed, val = imgui.slider_int(
-                "Active world", self._active_world, 0, self.world_count - 1
-            )
+            changed, val = imgui.slider_int("Active world", self._active_world, 0, self.world_count - 1)
             if changed:
                 self._active_world = val
             changed_b, val_b = imgui.checkbox("Broadcast to all worlds", self._broadcast)
@@ -690,9 +686,7 @@ class Example:
 
         imgui.separator()
         imgui.text("Control rate")
-        changed, val = imgui.slider_int(
-            "Decimation (frames/tick)", self._control_decimation, 1, 16
-        )
+        changed, val = imgui.slider_int("Decimation (frames/tick)", self._control_decimation, 1, 16)
         if changed:
             self._control_decimation = max(1, int(val))
         eff_hz = self.fps / max(1, self._control_decimation)
@@ -724,9 +718,7 @@ class Example:
         changed, val = imgui.slider_float("Force [N]", self._disturbance_magnitude, 0.0, 30.0)
         if changed:
             self._disturbance_magnitude = float(val)
-        changed, val = imgui.slider_int(
-            "Duration [frames]", self._disturbance_duration_frames, 1, 240
-        )
+        changed, val = imgui.slider_int("Duration [frames]", self._disturbance_duration_frames, 1, 240)
         if changed:
             self._disturbance_duration_frames = int(val)
         for axis_idx, axis_name in enumerate(("X", "Y", "Z")):
