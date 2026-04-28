@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import warp as wp
 
-
 # ---------------------------------------------------------------------------
 # Frame-shift helpers
 #
@@ -43,9 +42,15 @@ import warp as wp
 @wp.func
 def _skew(v: wp.vec3) -> wp.mat33:
     return wp.mat33(
-        0.0, -v[2], v[1],
-        v[2], 0.0, -v[0],
-        -v[1], v[0], 0.0,
+        0.0,
+        -v[2],
+        v[1],
+        v[2],
+        0.0,
+        -v[0],
+        -v[1],
+        v[0],
+        0.0,
     )
 
 
@@ -226,7 +231,7 @@ def reduce_rot_err_deg_kernel(
 
 @wp.kernel(enable_backward=False)
 def reduce_arm_torque_norm_kernel(
-    arm_torque: wp.array2d(dtype=float),  # (W, n_arm_dofs)
+    arm_torque: wp.array2d[float],  # (W, n_arm_dofs)
     n_arm_dofs: int,
     out_norm: wp.array[float],
 ):
@@ -241,7 +246,7 @@ def reduce_arm_torque_norm_kernel(
 
 @wp.kernel(enable_backward=False)
 def reduce_h_symmetry_resid_kernel(
-    h_full: wp.array3d(dtype=float),  # (W, n_dofs, n_dofs)
+    h_full: wp.array3d[float],  # (W, n_dofs, n_dofs)
     n_arm_dofs: int,
     out: wp.array[float],
 ):
@@ -265,7 +270,7 @@ def pack_diagnostics_kernel(
     rot_err_deg: wp.array[float],
     arm_torque_norm: wp.array[float],
     h_sym_resid: wp.array[float],
-    out: wp.array2d(dtype=float),  # (world_count, 4)
+    out: wp.array2d[float],  # (world_count, 4)
 ):
     """Pack four scalar diagnostics into one (W, 4) buffer for a single readback."""
     w = wp.tid()
@@ -340,9 +345,9 @@ def apply_task_space_pd_kernel(
     rot_err: wp.array[wp.vec3],
     tcp_linvel: wp.array[wp.vec3],
     tcp_angvel: wp.array[wp.vec3],
-    kp: wp.array2d(dtype=float),  # (world_count, 6)
-    kd: wp.array2d(dtype=float),  # (world_count, 6)
-    wrench: wp.array2d(dtype=float),  # (world_count, 6)
+    kp: wp.array2d[float],  # (world_count, 6)
+    kd: wp.array2d[float],  # (world_count, 6)
+    wrench: wp.array2d[float],  # (world_count, 6)
 ):
     """F = Kp * e - Kd * v, with desired velocity = 0."""
     w = wp.tid()
@@ -358,10 +363,10 @@ def apply_task_space_pd_kernel(
 
 @wp.kernel(enable_backward=False)
 def map_wrench_to_arm_torque_kernel(
-    j_tcp: wp.array3d(dtype=float),  # (world_count, 6, n_arm_dofs)
-    wrench: wp.array2d(dtype=float),  # (world_count, 6)
+    j_tcp: wp.array3d[float],  # (world_count, 6, n_arm_dofs)
+    wrench: wp.array2d[float],  # (world_count, 6)
     n_arm_dofs: int,
-    arm_torque: wp.array2d(dtype=float),  # (world_count, n_arm_dofs)
+    arm_torque: wp.array2d[float],  # (world_count, n_arm_dofs)
 ):
     """tau = J_tcp^T @ F (per world)."""
     w, d = wp.tid()
@@ -375,7 +380,7 @@ def map_wrench_to_arm_torque_kernel(
 
 @wp.kernel(enable_backward=False)
 def scatter_arm_torque_to_joint_f_kernel(
-    arm_torque: wp.array2d(dtype=float),  # (world_count, n_arm_dofs)
+    arm_torque: wp.array2d[float],  # (world_count, n_arm_dofs)
     n_arm_dofs: int,
     n_dofs_per_world: int,
     joint_f: wp.array[float],  # flat (world_count * n_dofs_per_world,) - actually total model DOFs
@@ -395,12 +400,12 @@ def scatter_arm_torque_to_joint_f_kernel(
 
 @wp.kernel(enable_backward=False)
 def shift_jacobian_com_to_tcp_kernel(
-    j_full: wp.array3d(dtype=float),  # (world_count, n_joints_per_art*6, n_dofs)
+    j_full: wp.array3d[float],  # (world_count, n_joints_per_art*6, n_dofs)
     com_world: wp.array[wp.vec3],
     tcp_pos: wp.array[wp.vec3],
     ee_joint_in_art: int,
     n_arm_dofs: int,
-    j_tcp: wp.array3d(dtype=float),  # (world_count, 6, n_arm_dofs)
+    j_tcp: wp.array3d[float],  # (world_count, 6, n_arm_dofs)
 ):
     """Slice EE rows from the per-joint Jacobian and shift linear part to TCP.
 
@@ -557,12 +562,8 @@ class OSCController:
         )
         # Temporaries that eval_jacobian / eval_mass_matrix would otherwise
         # allocate internally on each call.
-        self._joint_S_s = wp.zeros(
-            model.joint_dof_count, dtype=wp.spatial_vector, device=self.device
-        )
-        self._body_I_s = wp.zeros(
-            model.body_count, dtype=wp.spatial_matrix, device=self.device
-        )
+        self._joint_S_s = wp.zeros(model.joint_dof_count, dtype=wp.spatial_vector, device=self.device)
+        self._body_I_s = wp.zeros(model.body_count, dtype=wp.spatial_matrix, device=self.device)
         # Cached torch identity for the nullspace path; allocated lazily on
         # first call so we never import torch unless nullspace is in use.
         self._torch_eye_arm = None
