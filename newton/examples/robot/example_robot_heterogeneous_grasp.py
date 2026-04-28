@@ -15,12 +15,12 @@
 import copy
 import math
 import xml.etree.ElementTree as ET
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from enum import IntEnum
 
 import numpy as np
 import warp as wp
-from pxr import Usd, UsdGeom
+from pxr import Usd
 
 import newton
 import newton.examples
@@ -31,7 +31,6 @@ import newton.viewer
 from newton import Contacts
 from newton.geometry import HydroelasticSDF
 from newton.sensors import SensorContact
-
 
 _NUT_BOLT_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"
 _NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
@@ -65,10 +64,17 @@ class ObjectShape(IntEnum):
 SHAPE_NAMES = [s.name for s in ObjectShape]
 NUM_SHAPES = len(ObjectShape)
 
-_MESH_SHAPES = frozenset({
-    ObjectShape.CUP, ObjectShape.RUBBER_DUCK, ObjectShape.LEGO_BRICK,
-    ObjectShape.RJ45_PLUG, ObjectShape.BEAR, ObjectShape.NUT, ObjectShape.BOLT,
-})
+_MESH_SHAPES = frozenset(
+    {
+        ObjectShape.CUP,
+        ObjectShape.RUBBER_DUCK,
+        ObjectShape.LEGO_BRICK,
+        ObjectShape.RJ45_PLUG,
+        ObjectShape.BEAR,
+        ObjectShape.NUT,
+        ObjectShape.BOLT,
+    }
+)
 
 
 class CollisionMode(IntEnum):
@@ -213,29 +219,55 @@ def _lego_make_shell_mesh(nx, ny):
     T = _LEGO_TOP_THICKNESS
     v = np.array(
         [
-            [-ox, -oy, 0], [+ox, -oy, 0], [+ox, +oy, 0], [-ox, +oy, 0],
-            [-ox, -oy, H], [+ox, -oy, H], [+ox, +oy, H], [-ox, +oy, H],
-            [-inx, -iny, 0], [+inx, -iny, 0], [+inx, +iny, 0], [-inx, +iny, 0],
-            [-inx, -iny, H - T], [+inx, -iny, H - T], [+inx, +iny, H - T], [-inx, +iny, H - T],
+            [-ox, -oy, 0],
+            [+ox, -oy, 0],
+            [+ox, +oy, 0],
+            [-ox, +oy, 0],
+            [-ox, -oy, H],
+            [+ox, -oy, H],
+            [+ox, +oy, H],
+            [-ox, +oy, H],
+            [-inx, -iny, 0],
+            [+inx, -iny, 0],
+            [+inx, +iny, 0],
+            [-inx, +iny, 0],
+            [-inx, -iny, H - T],
+            [+inx, -iny, H - T],
+            [+inx, +iny, H - T],
+            [-inx, +iny, H - T],
         ],
         dtype=np.float32,
     )
     f = np.array(
         [
-            [4, 5, 6], [4, 6, 7],
-            [0, 1, 5], [0, 5, 4],
-            [2, 3, 7], [2, 7, 6],
-            [3, 0, 4], [3, 4, 7],
-            [1, 2, 6], [1, 6, 5],
-            [0, 8, 9], [0, 9, 1],
-            [1, 9, 10], [1, 10, 2],
-            [2, 10, 11], [2, 11, 3],
-            [3, 11, 8], [3, 8, 0],
-            [9, 8, 12], [9, 12, 13],
-            [11, 10, 14], [11, 14, 15],
-            [8, 11, 15], [8, 15, 12],
-            [10, 9, 13], [10, 13, 14],
-            [12, 15, 14], [12, 14, 13],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+            [1, 2, 6],
+            [1, 6, 5],
+            [0, 8, 9],
+            [0, 9, 1],
+            [1, 9, 10],
+            [1, 10, 2],
+            [2, 10, 11],
+            [2, 11, 3],
+            [3, 11, 8],
+            [3, 8, 0],
+            [9, 8, 12],
+            [9, 12, 13],
+            [11, 10, 14],
+            [11, 14, 15],
+            [8, 11, 15],
+            [8, 15, 12],
+            [10, 9, 13],
+            [10, 13, 14],
+            [12, 15, 14],
+            [12, 14, 13],
         ],
         dtype=np.int32,
     )
@@ -252,8 +284,13 @@ def _lego_make_brick_mesh(nx=4, ny=2):
             sy = (j - (ny - 1) / 2.0) * _LEGO_PITCH
             stud_meshes.append(
                 _lego_cylinder_mesh(
-                    _LEGO_STUD_RADIUS, _LEGO_STUD_HEIGHT, seg,
-                    cx=sx, cy=sy, cz=_LEGO_BRICK_HEIGHT, bottom_cap=False,
+                    _LEGO_STUD_RADIUS,
+                    _LEGO_STUD_HEIGHT,
+                    seg,
+                    cx=sx,
+                    cy=sy,
+                    cz=_LEGO_BRICK_HEIGHT,
+                    bottom_cap=False,
                 )
             )
     tube_meshes = []
@@ -261,9 +298,7 @@ def _lego_make_brick_mesh(nx=4, ny=2):
         tube_height = _LEGO_BRICK_HEIGHT - _LEGO_TOP_THICKNESS
         for i in range(nx - 1):
             tx = (i - (nx - 2) / 2.0) * _LEGO_PITCH
-            tube_meshes.append(
-                _lego_cylinder_mesh(_LEGO_TUBE_OUTER_RADIUS, tube_height, seg, cx=tx, cy=0.0, cz=0.0)
-            )
+            tube_meshes.append(_lego_cylinder_mesh(_LEGO_TUBE_OUTER_RADIUS, tube_height, seg, cx=tx, cy=0.0, cz=0.0))
     v, f = _lego_combine_meshes([(shell_v, shell_f), *stud_meshes, *tube_meshes])
     center = (v.min(axis=0) + v.max(axis=0)) / 2.0
     v -= center
@@ -295,7 +330,246 @@ def _load_obj_mesh_trimesh(obj_path):
     return newton.Mesh(vertices, indices)
 
 
+def margin_pct_to_ctrl(margin_pct: float, y_half_m: float, stroke_mm: float = 85.0) -> float:
+    """Convert per-shape margin_pct (fraction of object y-width) to Robotiq [0, 255] control.
+
+    Reproduces the legacy formula from _setup_state_machine:
+        y_width_mm = 2 * y_half * 1000
+        margin_mm  = margin_pct * y_width_mm
+        ctrl = 255 * (1 - (y_width_mm - 2*margin_mm) / stroke_mm), clamped to [0, 255]
+    """
+    y_width_mm = 2.0 * y_half_m * 1000.0
+    margin_mm = margin_pct * y_width_mm
+    ctrl = 255.0 * (1.0 - (y_width_mm - 2.0 * margin_mm) / stroke_mm)
+    return min(255.0, max(0.0, ctrl))
+
+
+def _quat_to_euler_zyx_deg(q: tuple[float, float, float, float]) -> tuple[float, float, float]:
+    """Convert quat (x, y, z, w) to ZYX intrinsic Euler angles in degrees."""
+    x, y, z, w = q
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+    sinp = 2.0 * (w * y - z * x)
+    pitch = math.copysign(math.pi / 2.0, sinp) if abs(sinp) >= 1.0 else math.asin(sinp)
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    return (math.degrees(roll), math.degrees(pitch), math.degrees(yaw))
+
+
+def _euler_zyx_deg_to_quat(rpy_deg: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """Convert ZYX Euler angles in degrees back to quat (x, y, z, w)."""
+    roll, pitch, yaw = (math.radians(a) for a in rpy_deg)
+    cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+    w = cr * cp * cy + sr * sp * sy
+    x = sr * cp * cy - cr * sp * sy
+    y = cr * sp * cy + sr * cp * sy
+    z = cr * cp * sy - sr * sp * cy
+    return (x, y, z, w)
+
+
+_LEGACY_GRASP_CLEARANCE = 0.05
+_LEGACY_GRASP_Z_EXTRA = {
+    ObjectShape.BOLT: 0.02,
+    ObjectShape.BEAR: 0.01,
+}
+
+
+@dataclass(frozen=True)
+class GraspDesign:
+    """Per-shape grasp pose, authored in the object's COM frame.
+
+    Composed at runtime as:
+        grasp_pos_world = com_world + body_q.q * (offset_norm * hs)
+        grasp_rot_world = body_q.q * base_ee_rot * quat_local
+        grasp_ctrl      = margin_pct_to_ctrl(margin_pct, y_half)
+    """
+
+    offset_norm: tuple[float, float, float]
+    quat_local: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
+    margin_pct: float = 0.05
+
+
+def derive_offset_norm_z(
+    shape: ObjectShape,
+    hs: float,
+    z_half: float,
+    grasp_clearance: float = _LEGACY_GRASP_CLEARANCE,
+) -> float:
+    """Derive offset_norm.z that matches the legacy grasp_z formula for a given shape and size."""
+    extra = _LEGACY_GRASP_Z_EXTRA.get(shape, 0.0)
+    return (0.0005 + max(0.0, 2.0 * z_half - grasp_clearance) - z_half + extra) / hs
+
+
+GRASP_DESIGNS: dict[ObjectShape, GraspDesign] = {
+    ObjectShape.BOX: GraspDesign((0.0, 0.0, 0.0), margin_pct=0.05),
+    ObjectShape.SPHERE: GraspDesign((0.0, 0.0, 0.0), margin_pct=0.05),
+    ObjectShape.CYLINDER: GraspDesign((0.0, 0.0, 0.0), margin_pct=0.05),
+    ObjectShape.CAPSULE: GraspDesign((0.0, 0.0, 0.0), margin_pct=0.05),
+    ObjectShape.ELLIPSOID: GraspDesign((0.0, 0.0, 0.0), margin_pct=0.05),
+    ObjectShape.CUP: GraspDesign((0.0, 0.0, 0.0), margin_pct=0.22),
+    ObjectShape.RUBBER_DUCK: GraspDesign((0.0, 0.0, 0.0), margin_pct=0.10),
+    ObjectShape.LEGO_BRICK: GraspDesign((0.0, 0.0, 0.0), margin_pct=0.15),
+    ObjectShape.RJ45_PLUG: GraspDesign((0.0, 0.0, 0.0), margin_pct=0.10),
+    ObjectShape.BEAR: GraspDesign((0.0, 0.0, 0.0), margin_pct=0.25),
+    ObjectShape.NUT: GraspDesign((0.0, 0.0, 0.0), margin_pct=0.15),
+    ObjectShape.BOLT: GraspDesign((0.0, 0.0, 0.0), margin_pct=0.30),
+}
+
+
 # ---- Warp kernels for IK + state machine ----
+
+
+@wp.kernel(enable_backward=False)
+def compute_grasp_targets(
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    body_world_start: wp.array[wp.int32],
+    object_body_offset: wp.int32,
+    world_hs: wp.array[wp.float32],
+    design_offset_norm: wp.array[wp.vec3],
+    design_quat_local: wp.array[wp.quat],
+    design_ctrl: wp.array[wp.float32],
+    base_ee_rot: wp.quat,
+    # outputs
+    grasp_pos: wp.array[wp.vec3],
+    grasp_rot: wp.array[wp.quat],
+    grasp_ctrl: wp.array[wp.float32],
+):
+    """Compute world-frame grasp target from per-shape COM-frame design.
+
+    Rotation composition: ``body_q.q * base_ee_rot * design_quat_local[w]``.
+    """
+    w = wp.tid()
+    obj_global = body_world_start[w] + object_body_offset
+    x_wb = body_q[obj_global]
+    body_tr = wp.transform_get_translation(x_wb)
+    body_q_rot = wp.transform_get_rotation(x_wb)
+
+    com_local = body_com[obj_global]
+    com_world = body_tr + wp.quat_rotate(body_q_rot, com_local)
+
+    hs_w = world_hs[w]
+    offset_local = design_offset_norm[w] * hs_w
+    offset_world = wp.quat_rotate(body_q_rot, offset_local)
+
+    grasp_pos[w] = com_world + offset_world
+    grasp_rot[w] = body_q_rot * base_ee_rot * design_quat_local[w]
+    grasp_ctrl[w] = design_ctrl[w]
+
+
+@wp.kernel(enable_backward=False)
+def compute_grasp_targets_slot(
+    world_id: wp.int32,
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    body_world_start: wp.array[wp.int32],
+    object_body_offset: wp.int32,
+    world_hs: wp.array[wp.float32],
+    design_offset_norm: wp.array[wp.vec3],
+    design_quat_local: wp.array[wp.quat],
+    design_ctrl: wp.array[wp.float32],
+    base_ee_rot: wp.quat,
+    # outputs (only slot world_id is written)
+    grasp_pos: wp.array[wp.vec3],
+    grasp_rot: wp.array[wp.quat],
+    grasp_ctrl: wp.array[wp.float32],
+):
+    """Single-slot variant of compute_grasp_targets. Launched with dim=1."""
+    w = world_id
+    obj_global = body_world_start[w] + object_body_offset
+    x_wb = body_q[obj_global]
+    body_tr = wp.transform_get_translation(x_wb)
+    body_q_rot = wp.transform_get_rotation(x_wb)
+    com_local = body_com[obj_global]
+    com_world = body_tr + wp.quat_rotate(body_q_rot, com_local)
+    hs_w = world_hs[w]
+    offset_world = wp.quat_rotate(body_q_rot, design_offset_norm[w] * hs_w)
+    grasp_pos[w] = com_world + offset_world
+    grasp_rot[w] = body_q_rot * base_ee_rot * design_quat_local[w]
+    grasp_ctrl[w] = design_ctrl[w]
+
+
+@wp.kernel(enable_backward=False)
+def compute_body_q_frame_lines(
+    body_q: wp.array[wp.transform],
+    body_world_start: wp.array[wp.int32],
+    object_body_offset: wp.int32,
+    world_offsets: wp.array[wp.vec3],
+    visible_worlds_mask: wp.array[wp.int32],
+    axis_length: wp.float32,
+    # outputs
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    """Draw an XYZ triad per object body at body_q.t with body_q.q-aligned axes."""
+    w = wp.tid()
+    base = w * 3
+    zero = wp.vec3(0.0, 0.0, 0.0)
+    if visible_worlds_mask and visible_worlds_mask[w] == 0:
+        line_begin[base + 0] = zero
+        line_end[base + 0] = zero
+        line_begin[base + 1] = zero
+        line_end[base + 1] = zero
+        line_begin[base + 2] = zero
+        line_end[base + 2] = zero
+        return
+    obj_global = body_world_start[w] + object_body_offset
+    x_wb = body_q[obj_global]
+    origin = wp.transform_get_translation(x_wb) + world_offsets[w]
+    rot = wp.transform_get_rotation(x_wb)
+    ex = wp.quat_rotate(rot, wp.vec3(axis_length, 0.0, 0.0))
+    ey = wp.quat_rotate(rot, wp.vec3(0.0, axis_length, 0.0))
+    ez = wp.quat_rotate(rot, wp.vec3(0.0, 0.0, axis_length))
+    line_begin[base + 0] = origin
+    line_end[base + 0] = origin + ex
+    line_begin[base + 1] = origin
+    line_end[base + 1] = origin + ey
+    line_begin[base + 2] = origin
+    line_end[base + 2] = origin + ez
+
+
+@wp.kernel(enable_backward=False)
+def compute_com_frame_lines(
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    body_world_start: wp.array[wp.int32],
+    object_body_offset: wp.int32,
+    world_offsets: wp.array[wp.vec3],
+    visible_worlds_mask: wp.array[wp.int32],
+    axis_length: wp.float32,
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    """Draw an XYZ triad at body_q * body_com with body_q.q-aligned axes."""
+    w = wp.tid()
+    base = w * 3
+    zero = wp.vec3(0.0, 0.0, 0.0)
+    if visible_worlds_mask and visible_worlds_mask[w] == 0:
+        line_begin[base + 0] = zero
+        line_end[base + 0] = zero
+        line_begin[base + 1] = zero
+        line_end[base + 1] = zero
+        line_begin[base + 2] = zero
+        line_end[base + 2] = zero
+        return
+    obj_global = body_world_start[w] + object_body_offset
+    x_wb = body_q[obj_global]
+    rot = wp.transform_get_rotation(x_wb)
+    com_local = body_com[obj_global]
+    com_w = wp.transform_get_translation(x_wb) + wp.quat_rotate(rot, com_local) + world_offsets[w]
+    ex = wp.quat_rotate(rot, wp.vec3(axis_length, 0.0, 0.0))
+    ey = wp.quat_rotate(rot, wp.vec3(0.0, axis_length, 0.0))
+    ez = wp.quat_rotate(rot, wp.vec3(0.0, 0.0, axis_length))
+    line_begin[base + 0] = com_w
+    line_end[base + 0] = com_w + ex
+    line_begin[base + 1] = com_w
+    line_end[base + 1] = com_w + ey
+    line_begin[base + 2] = com_w
+    line_end[base + 2] = com_w + ez
 
 
 @wp.kernel(enable_backward=False)
@@ -303,11 +577,10 @@ def set_target_pose_kernel(
     task_idx: wp.array[wp.int32],
     task_timer: wp.array[wp.float32],
     task_durations: wp.array[wp.float32],
-    grasp_z: wp.array[wp.float32],
-    lift_z: wp.array[wp.float32],
+    grasp_pos: wp.array[wp.vec3],
+    grasp_rot: wp.array[wp.quat],
     grasp_ctrl: wp.array[wp.float32],
-    object_xy: wp.vec2,
-    ee_rot_down: wp.vec4,
+    lift_distance_m: wp.float32,
     task_init_body_q: wp.array[wp.transform],
     ee_body_global_indices: wp.array[wp.int32],
     # outputs
@@ -322,48 +595,40 @@ def set_target_pose_kernel(
     state = task_idx[tid]
     timer = task_timer[tid]
 
-    # Desired rotation: keep initial EE orientation (already pointing down)
-    rot_down = ee_rot_down
-
-    gz = grasp_z[tid]
-    lz = lift_z[tid]
+    gp = grasp_pos[tid]
+    gr = grasp_rot[tid]
     gc = grasp_ctrl[tid]
-    ox = object_xy[0]
-    oy = object_xy[1]
+    lift_vec = wp.vec3(0.0, 0.0, lift_distance_m)
 
-    target_z = gz
+    target_pos = gp
     ctrl = 0.0
 
     if state == wp.static(int(TaskType.APPROACH)):
-        target_z = gz
+        target_pos = gp
         ctrl = 0.0
     elif state == wp.static(int(TaskType.CLOSE_GRIPPER)):
-        target_z = gz
-        # Gradually close gripper over the CLOSE_GRIPPER duration
+        target_pos = gp
         dur_close = task_durations[wp.static(int(TaskType.CLOSE_GRIPPER))]
         alpha = wp.clamp(timer / dur_close, 0.0, 1.0)
         ctrl = alpha * gc
     elif state == wp.static(int(TaskType.SETTLE)):
-        target_z = gz
+        target_pos = gp
         ctrl = gc
     elif state == wp.static(int(TaskType.LIFT)):
-        target_z = lz
+        target_pos = gp + lift_vec
         ctrl = gc
     elif state == wp.static(int(TaskType.HOLD)):
-        target_z = lz
+        target_pos = gp + lift_vec
         ctrl = gc
     else:
-        target_z = lz
+        target_pos = gp + lift_vec
         ctrl = gc
 
-    target_pos = wp.vec3(ox, oy, target_z)
     ee_pos_target[tid] = target_pos
-    ee_rot_target[tid] = rot_down
+    # rot target: wp.vec4 because downstream consumers still take vec4
+    ee_rot_target[tid] = wp.vec4(gr[0], gr[1], gr[2], gr[3])
     gripper_target[tid] = ctrl
 
-    # Interpolate from task-start TCP pose to target pose.
-    # ee_pos_prev is the Robotiq base body position; we compute the TCP position
-    # from it so interpolation is in the same space as the IK target (TCP frame).
     dur = task_durations[state] if state < wp.static(int(TaskType.DONE)) else 1.0
     t = wp.clamp(timer / dur, 0.0, 1.0)
 
@@ -374,9 +639,7 @@ def set_target_pose_kernel(
     tcp_pos_prev = ee_pos_prev + wp.quat_rotate(ee_quat_prev, tcp_offset_local)
 
     ee_pos_target_interp[tid] = tcp_pos_prev * (1.0 - t) + target_pos * t
-
-    ee_quat_target = wp.quaternion(rot_down[0], rot_down[1], rot_down[2], rot_down[3])
-    ee_quat_interp = wp.quat_slerp(ee_quat_prev, ee_quat_target, t)
+    ee_quat_interp = wp.quat_slerp(ee_quat_prev, gr, t)
     ee_rot_target_interp[tid] = wp.vec4(ee_quat_interp[0], ee_quat_interp[1], ee_quat_interp[2], ee_quat_interp[3])
 
 
@@ -1294,9 +1557,7 @@ class Example:
             self.mesh_objects[ObjectShape.BEAR] = _load_usd_mesh_local(bear_path, "/root/bear/bear")
 
         if ObjectShape.NUT in needed or ObjectShape.BOLT in needed:
-            asset_path = newton.examples.download_external_git_folder(
-                _NUT_BOLT_REPO_URL, _NUT_BOLT_FOLDER
-            )
+            asset_path = newton.examples.download_external_git_folder(_NUT_BOLT_REPO_URL, _NUT_BOLT_FOLDER)
             if ObjectShape.NUT in needed:
                 nut_file = str(asset_path / f"factory_nut_{_NUT_BOLT_ASSEMBLY}_subdiv_3x.obj")
                 self.mesh_objects[ObjectShape.NUT] = _load_obj_mesh_trimesh(nut_file)
@@ -1399,15 +1660,21 @@ class Example:
                 (wp.vec3(), tiny, tiny, tiny),
             ]
         builder.add_shape_box(
-            body=obj_body, **floor_args,
-            xform=floor_xform, cfg=collider_cfg,
+            body=obj_body,
+            **floor_args,
+            xform=floor_xform,
+            cfg=collider_cfg,
             label="object_collider_floor",
         )
         for w_pos, w_hx, w_hy, w_hz in wall_specs:
             builder.add_shape_box(
-                body=obj_body, hx=w_hx, hy=w_hy, hz=w_hz,
+                body=obj_body,
+                hx=w_hx,
+                hy=w_hy,
+                hz=w_hz,
                 xform=wp.transform(w_pos, wp.quat_identity()),
-                cfg=collider_cfg, label="object_collider_wall",
+                cfg=collider_cfg,
+                label="object_collider_wall",
             )
 
         return obj_body
@@ -1531,75 +1798,94 @@ class Example:
         durations = [1.5, 1.0, 0.5, 1.0, 1.5, 0.0]
         self.task_durations = wp.array(durations, dtype=wp.float32)
 
-        # Per-world grasp parameters
-        # IK link_offset handles the TCP (174mm) at the fully-closed pose.
-        # When the gripper is partially open (grasping an object), the 4-bar
-        # linkage tilts the pads slightly upward, giving extra vertical
-        # clearance above what the pad geometry alone suggests. `grasp_clearance`
-        # captures the effective object height we can grip without shifting the
-        # end-effector upward. Objects taller than this get grasp_z raised so
-        # the pads cover the top of the object rather than the gripper body.
-        grasp_clearance = 0.05
-        table_top_z = float(self.table_top[2])
-        grasp_z_offset = {
-            ObjectShape.BOLT: 0.02,
-            ObjectShape.BEAR: 0.01,
-        }
-        grasp_z_np = np.array(
-            [
-                table_top_z + 0.001 + max(0.0, 2.0 * self._world_z_half[i] - grasp_clearance)
-                + grasp_z_offset.get(self.world_shapes[i], 0.0)
-                for i in range(wc)
-            ],
-            dtype=np.float32,
-        )
-        # lift_z: lift EE by 10cm above grasp position
-        lift_z_np = grasp_z_np + 0.1
-        # grasp_ctrl: per-world closure target computed from object Y-width + margin.
-        # Margins are a percentage of object Y-width, derived from the fixed-size
-        # margins in example_hydro_robotiq_gripper (3mm/30mm=10%, 4mm/30mm≈13%).
-        # This scales correctly for our varying object sizes.
-        # Per-shape grasp margins. Forces are non-monotonic due to mesh facet
-        # alignment with pads and kh=2e11 stiffness. Margins tuned for reliable
-        # grasping; pad forces may exceed the Robotiq's 235N spec on some shapes.
-        grasp_margin_pct = {
-            ObjectShape.BOX: 0.05,
-            ObjectShape.SPHERE: 0.05,
-            ObjectShape.CYLINDER: 0.05,
-            ObjectShape.CAPSULE: 0.05,
-            ObjectShape.ELLIPSOID: 0.05,
-            ObjectShape.CUP: 0.22,
-            ObjectShape.RUBBER_DUCK: 0.10,
-            ObjectShape.LEGO_BRICK: 0.15,
-            ObjectShape.RJ45_PLUG: 0.10,
-            ObjectShape.BEAR: 0.25,
-            ObjectShape.NUT: 0.15,
-            ObjectShape.BOLT: 0.30,
-        }
-        stroke_mm = 85.0  # Robotiq 2F-85 full stroke
-        grasp_ctrl_list = []
-        for i in range(wc):
-            shape = self.world_shapes[i]
-            y_half = self._world_y_half[i]
-            y_width_mm = 2.0 * y_half * 1000.0
-            margin_mm = grasp_margin_pct[shape] * y_width_mm
-            ctrl = min(255.0, max(0.0, 255.0 * (1.0 - (y_width_mm - 2.0 * margin_mm) / stroke_mm)))
-            grasp_ctrl_list.append(ctrl)
-        grasp_ctrl_np = np.array(grasp_ctrl_list, dtype=np.float32)
-
-        # Object XY position (same for all worlds)
-        self.object_xy = wp.vec2(float(self.table_top[0]), float(self.table_top[1]))
-
         # EE rotation target: use the arm-only model's attachment body rotation.
         # This matches the IK rotation objective so there's no mismatch.
         state_arm = self.model_arm_only.state()
         newton.eval_fk(self.model_arm_only, self.model_arm_only.joint_q, self.model_arm_only.joint_qd, state_arm)
         arm_ee_rot = wp.transform_get_rotation(wp.transform(*state_arm.body_q.numpy()[self.ik_ee_index]))
-        self.ee_rot_down = wp.vec4(arm_ee_rot[0], arm_ee_rot[1], arm_ee_rot[2], arm_ee_rot[3])
 
-        self.grasp_z = wp.array(grasp_z_np, dtype=wp.float32)
-        self.lift_z = wp.array(lift_z_np, dtype=wp.float32)
-        self.grasp_ctrl = wp.array(grasp_ctrl_np, dtype=wp.float32)
+        # --- Object-centric grasp: per-world design inputs + SoA runtime buffers ---
+        # Pre-allocated once; the Apply path reuses them in place.
+        self._shape_mask: dict[ObjectShape, np.ndarray] = {
+            shape: np.where(np.asarray(self.world_shapes) == shape)[0].astype(np.int32)
+            for shape in set(self.world_shapes)
+        }
+
+        # CPU mirrors
+        self._design_offset_norm_np = np.zeros((wc, 3), dtype=np.float32)
+        self._design_quat_local_np = np.tile(np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32), (wc, 1))
+        self._design_ctrl_np = np.zeros(wc, dtype=np.float32)
+
+        # Fill per-world from GRASP_DESIGNS, deriving offset_norm.z per shape
+        for i in range(wc):
+            shape = self.world_shapes[i]
+            design = GRASP_DESIGNS[shape]
+            hs_i = float(self.world_half_sizes[i])
+            z_half_i = float(self._world_z_half[i])
+            dz = derive_offset_norm_z(shape, hs=hs_i, z_half=z_half_i)
+            self._design_offset_norm_np[i] = (design.offset_norm[0], design.offset_norm[1], dz)
+            self._design_quat_local_np[i] = design.quat_local
+            self._design_ctrl_np[i] = margin_pct_to_ctrl(design.margin_pct, y_half_m=float(self._world_y_half[i]))
+
+        # GPU design inputs
+        self._design_offset_norm = wp.array(self._design_offset_norm_np, dtype=wp.vec3)
+        self._design_quat_local = wp.array(self._design_quat_local_np, dtype=wp.quat)
+        self._design_ctrl = wp.array(self._design_ctrl_np, dtype=wp.float32)
+
+        # Single-slot upload sources reused on every Apply call (no per-Apply allocation).
+        self._single_offset_norm_src = wp.zeros(1, dtype=wp.vec3)
+        self._single_quat_local_src = wp.zeros(1, dtype=wp.quat)
+        self._single_ctrl_src = wp.zeros(1, dtype=wp.float32)
+
+        # GPU runtime SoA outputs
+        self.grasp_pos = wp.zeros(wc, dtype=wp.vec3)
+        self.grasp_rot = wp.zeros(wc, dtype=wp.quat)
+        self.grasp_ctrl = wp.zeros(wc, dtype=wp.float32)
+
+        # Per-world hs array for the init kernel
+        self._world_hs_array = wp.array(np.asarray(self.world_half_sizes, dtype=np.float32), dtype=wp.float32)
+
+        # base_ee_rot as a wp.quat scalar (used by the init kernel)
+        self.base_ee_rot = wp.quat(
+            float(arm_ee_rot[0]), float(arm_ee_rot[1]), float(arm_ee_rot[2]), float(arm_ee_rot[3])
+        )
+
+        # COM diagnostic under --verbose
+        if self.verbose:
+            body_com_np = self.model.body_com.numpy()
+            body_world_start_np = self.model.body_world_start.numpy()
+            seen: dict[ObjectShape, float] = {}
+            for i in range(wc):
+                shape = self.world_shapes[i]
+                if shape in seen:
+                    continue
+                obj_global = int(body_world_start_np[i]) + self.object_body_offset
+                com_norm = float(np.linalg.norm(body_com_np[obj_global]))
+                seen[shape] = com_norm
+            print("[grasp] per-shape body_com magnitudes (body-local frame):")
+            for shape, com_norm in sorted(seen.items(), key=lambda kv: kv[0].name):
+                flag = "  (non-zero, review offset_norm)" if com_norm > 1e-4 else ""
+                print(f"  {shape.name:<12} |body_com| = {com_norm * 1000.0:8.3f} mm{flag}")
+
+        self.lift_distance_m: float = 0.1  # matches legacy 0.1 m lift
+
+        # state_0 is populated before _setup_state_machine is called (line 1157-1159)
+        wp.launch(
+            compute_grasp_targets,
+            dim=wc,
+            inputs=[
+                self.state_0.body_q,
+                self.model.body_com,
+                self.model.body_world_start,
+                wp.int32(self.object_body_offset),
+                self._world_hs_array,
+                self._design_offset_norm,
+                self._design_quat_local,
+                self._design_ctrl,
+                self.base_ee_rot,
+            ],
+            outputs=[self.grasp_pos, self.grasp_rot, self.grasp_ctrl],
+        )
 
         # Target arrays (raw and interpolated)
         self.ee_pos_target = wp.zeros(wc, dtype=wp.vec3)
@@ -1828,9 +2114,40 @@ class Example:
         self._debug_begins = wp.zeros(wc * 9, dtype=wp.vec3)
         self._debug_ends = wp.zeros(wc * 9, dtype=wp.vec3)
         self._debug_colors = wp.zeros(wc * 9, dtype=wp.vec3)
+        # body_q and COM frame line buffers (3 lines per world: X, Y, Z axes).
+        self._body_q_frame_begin = wp.zeros(3 * wc, dtype=wp.vec3)
+        self._body_q_frame_end = wp.zeros(3 * wc, dtype=wp.vec3)
+        self._com_frame_begin = wp.zeros(3 * wc, dtype=wp.vec3)
+        self._com_frame_end = wp.zeros(3 * wc, dtype=wp.vec3)
+        # Per-axis colors: red (X), green (Y), blue (Z), tiled per-world.
+        colors_np = np.tile(
+            np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32),
+            (wc, 1),
+        )
+        self._frame_colors = wp.array(colors_np, dtype=wp.vec3)
+        self.show_body_q_frames = False
+        self.show_com_frames = False
         # GUI readback staging cache (populated by stage_gui; read downstream).
         self._cached_gui = np.zeros(_GUI_STAGE_SIZE, dtype=np.float32)
         self._gui_read_interval = 10
+        # Per-shape GUI edit buffer. Seeded from the actual per-world design buffer
+        # so the slider reflects what the simulation is currently using -- particularly
+        # offset_norm.z, which _setup_state_machine baked from derive_offset_norm_z and
+        # is non-zero even though the GRASP_DESIGNS placeholder is (0, 0, 0).
+        self._gui_grasp_edits: dict[ObjectShape, dict] = {}
+        for shape in GRASP_DESIGNS:
+            mask = self._shape_mask.get(shape)
+            if mask is None or len(mask) == 0:
+                seed_offset = list(GRASP_DESIGNS[shape].offset_norm)
+            else:
+                seed_offset = self._design_offset_norm_np[int(mask[0])].tolist()
+            self._gui_grasp_edits[shape] = {
+                "offset_norm": seed_offset,
+                "euler_deg": list(_quat_to_euler_zyx_deg(GRASP_DESIGNS[shape].quat_local)),
+                "margin_pct": float(GRASP_DESIGNS[shape].margin_pct),
+            }
+        self._gui_lift_mm = int(round(self.lift_distance_m * 1000.0))
+        self._gui_broadcast_apply = False
         if hasattr(self.viewer, "renderer"):
             self.viewer.show_hydro_contact_surface = self.show_isosurface
         if hasattr(self.viewer, "register_ui_callback"):
@@ -1839,10 +2156,30 @@ class Example:
     def _gui_impl(self, imgui):
         wc = self.world_count
 
-        # World selector
+        # ---- World selector: shape filter + slider + input_int ----
+        if not hasattr(self, "_gui_shape_filter"):
+            self._gui_shape_filter = -1  # -1 = All
+
+        shape_keys: list[ObjectShape] = sorted(self._shape_mask.keys(), key=lambda s: s.name)
+        shape_names = ["All"] + [s.name for s in shape_keys]
+
+        # combo_idx 0 -> "All" (filter == -1); 1..N -> shape_keys[0..N-1] (filter == 0..N-1)
+        changed, new_idx = imgui.combo("Filter by shape", self._gui_shape_filter + 1, shape_names)
+        if changed:
+            self._gui_shape_filter = new_idx - 1
+
+        if self._gui_shape_filter >= 0:
+            filter_shape = shape_keys[self._gui_shape_filter]
+            candidates = self._shape_mask[filter_shape]
+            if len(candidates) > 0 and self.selected_world not in candidates:
+                self.selected_world = int(candidates[0])
+
         changed, val = imgui.slider_int("World", self.selected_world, 0, wc - 1)
         if changed:
             self.selected_world = val
+        changed, val = imgui.input_int("World #", self.selected_world)
+        if changed:
+            self.selected_world = max(0, min(wc - 1, val))
         w = self.selected_world
 
         imgui.separator()
@@ -1945,12 +2282,163 @@ class Example:
                 imgui.text(f"NaN at frame {nan_frame_val}!")
 
         imgui.separator()
+        imgui.text("Grasp Pose (current world's shape)")
+        shape = self.world_shapes[w]
+        edits = self._gui_grasp_edits[shape]
+
+        axis_labels = ("offset.x", "offset.y", "offset.z")
+        for i, label in enumerate(axis_labels):
+            s_changed, s_val = imgui.slider_float(label, edits["offset_norm"][i], -2.0, 2.0)
+            if s_changed:
+                edits["offset_norm"][i] = s_val
+            i_changed, i_val = imgui.input_float(f"{label} #", edits["offset_norm"][i])
+            if i_changed:
+                edits["offset_norm"][i] = i_val
+
+        euler_labels = ("euler.x (deg)", "euler.y (deg)", "euler.z (deg)")
+        for i, label in enumerate(euler_labels):
+            s_changed, s_val = imgui.slider_float(label, edits["euler_deg"][i], -180.0, 180.0)
+            if s_changed:
+                edits["euler_deg"][i] = s_val
+            i_changed, i_val = imgui.input_float(f"{label} #", edits["euler_deg"][i])
+            if i_changed:
+                edits["euler_deg"][i] = i_val
+
+        s_changed, s_val = imgui.slider_float("margin_pct", edits["margin_pct"], 0.0, 0.4)
+        if s_changed:
+            edits["margin_pct"] = s_val
+        i_changed, i_val = imgui.input_float("margin_pct #", edits["margin_pct"])
+        if i_changed:
+            edits["margin_pct"] = max(0.0, min(0.4, i_val))
+        derived_ctrl = margin_pct_to_ctrl(edits["margin_pct"], float(self._world_y_half[w]))
+        imgui.text(f"  -> derived ctrl: {derived_ctrl:.2f}")
+
+        imgui.separator()
+        imgui.text("Global (all worlds)")
+        s_changed, s_val = imgui.slider_int("lift_distance (mm)", self._gui_lift_mm, 0, 300)
+        if s_changed:
+            self._gui_lift_mm = s_val
+        i_changed, i_val = imgui.input_int("lift (mm) #", self._gui_lift_mm)
+        if i_changed:
+            self._gui_lift_mm = max(0, min(300, i_val))
+
+        imgui.separator()
+        _, self._gui_broadcast_apply = imgui.checkbox(
+            "Apply to all worlds of this shape", self._gui_broadcast_apply
+        )
+        # Use the GUI-staged task index (refreshed every _gui_read_interval frames)
+        # so we don't pay a per-frame GPU->CPU sync. task_val was extracted above
+        # from self._cached_gui at index 14.
+        can_apply = task_val <= int(TaskType.APPROACH)
+        if not can_apply:
+            imgui.text_disabled("Apply disabled: world has left APPROACH")
+        if can_apply and imgui.button("Apply"):
+            self._apply_grasp_edits(w, broadcast=self._gui_broadcast_apply)
+        if imgui.button("Print current poses"):
+            self._print_current_poses()
+
+        imgui.separator()
         _, self.show_debug_frames = imgui.checkbox("Show Frames", self.show_debug_frames)
+        _, self.show_body_q_frames = imgui.checkbox("Show body_q frames", self.show_body_q_frames)
+        _, self.show_com_frames = imgui.checkbox("Show COM frames", self.show_com_frames)
         if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC and hasattr(self.viewer, "renderer"):
             changed, self.show_isosurface = imgui.checkbox("Show Isosurface", self.show_isosurface)
             if changed:
                 self.viewer.show_hydro_contact_surface = self.show_isosurface
         imgui.text(f"Frame: {self.episode_steps}  t={self.sim_time:.2f}s")
+
+    def _apply_grasp_edits(self, w: int, broadcast: bool) -> None:
+        """Commit the GUI edit buffer for world w's shape to GRASP_DESIGNS and the GPU."""
+        shape = self.world_shapes[w]
+        edits = self._gui_grasp_edits[shape]
+
+        # 1. Mutate GRASP_DESIGNS (single entry per shape).
+        new_design = GraspDesign(
+            offset_norm=tuple(edits["offset_norm"]),
+            quat_local=_euler_zyx_deg_to_quat(tuple(edits["euler_deg"])),
+            margin_pct=float(edits["margin_pct"]),
+        )
+        GRASP_DESIGNS[shape] = new_design
+
+        # 2. Update global lift.
+        self.lift_distance_m = float(self._gui_lift_mm) / 1000.0
+
+        # 3. Rewrite the affected CPU mirrors. The user's full 3-component
+        # offset_norm is written through verbatim; derive_offset_norm_z is only
+        # used as a one-shot init seed in _setup_state_machine.
+        affected = self._shape_mask[shape] if broadcast else np.array([w], dtype=np.int32)
+        for idx in affected:
+            idx_int = int(idx)
+            self._design_offset_norm_np[idx_int] = new_design.offset_norm
+            self._design_quat_local_np[idx_int] = new_design.quat_local
+            self._design_ctrl_np[idx_int] = margin_pct_to_ctrl(
+                new_design.margin_pct, y_half_m=float(self._world_y_half[idx_int])
+            )
+
+        # 4. Upload + relaunch.
+        if broadcast:
+            # Full-array transfer + dim=wc kernel.
+            self._design_offset_norm.assign(self._design_offset_norm_np)
+            self._design_quat_local.assign(self._design_quat_local_np)
+            self._design_ctrl.assign(self._design_ctrl_np)
+            wp.launch(
+                compute_grasp_targets,
+                dim=self.world_count,
+                inputs=[
+                    self.state_0.body_q,
+                    self.model.body_com,
+                    self.model.body_world_start,
+                    wp.int32(self.object_body_offset),
+                    self._world_hs_array,
+                    self._design_offset_norm,
+                    self._design_quat_local,
+                    self._design_ctrl,
+                    self.base_ee_rot,
+                ],
+                outputs=[self.grasp_pos, self.grasp_rot, self.grasp_ctrl],
+            )
+        else:
+            # Single-slot wp.copy + dim=1 kernel.
+            self._single_offset_norm_src.assign(self._design_offset_norm_np[w : w + 1])
+            self._single_quat_local_src.assign(self._design_quat_local_np[w : w + 1])
+            self._single_ctrl_src.assign(self._design_ctrl_np[w : w + 1])
+            wp.copy(self._design_offset_norm, self._single_offset_norm_src, dest_offset=w, count=1)
+            wp.copy(self._design_quat_local, self._single_quat_local_src, dest_offset=w, count=1)
+            wp.copy(self._design_ctrl, self._single_ctrl_src, dest_offset=w, count=1)
+            wp.launch(
+                compute_grasp_targets_slot,
+                dim=1,
+                inputs=[
+                    wp.int32(w),
+                    self.state_0.body_q,
+                    self.model.body_com,
+                    self.model.body_world_start,
+                    wp.int32(self.object_body_offset),
+                    self._world_hs_array,
+                    self._design_offset_norm,
+                    self._design_quat_local,
+                    self._design_ctrl,
+                    self.base_ee_rot,
+                ],
+                outputs=[self.grasp_pos, self.grasp_rot, self.grasp_ctrl],
+            )
+
+    def _print_current_poses(self) -> None:
+        """Dump GRASP_DESIGNS and self.lift_distance_m as a pasteable Python literal."""
+        print("# --- Current grasp designs (paste over GRASP_DESIGNS and self.lift_distance_m) ---")
+        print("GRASP_DESIGNS = {")
+        for shape in ObjectShape:
+            if shape not in GRASP_DESIGNS:
+                continue
+            d = GRASP_DESIGNS[shape]
+            print(
+                f"    ObjectShape.{shape.name:<12}: "
+                f"GraspDesign(offset_norm={d.offset_norm!r}, "
+                f"quat_local={d.quat_local!r}, "
+                f"margin_pct={d.margin_pct!r}),"
+            )
+        print("}")
+        print(f"self.lift_distance_m = {self.lift_distance_m!r}")
 
     def _update_metrics(self):
         """Per-step metric update. All GPU-resident, no .numpy() calls."""
@@ -1980,11 +2468,10 @@ class Example:
                 self.task_idx,
                 self.task_timer,
                 self.task_durations,
-                self.grasp_z,
-                self.lift_z,
+                self.grasp_pos,
+                self.grasp_rot,
                 self.grasp_ctrl,
-                self.object_xy,
-                self.ee_rot_down,
+                wp.float32(self.lift_distance_m),
                 self.task_init_body_q,
                 self.ee_body_global_indices,
             ],
@@ -2118,11 +2605,8 @@ class Example:
         """Draw XYZ coordinate frames at object, EE base, and TCP. GPU-resident."""
         if not hasattr(self.viewer, "log_lines"):
             return
-        if not self.show_debug_frames:
-            self.viewer.log_lines("/debug_frames", None, None, None)
-            return
 
-        # world_offsets may be None if the viewer never configured them.
+        # Resolve world_offsets once; used by all frame channels below.
         if hasattr(self.viewer, "world_offsets") and self.viewer.world_offsets is not None:
             world_offsets = self.viewer.world_offsets
         else:
@@ -2130,26 +2614,79 @@ class Example:
                 self._zero_world_offsets = wp.zeros(self.world_count, dtype=wp.vec3)
             world_offsets = self._zero_world_offsets
 
-        wp.launch(
-            compute_debug_frame_lines_kernel,
-            dim=self.world_count,
-            inputs=[
-                self.state_0.body_q,
-                self.model.body_world_start,
-                world_offsets,
-                self.object_body_offset,
-                self.robotiq_base_body_idx,
-                float(self.tcp_offset),
-                0.08,
-            ],
-            outputs=[self._debug_begins, self._debug_ends, self._debug_colors],
-        )
-        self.viewer.log_lines(
-            "/debug_frames",
-            self._debug_begins,
-            self._debug_ends,
-            self._debug_colors,
-        )
+        # EE / TCP / object frames (original "Show Frames" toggle).
+        if self.show_debug_frames:
+            wp.launch(
+                compute_debug_frame_lines_kernel,
+                dim=self.world_count,
+                inputs=[
+                    self.state_0.body_q,
+                    self.model.body_world_start,
+                    world_offsets,
+                    self.object_body_offset,
+                    self.robotiq_base_body_idx,
+                    float(self.tcp_offset),
+                    0.08,
+                ],
+                outputs=[self._debug_begins, self._debug_ends, self._debug_colors],
+            )
+            self.viewer.log_lines(
+                "/debug_frames",
+                self._debug_begins,
+                self._debug_ends,
+                self._debug_colors,
+            )
+        else:
+            self.viewer.log_lines("/debug_frames", None, None, None)
+
+        # body_q frames
+        if self.show_body_q_frames:
+            wp.launch(
+                compute_body_q_frame_lines,
+                dim=self.world_count,
+                inputs=[
+                    self.state_0.body_q,
+                    self.model.body_world_start,
+                    wp.int32(self.object_body_offset),
+                    world_offsets,
+                    getattr(self.viewer, "_visible_worlds_mask", None),
+                    wp.float32(0.05),
+                ],
+                outputs=[self._body_q_frame_begin, self._body_q_frame_end],
+            )
+            self.viewer.log_lines(
+                "/frames/body_q",
+                self._body_q_frame_begin,
+                self._body_q_frame_end,
+                self._frame_colors,
+            )
+        else:
+            self.viewer.log_lines("/frames/body_q", None, None, None)
+
+        # COM frames
+        if self.show_com_frames:
+            wp.launch(
+                compute_com_frame_lines,
+                dim=self.world_count,
+                inputs=[
+                    self.state_0.body_q,
+                    self.model.body_com,
+                    self.model.body_world_start,
+                    wp.int32(self.object_body_offset),
+                    world_offsets,
+                    getattr(self.viewer, "_visible_worlds_mask", None),
+                    wp.float32(0.05),
+                ],
+                outputs=[self._com_frame_begin, self._com_frame_end],
+            )
+            self.viewer.log_lines(
+                "/frames/com",
+                self._com_frame_begin,
+                self._com_frame_end,
+                self._frame_colors,
+            )
+        else:
+            self.viewer.log_lines("/frames/com", None, None, None)
 
     def test_final(self):
         wc = self.world_count
