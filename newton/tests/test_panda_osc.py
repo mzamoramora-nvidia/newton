@@ -24,9 +24,8 @@ import warp as wp
 
 import newton
 import newton.utils
-from newton.examples.robot.osc import OSCController
+from newton.examples.robot.osc import OSCController, scatter_arm_torque_to_joint_f_kernel
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-
 
 # ---------------------------------------------------------------------------
 # Test fixture: build a single-world (or replicated) Panda the same way the
@@ -195,8 +194,7 @@ def test_tcp_jacobian_matches_finite_difference(test, device):
     test.assertLess(
         rel_err,
         2e-3,
-        msg=f"TCP Jacobian mismatch vs central FD, rel_err={rel_err:.2e}\n"
-        f"analytic=\n{j_tcp}\nFD=\n{j_fd}",
+        msg=f"TCP Jacobian mismatch vs central FD, rel_err={rel_err:.2e}\nanalytic=\n{j_tcp}\nFD=\n{j_fd}",
     )
 
 
@@ -220,9 +218,7 @@ def test_tcp_jacobian_matches_body_qd_after_shift(test, device):
     osc.update_tcp_jacobian(state)
 
     pred_twist = osc.j_tcp.numpy()[0] @ qd_arm.astype(np.float64)
-    measured_twist = np.concatenate(
-        [osc.tcp_linvel.numpy()[0], osc.tcp_angvel.numpy()[0]]
-    )
+    measured_twist = np.concatenate([osc.tcp_linvel.numpy()[0], osc.tcp_angvel.numpy()[0]])
 
     np.testing.assert_allclose(pred_twist, measured_twist, atol=1e-4, rtol=0)
 
@@ -253,7 +249,7 @@ def test_mass_matrix_arm_slice_excludes_finger_dofs(test, device):
     H = art_view.eval_mass_matrix(state).numpy()[0]
     H_arm = H[:N_ARM_DOFS, :N_ARM_DOFS]
     # Wrong slice: drop the last arm DOF, include the first finger DOF.
-    bad_idx = list(range(N_ARM_DOFS - 1)) + [N_ARM_DOFS]
+    bad_idx = [*range(N_ARM_DOFS - 1), N_ARM_DOFS]
     H_bad = H[np.ix_(bad_idx, bad_idx)]
     test.assertFalse(np.allclose(H_arm, H_bad, atol=1e-6))
 
@@ -352,11 +348,7 @@ def test_arm_torque_scatter_leaves_finger_dofs_untouched(test, device):
     control = model.control()
     sentinel = -7.0
     n_total_dofs = world_count * N_DOFS_PER_WORLD
-    control.joint_f = wp.array(
-        np.full(n_total_dofs, sentinel, dtype=np.float32), dtype=float, device=device
-    )
-
-    from newton.examples.robot.osc import scatter_arm_torque_to_joint_f_kernel
+    control.joint_f = wp.array(np.full(n_total_dofs, sentinel, dtype=np.float32), dtype=float, device=device)
 
     wp.launch(
         scatter_arm_torque_to_joint_f_kernel,
@@ -369,9 +361,7 @@ def test_arm_torque_scatter_leaves_finger_dofs_untouched(test, device):
     jf = control.joint_f.numpy()
     for w in range(world_count):
         # Arm DOFs got the new torque.
-        np.testing.assert_allclose(
-            jf[w * N_DOFS_PER_WORLD : w * N_DOFS_PER_WORLD + N_ARM_DOFS], 1.5, atol=1e-6
-        )
+        np.testing.assert_allclose(jf[w * N_DOFS_PER_WORLD : w * N_DOFS_PER_WORLD + N_ARM_DOFS], 1.5, atol=1e-6)
         # Finger DOFs (7, 8) remain at sentinel.
         np.testing.assert_allclose(
             jf[w * N_DOFS_PER_WORLD + N_ARM_DOFS : (w + 1) * N_DOFS_PER_WORLD],

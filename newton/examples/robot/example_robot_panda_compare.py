@@ -35,14 +35,11 @@ import newton
 import newton.examples
 import newton.utils
 
-
 # Robot B always loads IsaacLab Factory's franka_mimic.usd from the
 # Newton assets folder. The USD itself is not committed - see
 # newton/examples/assets/franka_mimic/README.md for how to install it.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_FACTORY_USD = os.path.normpath(
-    os.path.join(_THIS_DIR, "..", "assets", "franka_mimic", "franka_mimic.usd")
-)
+_FACTORY_USD = os.path.normpath(os.path.join(_THIS_DIR, "..", "assets", "franka_mimic", "franka_mimic.usd"))
 
 
 # Robot base positions (m, world frame). Spaced apart so the two arms
@@ -58,7 +55,7 @@ N_DOFS_PER_ROBOT = N_ARM_DOFS + N_FINGER_DOFS
 
 # Body offsets within one robot's slice.
 HAND_BODY_OFFSET = 10  # fr3_hand
-EE_BODY_OFFSET = 11    # fr3_hand_tcp
+EE_BODY_OFFSET = 11  # fr3_hand_tcp
 
 # Initial joint configuration (radians) - lifted from the OSC example
 # so we share a common starting pose for visual comparison.
@@ -246,17 +243,13 @@ class Example:
             print(f"[compare] WARN: no body matched {candidates} for Robot B {purpose}")
             return -1
 
-        self.b_tcp_body_idx = _find_robot_b_body(
-            ("fr3_hand_tcp", "panda_fingertip_centered", "panda_hand"), "TCP body"
-        )
+        self.b_tcp_body_idx = _find_robot_b_body(("fr3_hand_tcp", "panda_fingertip_centered", "panda_hand"), "TCP body")
         if self.b_tcp_body_idx < 0:
             self.b_tcp_body_idx = N_BODIES_PER_ROBOT + EE_BODY_OFFSET
         # Robot B's hand body is the parent on which the magenta "Factory
         # equivalent" frame is hung. Same name patterns as Newton's
         # fr3_hand / Factory's panda_hand.
-        self.b_hand_body_idx = _find_robot_b_body(
-            ("fr3_hand", "panda_hand"), "hand body"
-        )
+        self.b_hand_body_idx = _find_robot_b_body(("fr3_hand", "panda_hand"), "hand body")
         if self.b_hand_body_idx < 0:
             self.b_hand_body_idx = N_BODIES_PER_ROBOT + HAND_BODY_OFFSET
 
@@ -282,11 +275,21 @@ class Example:
         self._dbg_starts = wp.zeros(n_segments, dtype=wp.vec3, device=self.model.device)
         self._dbg_ends = wp.zeros(n_segments, dtype=wp.vec3, device=self.model.device)
         colors_host = [
-            (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0),  # 0..2  world axes
-            (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0),  # 3..5  Robot A TCP
-            (0.4, 0.0, 0.0), (0.0, 0.4, 0.0), (0.0, 0.0, 0.4),  # 6..8  Robot B TCP
-            (1.0, 0.0, 1.0), (1.0, 0.5, 0.0), (0.0, 1.0, 1.0),  # 9..11 Factory-eq on A
-            (1.0, 0.0, 1.0), (1.0, 0.5, 0.0), (0.0, 1.0, 1.0),  # 12..14 Factory-eq on B
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0, 1.0),  # 0..2  world axes
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0, 1.0),  # 3..5  Robot A TCP
+            (0.4, 0.0, 0.0),
+            (0.0, 0.4, 0.0),
+            (0.0, 0.0, 0.4),  # 6..8  Robot B TCP
+            (1.0, 0.0, 1.0),
+            (1.0, 0.5, 0.0),
+            (0.0, 1.0, 1.0),  # 9..11 Factory-eq on A
+            (1.0, 0.0, 1.0),
+            (1.0, 0.5, 0.0),
+            (0.0, 1.0, 1.0),  # 12..14 Factory-eq on B
         ]
         self._dbg_colors = wp.array(colors_host, dtype=wp.vec3, device=self.model.device)
         self._show_debug_frames = True
@@ -295,10 +298,10 @@ class Example:
 
         # Host-side joint state. The "mirror" mode keeps both robots in
         # sync; "independent" mode lets the user perturb each separately.
-        self._gui_arm_q = list(INIT_ARM_Q)         # shared in mirror mode
+        self._gui_arm_q = list(INIT_ARM_Q)  # shared in mirror mode
         self._gui_finger_q = list(INIT_FINGER_Q)
         self._mirror = True
-        self._gui_arm_q_b = list(INIT_ARM_Q)       # only used if not mirroring
+        self._gui_arm_q_b = list(INIT_ARM_Q)  # only used if not mirroring
         self._gui_finger_q_b = list(INIT_FINGER_Q)
         self._joint_state_dirty = True
 
@@ -500,9 +503,7 @@ class Example:
             )
             dot = min(1.0, max(-1.0, dot))
             drot_deg = degrees(2.0 * acos(dot))
-            results.append(
-                (short_name, dx * 1000.0, dy * 1000.0, dz * 1000.0, dpos_mm, drot_deg, a_pos, b_pos_local)
-            )
+            results.append((short_name, dx * 1000.0, dy * 1000.0, dz * 1000.0, dpos_mm, drot_deg, a_pos, b_pos_local))
         self._delta_top_pairs = results
 
     # ------------------------------------------------------------------
@@ -551,9 +552,7 @@ class Example:
         imgui.separator()
         imgui.text("Arm joint angles [rad]" + ("  (driving both)" if self._mirror else "  (Robot A)"))
         for i in range(N_ARM_DOFS):
-            changed, v = self._input_and_slider_float(
-                imgui, f"q{i}", float(self._gui_arm_q[i]), -3.1416, 3.1416
-            )
+            changed, v = self._input_and_slider_float(imgui, f"q{i}", float(self._gui_arm_q[i]), -3.1416, 3.1416)
             if changed:
                 self._gui_arm_q[i] = float(v)
                 if self._mirror:
@@ -565,9 +564,7 @@ class Example:
             imgui.separator()
             imgui.text("Arm joint angles [rad]  (Robot B)")
             for i in range(N_ARM_DOFS):
-                changed, v = self._input_and_slider_float(
-                    imgui, f"qB{i}", float(self._gui_arm_q_b[i]), -3.1416, 3.1416
-                )
+                changed, v = self._input_and_slider_float(imgui, f"qB{i}", float(self._gui_arm_q_b[i]), -3.1416, 3.1416)
                 if changed:
                     self._gui_arm_q_b[i] = float(v)
                     self._joint_state_dirty = True
@@ -599,9 +596,7 @@ class Example:
                 self._factory_offset_pos[i] = float(v)
         labels_rpy = ("offset roll [rad]", "offset pitch [rad]", "offset yaw [rad]")
         for i, lbl in enumerate(labels_rpy):
-            changed, v = self._input_and_slider_float(
-                imgui, lbl, float(self._factory_offset_rpy[i]), -3.1416, 3.1416
-            )
+            changed, v = self._input_and_slider_float(imgui, lbl, float(self._factory_offset_rpy[i]), -3.1416, 3.1416)
             if changed:
                 self._factory_offset_rpy[i] = float(v)
 
@@ -610,9 +605,7 @@ class Example:
         changed, val = imgui.checkbox("Show debug frames", self._show_debug_frames)
         if changed:
             self._show_debug_frames = bool(val)
-        changed, v = self._input_and_slider_float(
-            imgui, "Axis length [m]", float(self._debug_axis_len), 0.01, 0.30
-        )
+        changed, v = self._input_and_slider_float(imgui, "Axis length [m]", float(self._debug_axis_len), 0.01, 0.30)
         if changed:
             self._debug_axis_len = float(v)
 
@@ -678,8 +671,7 @@ class Example:
         worst_pos = max((r[4] for r in chain_rows), default=0.0)
         worst_rot = max((r[5] for r in chain_rows), default=0.0)
         print(
-            f"[compare-test] worst chain delta_pos = {worst_pos:.4f} mm, "
-            f"worst chain delta_rot = {worst_rot:.4f} deg",
+            f"[compare-test] worst chain delta_pos = {worst_pos:.4f} mm, worst chain delta_rot = {worst_rot:.4f} deg",
             flush=True,
         )
         assert worst_pos < 0.5, (  # 0.5 mm tolerates URDF-vs-USD float drift
