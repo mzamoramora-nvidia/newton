@@ -1297,22 +1297,28 @@ class Example:
             gravcomp_body.values[body_idx] = 1.0
 
         # Enable hydroelastic SDF on finger/hand mesh shapes. USD loads
-        # each link with both a visual MESH and a collision CONVEX_MESH;
-        # URDF (with parse_visuals_as_colliders=True) emits a single MESH
-        # per body. Treat both GeoType.MESH and GeoType.CONVEX_MESH as
-        # candidates so the same code path covers both assets.
+        # each link with both a visual MESH (has_shape_collision=False)
+        # and a collision CONVEX_MESH; URDF (with parse_visuals_as_colliders=True)
+        # emits a single MESH per body. Treat both GeoType.MESH and
+        # GeoType.CONVEX_MESH as candidates, but skip shapes whose
+        # COLLIDE_SHAPES bit is unset - applying HYDROELASTIC + building
+        # an SDF on USD's visual meshes is wasted work (no collision)
+        # and risks order-dependent broad-phase behavior at the contact
+        # cap.
         #
-        # We also force-overwrite shape_material_kh on every finger/hand
-        # mesh: the URDF parser clones default_shape_cfg (so kh = finger_kh
-        # already), but the USD parser allocates a fresh ShapeConfig per
-        # shape and never reads kh from default_shape_cfg, leaving USD's
-        # finger collisions at the ShapeConfig class default of 1e10
-        # (10x softer than URDF). Writing kh here keeps the two assets'
-        # contact stiffness in lockstep.
+        # We also force-overwrite shape_material_kh on every collision
+        # finger/hand mesh: the URDF parser clones default_shape_cfg
+        # (so kh = finger_kh already), but the USD parser allocates a
+        # fresh ShapeConfig per shape and never reads kh from
+        # default_shape_cfg, leaving USD's finger collisions at the
+        # ShapeConfig class default of 1e10 (10x softer than URDF).
+        # Writing kh here keeps the two assets' contact stiffness in
+        # lockstep.
         _MESHLIKE = (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH)
         non_finger_shape_indices = []
         for shape_idx, body_idx in enumerate(builder.shape_body):
-            if body_idx in finger_body_indices and builder.shape_type[shape_idx] in _MESHLIKE:
+            collides = bool(builder.shape_flags[shape_idx] & newton.ShapeFlags.COLLIDE_SHAPES)
+            if body_idx in finger_body_indices and builder.shape_type[shape_idx] in _MESHLIKE and collides:
                 mesh = builder.shape_source[shape_idx]
                 if mesh is not None and mesh.sdf is None:
                     shape_scale = np.asarray(builder.shape_scale[shape_idx], dtype=np.float32)
@@ -1327,7 +1333,7 @@ class Example:
                     )
                 builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
                 builder.shape_material_kh[shape_idx] = self.finger_kh
-            elif body_idx not in finger_body_indices:
+            elif body_idx not in finger_body_indices and collides:
                 non_finger_shape_indices.append(shape_idx)
 
         # Convert non-finger shapes to convex hulls
