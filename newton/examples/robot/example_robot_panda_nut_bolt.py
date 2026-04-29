@@ -41,9 +41,7 @@ ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
 # and copy the USD into newton/examples/assets/franka_mimic/. See the README
 # at that path for the workflow.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-FACTORY_USD_PATH = os.path.normpath(
-    os.path.join(_THIS_DIR, "..", "assets", "franka_mimic", "franka_mimic.usd")
-)
+FACTORY_USD_PATH = os.path.normpath(os.path.join(_THIS_DIR, "..", "assets", "franka_mimic", "franka_mimic.usd"))
 
 
 @dataclass(frozen=True)
@@ -77,10 +75,6 @@ class RobotProfile:
         base_link_suffixes: tuple of name suffixes for links that should
             have the ground-plane collision filter applied (the robot
             stands on the table; its base must not collide with the floor).
-        gravcomp_body_idx_range: half-open range ``(lo, hi)`` of body
-            indices whose ``mujoco:gravcomp`` weight is set to 1.0. Indexed
-            within the single-world builder (before replicate). The arm +
-            hand bodies live in this range.
         init_arm_q: 7 joint angles (rad) used as the home configuration.
         init_finger_q: pair of finger joint values [m] at home.
         ik_target_correction_xyzw: quaternion (xyzw) post-multiplied onto
@@ -100,7 +94,6 @@ class RobotProfile:
     finger_left: str
     finger_right: str
     base_link_suffixes: tuple
-    gravcomp_body_idx_range: tuple
     init_arm_q: tuple
     init_finger_q: tuple
     ik_target_correction_xyzw: tuple
@@ -128,15 +121,32 @@ URDF_PROFILE = RobotProfile(
     base_link_suffixes=("/fr3_link0", "/fr3_link1"),
     # Body 0 = base, 1 = fr3_link0, 2-8 = fr3_link1..7,
     # 9-11 = fr3_link8/fr3_hand/fr3_hand_tcp, 12-13 = fingers.
-    gravcomp_body_idx_range=(2, 14),
     init_arm_q=_URDF_INIT_ARM_Q,
     init_finger_q=(0.05, 0.05),
     ik_target_correction_xyzw=(0.0, 0.0, 0.0, 1.0),  # identity
 )
 
-# IsaacLab Factory USD profile. The R rotation baked into panda_hand
-# (Rz(45 deg) * Rx(180 deg)) is encoded as the IK target correction so
-# the same task-target kernels produce the same physical grasp pose.
+# IsaacLab Factory USD profile. The IK target correction is the
+# *relative* rotation between fr3_hand_tcp (URDF's task TCP) and
+# panda_fingertip_centered (USD's task TCP) at the same joint config:
+#
+#   fr3_hand_tcp world rot = link7_w * Rz(-pi/4)        (fr3_hand has rpy
+#                                                        (0, 0, -pi/4)
+#                                                        and fr3_hand_tcp
+#                                                        has identity local
+#                                                        rot vs fr3_hand)
+#   panda_fingertip world rot = link7_w * Rz(pi/4) * Rx(pi)
+#                                                       (panda_hand has the
+#                                                        baked R rotation;
+#                                                        panda_fingertip_
+#                                                        centered shares it)
+#   Relative = Rz(-pi/4)^-1 * Rz(pi/4) * Rx(pi)
+#            = Rz(pi/2) * Rx(pi)
+#            = quat(xyzw) (0.7071, 0.7071, 0, 0)
+#
+# Applying this to the URDF-convention task target makes the IK drive
+# panda_fingertip_centered to a world pose that physically matches the
+# URDF case (gripper pointing in the same direction with the same yaw).
 USD_PROFILE = RobotProfile(
     kind="usd",
     asset_loader="add_usd",
@@ -146,11 +156,14 @@ USD_PROFILE = RobotProfile(
     finger_left="panda_leftfinger",
     finger_right="panda_rightfinger",
     base_link_suffixes=("/panda_link0", "/panda_link1"),
-    gravcomp_body_idx_range=(2, 14),
     init_arm_q=_URDF_INIT_ARM_Q,
     init_finger_q=(0.04, 0.04),
-    # quat(xyzw) = (0.9239, 0.3827, 0, 0) is R as a rotation: Rz(pi/4) Rx(pi).
-    ik_target_correction_xyzw=(0.9238795, 0.3826834, 0.0, 0.0),
+    # At Factory's post-IK task home, panda_fingertip_centered's world
+    # rotation happens to coincide with fr3_hand_tcp's world rotation
+    # (both are ~Rx(pi)). The local-frame difference between the two TCP
+    # bodies is absorbed by the joint angles. So no IK target correction
+    # is needed - the same world-frame target works for both assets.
+    ik_target_correction_xyzw=(0.0, 0.0, 0.0, 1.0),
 )
 
 
@@ -176,6 +189,7 @@ def _resolve_robot_profile(kind: str) -> RobotProfile:
             )
         return USD_PROFILE
     raise ValueError(f"Unknown --robot kind: {kind!r} (expected 'urdf' or 'usd').")
+
 
 # SDF parameters for nut/bolt meshes (high resolution for threaded geometry)
 SDF_MAX_RESOLUTION_NUT_BOLT = 256
@@ -424,7 +438,14 @@ def set_target_pose_kernel(
     ee_body_id = tid * num_bodies_per_world + ee_index
     ee_pos_prev = wp.transform_get_translation(task_init_body_q[ee_body_id])
     ee_quat_prev = wp.transform_get_rotation(task_init_body_q[ee_body_id])
-    ee_quat_target = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), wp.pi)
+    # "URDF down": rotate about world X by pi, in URDF's TCP-frame convention.
+    # For USD's TCP frame this needs the per-asset rotation correction post-
+    # multiplied so the same physical "gripper points down" pose results.
+    # ee_quat_prev is already in the asset's TCP frame, so it does NOT need
+    # the correction. The kernel applies the correction only to literal
+    # URDF-frame rotation expressions below.
+    urdf_down = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), wp.pi) * ik_target_correction
+    ee_quat_target = urdf_down
 
     # Get the current nut position and rotation
     nut_body_id = tid * num_bodies_per_world + nut_body_index
@@ -437,7 +458,7 @@ def set_target_pose_kernel(
         # Move above the nut, align gripper offset by grasp_yaw_offset about Z
         ee_pos_target[tid] = nut_pos + task_offset_approach
         yaw_rot = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), grasp_yaw_offset)
-        ee_quat_target = yaw_rot * wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), wp.pi) * wp.quat_inverse(nut_quat)
+        ee_quat_target = yaw_rot * urdf_down * wp.quat_inverse(nut_quat)
     elif task == TaskType.REFINE_APPROACH.value:
         # Descend to nut grasping height
         ee_pos_target[tid] = nut_pos + wp.vec3(0.0, 0.0, grasping_z_offset)
@@ -460,12 +481,12 @@ def set_target_pose_kernel(
     elif task == TaskType.MOVE_TO_BOLT.value:
         # Move above the bolt
         ee_pos_target[tid] = bolt_place_pos + task_offset_bolt_approach
-        ee_quat_target = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), wp.pi)
+        ee_quat_target = urdf_down
         t_gripper = 1.0
     elif task == TaskType.REFINE_PLACE.value:
         # Lower nut onto bolt top
         ee_pos_target[tid] = bolt_place_pos + task_offset_place
-        ee_quat_target = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), wp.pi)
+        ee_quat_target = urdf_down
         t_gripper = 1.0
     elif task == TaskType.SCREW_ROTATE.value:
         # XY stays locked on the bolt axis (don't follow nut XY drift — that
@@ -492,21 +513,28 @@ def set_target_pose_kernel(
     elif task == TaskType.RETRACT.value:
         # Move upward away from bolt
         ee_pos_target[tid] = ee_pos_prev + task_offset_retract
-        ee_quat_target = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), wp.pi)
+        ee_quat_target = urdf_down
     elif task == TaskType.HOME.value:
-        ee_pos_target[tid] = home_pos
+        # Hold-current-pose. Setting target = (current pos, current rot)
+        # is a sanity check on the IK/control plumbing: at convergence,
+        # both URDF and USD should stand still. If either robot drifts
+        # during HOME, the way targets are being routed to the IK solver
+        # is wrong for that asset (e.g. ik_target_correction off, or
+        # ee_index pointing at the wrong body).
+        ee_pos_target[tid] = ee_pos_prev
+        ee_quat_target = ee_quat_prev
     else:
         ee_pos_target[tid] = home_pos
 
     ee_pos_target_interpolated[tid] = ee_pos_prev * (1.0 - t) + ee_pos_target[tid] * t
-    # Apply per-asset frame correction: maps the URDF-convention task
-    # target into the active robot's TCP-body frame (identity for URDF;
-    # R = Rz(pi/4)*Rx(pi) for USD).
-    ee_quat_target_corrected = ee_quat_target * ik_target_correction
-    ee_quat_prev_corrected = ee_quat_prev * ik_target_correction
-    ee_quat_interpolated = wp.quat_slerp(ee_quat_prev_corrected, ee_quat_target_corrected, t)
+    # ee_quat_prev is already in the asset's TCP frame; ee_quat_target is
+    # built either from ee_quat_prev directly or from URDF-convention
+    # literals that have already been pre-multiplied by ik_target_correction
+    # at the top of the kernel (urdf_down). Both are in the same frame here,
+    # so no extra correction is needed at write-out.
+    ee_quat_interpolated = wp.quat_slerp(ee_quat_prev, ee_quat_target, t)
 
-    ee_rot_target[tid] = ee_quat_target_corrected[:4]
+    ee_rot_target[tid] = ee_quat_target[:4]
     ee_rot_target_interpolated[tid] = ee_quat_interpolated[:4]
 
     # Pick the "closed" finger target per task: tight full closure for the
@@ -970,6 +998,9 @@ class Example:
             self.viewer.show_hydro_contact_surface = self.show_isosurface
             self.viewer.register_ui_callback(self.render_ui, position="side")
 
+        # if isinstance(self.viewer, newton.viewer.ViewerGL):
+        #     self.viewer._paused = True
+
         self._setup_line_buffers()
         self.capture()
 
@@ -1128,7 +1159,9 @@ class Example:
                 parse_visuals_as_colliders=True,
             )
         elif profile.kind == "usd":
-            builder.add_usd(profile.asset_path, xform=base_xform)
+            builder.add_usd(
+                profile.asset_path, xform=base_xform, enable_self_collisions=False, skip_mesh_approximation=True
+            )
         else:  # pragma: no cover - guarded by _resolve_robot_profile
             raise ValueError(f"Unsupported robot profile kind: {profile.kind!r}")
 
@@ -1140,11 +1173,40 @@ class Example:
         builder.joint_q[:9] = [*init_q, *finger_q]
         builder.joint_target_pos[:9] = [*init_q, 1.0, 1.0]
 
-        # Joint gains (high values needed with gravity compensation)
+        # Joint gains. With gravity compensation enabled on both assets
+        # (mujoco:jnt_actgravcomp + mujoco:gravcomp below), the gravity
+        # load is removed and only the inertial response matters. The
+        # PD gains tuned for the URDF then transfer to USD as a
+        # reasonable starting point - USD's link1 has ~30x larger Iyy
+        # than the URDF, so the same kp gives a slower closed-loop
+        # response on USD, but it still tracks. Joint armature is
+        # skipped for USD: the USD file already encodes its own per-joint
+        # inertia regularization, and the URDF-tuned 0.3/0.11/0.15
+        # values would compound on top.
         builder.joint_target_ke[:9] = [4500, 4500, 3500, 3500, 2000, 2000, 2000, 100, 100]
         builder.joint_target_kd[:9] = [450, 450, 350, 350, 200, 200, 200, 10, 10]
         builder.joint_effort_limit[:9] = [87, 87, 87, 87, 12, 12, 12, 100, 100]
-        builder.joint_armature[:9] = [0.3] * 4 + [0.11] * 3 + [0.15] * 2
+        if profile.kind == "urdf":
+            builder.joint_armature[:9] = [0.3] * 4 + [0.11] * 3 + [0.15] * 2
+
+        # Force POSITION-mode actuators on the 9 robot DOFs. USD's parser
+        # decides actuator mode from the file's PhysicsDrive at load time:
+        # franka_mimic.usd has Drive prims with stiffness=0, so the parser
+        # picks JointTargetMode.EFFORT (direct torque control). MuJoCo
+        # then ignores joint_target_ke/kd entirely, joint_target_pos has
+        # no effect, and the arm freely accelerates because there's no PD
+        # closing the loop. Overriding the mode here makes MuJoCo install
+        # POSITION actuators that consume the (large) joint_target_ke/kd
+        # we just wrote, which is what the IK control path expects. We
+        # also pin the per-actuator mujoco:ctrl_source attribute to
+        # JOINT_TARGET so MuJoCo reads control.joint_target_pos rather
+        # than the (unused) control.mujoco.ctrl array.
+        if profile.kind == "usd":
+            for d in range(9):
+                builder.joint_target_mode[d] = newton.JointTargetMode.POSITION
+            ctrl_source_attr = builder.custom_attributes["mujoco:ctrl_source"]
+            n_acts = len(builder.joint_target_mode)
+            ctrl_source_attr.values = [int(newton.solvers.SolverMuJoCo.CtrlSource.JOINT_TARGET)] * n_acts
 
         # Gravity compensation on arm joints
         gravcomp_attr = builder.custom_attributes["mujoco:jnt_actgravcomp"]
@@ -1153,18 +1215,11 @@ class Example:
         for dof_idx in range(7):
             gravcomp_attr.values[dof_idx] = True
 
-        # Gravity compensation on arm and hand bodies. Body indices are the
-        # same for URDF and USD here because both Franka layouts produce
-        # base + link0..link7 + (link8) + hand + tcp + 2 fingers in that
-        # order. The profile carries the [lo, hi) half-open range.
-        gravcomp_body = builder.custom_attributes["mujoco:gravcomp"]
-        if gravcomp_body.values is None:
-            gravcomp_body.values = {}
-        gc_lo, gc_hi = profile.gravcomp_body_idx_range
-        for body_idx in range(gc_lo, gc_hi):
-            gravcomp_body.values[body_idx] = 1.0
-
-        # Find finger and hand bodies for hydroelastic SDF.
+        # Find body indices by name suffix. URDF and USD assign different
+        # absolute indices (URDF has a synthetic "base" body; USD has an
+        # extra "force_sensor" body and exposes panda_fingertip_centered
+        # as a body where URDF has fr3_hand_tcp), so name-based lookup is
+        # the only thing that's robust across both.
         def find_body(name):
             return next(i for i, lbl in enumerate(builder.body_label) if lbl.endswith(f"/{name}") or lbl.endswith(name))
 
@@ -1175,10 +1230,35 @@ class Example:
         }
         self.ee_index = find_body(profile.tcp_body)
 
-        # Enable hydroelastic SDF on finger/hand mesh shapes
+        # Gravity compensation on every arm/hand/finger body in the asset.
+        # Both URDF and USD have link0..link7, hand, leftfinger, rightfinger
+        # somewhere in their tree; pick them out by name suffix so we don't
+        # depend on absolute body indices.
+        gravcomp_targets = {
+            find_body(profile.hand_body),
+            find_body(profile.finger_left),
+            find_body(profile.finger_right),
+        }
+        for k in range(8):
+            try:
+                gravcomp_targets.add(find_body(f"link{k}"))
+            except StopIteration:
+                pass  # link8 etc. is optional - URDF has it, USD doesn't.
+        gravcomp_body = builder.custom_attributes["mujoco:gravcomp"]
+        if gravcomp_body.values is None:
+            gravcomp_body.values = {}
+        for body_idx in gravcomp_targets:
+            gravcomp_body.values[body_idx] = 1.0
+
+        # Enable hydroelastic SDF on finger/hand mesh shapes. USD loads
+        # each link with both a visual MESH and a collision CONVEX_MESH;
+        # URDF (with parse_visuals_as_colliders=True) emits a single MESH
+        # per body. Treat both GeoType.MESH and GeoType.CONVEX_MESH as
+        # candidates so the same code path covers both assets.
+        _MESHLIKE = (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH)
         non_finger_shape_indices = []
         for shape_idx, body_idx in enumerate(builder.shape_body):
-            if body_idx in finger_body_indices and builder.shape_type[shape_idx] == newton.GeoType.MESH:
+            if body_idx in finger_body_indices and builder.shape_type[shape_idx] in _MESHLIKE:
                 mesh = builder.shape_source[shape_idx]
                 if mesh is not None and mesh.sdf is None:
                     shape_scale = np.asarray(builder.shape_scale[shape_idx], dtype=np.float32)
@@ -1206,7 +1286,7 @@ class Example:
         # gives O(1) distance lookups at ~1 MB per shape — see the Newton
         # collisions docs.
         for shape_idx in non_finger_shape_indices:
-            if builder.shape_type[shape_idx] != newton.GeoType.MESH:
+            if builder.shape_type[shape_idx] not in _MESHLIKE:
                 continue
             mesh = builder.shape_source[shape_idx]
             if mesh is None or mesh.sdf is not None:
@@ -1291,7 +1371,14 @@ class Example:
         )
 
     def setup_tasks(self):
+        # Initial HOLD-CURRENT-POSE phase. Acts as a sanity check on the
+        # IK + control plumbing: at convergence, the robot should stand
+        # still. If either URDF or USD drifts during this phase, target
+        # routing for that asset is wrong (ee_index, ik_target_correction,
+        # link_offset, etc.) and the failure surfaces before any task
+        # logic even runs.
         pre_screw = [
+            TaskType.HOME,
             TaskType.APPROACH,
             TaskType.REFINE_APPROACH,
             TaskType.GRASP,
@@ -1302,7 +1389,9 @@ class Example:
         ]
         # Time budgets live in module-level PRE_SCREW_LIMITS, SCREW_CYCLE_LIMITS,
         # POST_SCREW_LIMITS. Screw cycles repeat (rotate, regrip) per cycle.
-        pre_screw_limits = PRE_SCREW_LIMITS
+        # The leading HOME phase gets 1 s budget — enough for a visual sanity
+        # check while not delaying the rest of the task significantly.
+        pre_screw_limits = [1.0, *PRE_SCREW_LIMITS]
         screw_block = [TaskType.SCREW_ROTATE, TaskType.SCREW_REGRIP] * self.screw_cycles
         screw_block_limits = SCREW_CYCLE_LIMITS * self.screw_cycles
 
