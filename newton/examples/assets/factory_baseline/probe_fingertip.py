@@ -29,9 +29,8 @@ import os
 import sys
 
 import gymnasium as gym
-import torch
-
 import isaaclab_tasks  # noqa: F401
+import torch
 from isaaclab_tasks.utils import add_launcher_args, launch_simulation, resolve_task_config
 
 with contextlib.suppress(ImportError):
@@ -161,10 +160,7 @@ def main():
         finger_idx = body_names.index(FINGERTIP_BODY_NAME)
         left_idx = body_names.index(LEFTFINGER_BODY_NAME)
         right_idx = body_names.index(RIGHTFINGER_BODY_NAME)
-        print(
-            f"[probe] hand={hand_idx}, fingertip={finger_idx}, "
-            f"left={left_idx}, right={right_idx}"
-        )
+        print(f"[probe] hand={hand_idx}, fingertip={finger_idx}, left={left_idx}, right={right_idx}")
 
         joint_names = list(robot.joint_names)
         print(f"[probe] joint_names ({len(joint_names)}): {joint_names}")
@@ -180,9 +176,7 @@ def main():
             # tensor via the .torch attribute.
             joint_pos = robot.data.default_joint_pos.torch.clone()
             joint_vel = robot.data.default_joint_vel.torch.clone()
-            joint_pos[:, :num_arm_dofs] = torch.tensor(
-                q_arm, device=joint_pos.device, dtype=joint_pos.dtype
-            )
+            joint_pos[:, :num_arm_dofs] = torch.tensor(q_arm, device=joint_pos.device, dtype=joint_pos.dtype)
             # Re-write the joint state on every settling step so gravity drift
             # cannot accumulate between writes. After 5 writes/steps the body
             # buffers should reflect the commanded q with sub-millimeter drift.
@@ -196,7 +190,7 @@ def main():
             # actual joint positions PhysX is reporting (to detect drift).
             body_state_w = robot.data.body_state_w.torch  # (N_envs, N_bodies, 13)
 
-            def _pose_at(idx):
+            def _pose_at(idx, body_state_w=body_state_w):
                 pos = body_state_w[0, idx, 0:3].cpu().tolist()
                 q_wxyz = body_state_w[0, idx, 3:7].cpu().tolist()
                 return pos, _wxyz_to_xyzw(q_wxyz)
@@ -244,9 +238,7 @@ def main():
             max_dev_mm = max(max_dev_mm, d * 1000.0)
             print(f"[probe] dev '{case}' vs '{offsets[0][0]}': {d * 1000.0:.4f} mm")
 
-        print(
-            f"\n[probe] Max relative-offset deviation across configs: {max_dev_mm:.4f} mm"
-        )
+        print(f"\n[probe] Max relative-offset deviation across configs: {max_dev_mm:.4f} mm")
         if max_dev_mm > 1.0:
             print(
                 "[probe] WARNING: offset is not constant across configs - "
