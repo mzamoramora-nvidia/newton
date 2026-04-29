@@ -568,15 +568,25 @@ class Example:
         builder = newton.ModelBuilder()
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
 
+        # Tight contact margin. Without this, default_shape_cfg.gap stays
+        # None and the per-shape gap falls back to the model-level
+        # rigid_gap (0.1 m / 10 cm). The robot base sits 28 mm to the
+        # side of the table edge in XY at ROBOT_BASE_POS, so a 10 cm
+        # margin generates dozens of spurious base-vs-table contacts
+        # per step that destabilize the OSC. The nut-bolt example sets
+        # default_shape_cfg.gap = 0.01 for the same reason; we mirror
+        # that here so the URDF parser (which clones default_shape_cfg)
+        # and the USD parser (which uses default_shape_cfg.gap as a
+        # per-shape fallback) both pick up a 10 mm margin.
+        builder.default_shape_cfg = newton.ModelBuilder.ShapeConfig(gap=0.01)
+
         # Table.
-        table_cfg = newton.ModelBuilder.ShapeConfig()
         builder.add_shape_box(
             body=-1,
             hx=TABLE_HALF_EXTENT,
             hy=TABLE_HALF_EXTENT,
             hz=0.5 * TABLE_HEIGHT,
             xform=wp.transform(TABLE_POS, wp.quat_identity()),
-            cfg=table_cfg,
         )
 
         # Robot asset. URDF and USD share kinematic structure through
@@ -626,17 +636,21 @@ class Example:
 
         # USD parser detail: franka_mimic.usd has PhysicsDrive prims with
         # stiffness=0, so the parser picks JointTargetMode.EFFORT for every
-        # DOF. That's what we want for the *arm* (we drive it via
-        # ``joint_f`` torques), but the fingers must stay on PD. Force the
-        # finger DOFs (7, 8) into POSITION mode so MuJoCo installs PD
-        # actuators that consume the finger ke/kd we just wrote, and pin
-        # ctrl_source to JOINT_TARGET so MuJoCo reads our
-        # control.joint_target_pos rather than the (unused) ctrl array.
-        # URDF defaults to POSITION on every DOF (its drive prims declare
-        # non-zero stiffness); we leave that mode alone and rely on
-        # joint_target_ke[:N_ARM_DOFS] = 0 to make the arm's PD a no-op.
+        # DOF. That's wrong for two reasons here:
+        #   * The fingers need PD so the gripper holds a steady opening.
+        #   * The arm needs POSITION mode too -- not because we want PD,
+        #     but because we pin ctrl_source to JOINT_TARGET below for
+        #     every actuator so the fingers read joint_target_pos. An
+        #     EFFORT-mode arm actuator with ctrl_source=JOINT_TARGET would
+        #     read joint_target_pos[i] (the home angle, e.g. -2.37 rad)
+        #     and apply it as N*m of torque every step, so the arm
+        #     explodes on top of whatever joint_f the OSC writes.
+        # Force every robot DOF into POSITION mode and rely on
+        # joint_target_ke[:N_ARM_DOFS] = 0 to make the arm's PD a no-op
+        # (-kd*qd damping only). URDF stays in its parser default
+        # (POSITION across the board) so this matches the URDF regime.
         if profile.kind == "usd":
-            for d in range(N_ARM_DOFS, N_ROBOT_DOFS):
+            for d in range(N_ROBOT_DOFS):
                 builder.joint_target_mode[d] = newton.JointTargetMode.POSITION
             ctrl_source_attr = builder.custom_attributes["mujoco:ctrl_source"]
             n_acts = len(builder.joint_target_mode)
