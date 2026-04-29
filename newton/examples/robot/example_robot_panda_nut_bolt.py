@@ -17,6 +17,7 @@
 import argparse
 import copy
 import enum
+import os
 import time
 from dataclasses import dataclass, replace
 
@@ -34,6 +35,147 @@ from newton.sensors import SensorContact
 # IsaacGymEnvs nut/bolt assets
 ISAACGYM_ENVS_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"
 ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
+
+# Optional alternative robot asset: IsaacLab Factory's franka_mimic.usd. Not
+# committed to this repo for licensing reasons; users opt in via --robot usd
+# and copy the USD into newton/examples/assets/franka_mimic/. See the README
+# at that path for the workflow.
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+FACTORY_USD_PATH = os.path.normpath(
+    os.path.join(_THIS_DIR, "..", "assets", "franka_mimic", "franka_mimic.usd")
+)
+
+
+@dataclass(frozen=True)
+class RobotProfile:
+    """Per-asset constants for the dual-robot panda nut-bolt example.
+
+    Newton's fr3 URDF and IsaacLab Factory's franka_mimic.usd are both
+    Franka-7-DOF arms that share kinematic structure (same joint axes,
+    same parent-link rotations through link7) but differ in:
+
+      * link / body / joint names
+      * the hand-frame convention - the USD bakes a R = Rz(45 deg) Rx(180 deg)
+        rotation into panda_hand that the URDF's fr3_hand does not have
+      * the canonical TCP body name (fr3_hand_tcp vs panda_fingertip_centered)
+
+    The profile-driven build path lets the rest of the example be agnostic
+    to which asset is loaded.
+
+    Attributes:
+        kind: ``"urdf"`` or ``"usd"``.
+        asset_loader: ``"add_urdf"`` or ``"add_usd"``; selects the right
+            ModelBuilder method.
+        asset_path: filesystem path to the asset.
+        tcp_body: name suffix of the body the IK drives (the "task TCP"
+            body). For URDF this is the dedicated ``fr3_hand_tcp`` link;
+            for USD it is ``panda_fingertip_centered`` which already lives
+            at the fingertip-tip and carries the Factory hand convention.
+        hand_body: name suffix of the gripper hand body (used as a contact
+            and visualization anchor).
+        finger_left, finger_right: name suffixes of the two finger bodies.
+        base_link_suffixes: tuple of name suffixes for links that should
+            have the ground-plane collision filter applied (the robot
+            stands on the table; its base must not collide with the floor).
+        gravcomp_body_idx_range: half-open range ``(lo, hi)`` of body
+            indices whose ``mujoco:gravcomp`` weight is set to 1.0. Indexed
+            within the single-world builder (before replicate). The arm +
+            hand bodies live in this range.
+        init_arm_q: 7 joint angles (rad) used as the home configuration.
+        init_finger_q: pair of finger joint values [m] at home.
+        ik_target_correction_xyzw: quaternion (xyzw) post-multiplied onto
+            the IK target orientation in world frame. This converts the
+            URDF-convention task target into the asset's actual TCP frame
+            convention. URDF gets identity; USD gets the R quat (the
+            Z-flip + 45-deg yaw baked into panda_hand) so the same task
+            kernels produce the same physical gripper orientation on
+            either robot.
+    """
+
+    kind: str
+    asset_loader: str
+    asset_path: str
+    tcp_body: str
+    hand_body: str
+    finger_left: str
+    finger_right: str
+    base_link_suffixes: tuple
+    gravcomp_body_idx_range: tuple
+    init_arm_q: tuple
+    init_finger_q: tuple
+    ik_target_correction_xyzw: tuple
+
+
+# Newton URDF profile.
+_URDF_INIT_ARM_Q = (
+    -3.6802115e-03,
+    2.3901723e-02,
+    3.6804110e-03,
+    -2.3683236e00,
+    -1.2918962e-04,
+    2.3922248e00,
+    7.8549200e-01,
+)
+
+URDF_PROFILE = RobotProfile(
+    kind="urdf",
+    asset_loader="add_urdf",
+    asset_path="",  # resolved at runtime via newton.utils.download_asset
+    tcp_body="fr3_hand_tcp",
+    hand_body="fr3_hand",
+    finger_left="fr3_leftfinger",
+    finger_right="fr3_rightfinger",
+    base_link_suffixes=("/fr3_link0", "/fr3_link1"),
+    # Body 0 = base, 1 = fr3_link0, 2-8 = fr3_link1..7,
+    # 9-11 = fr3_link8/fr3_hand/fr3_hand_tcp, 12-13 = fingers.
+    gravcomp_body_idx_range=(2, 14),
+    init_arm_q=_URDF_INIT_ARM_Q,
+    init_finger_q=(0.05, 0.05),
+    ik_target_correction_xyzw=(0.0, 0.0, 0.0, 1.0),  # identity
+)
+
+# IsaacLab Factory USD profile. The R rotation baked into panda_hand
+# (Rz(45 deg) * Rx(180 deg)) is encoded as the IK target correction so
+# the same task-target kernels produce the same physical grasp pose.
+USD_PROFILE = RobotProfile(
+    kind="usd",
+    asset_loader="add_usd",
+    asset_path=FACTORY_USD_PATH,
+    tcp_body="panda_fingertip_centered",
+    hand_body="panda_hand",
+    finger_left="panda_leftfinger",
+    finger_right="panda_rightfinger",
+    base_link_suffixes=("/panda_link0", "/panda_link1"),
+    gravcomp_body_idx_range=(2, 14),
+    init_arm_q=_URDF_INIT_ARM_Q,
+    init_finger_q=(0.04, 0.04),
+    # quat(xyzw) = (0.9239, 0.3827, 0, 0) is R as a rotation: Rz(pi/4) Rx(pi).
+    ik_target_correction_xyzw=(0.9238795, 0.3826834, 0.0, 0.0),
+)
+
+
+def _resolve_robot_profile(kind: str) -> RobotProfile:
+    """Return the RobotProfile for ``kind``, validating its asset is on disk."""
+    if kind == "urdf":
+        return replace(
+            URDF_PROFILE,
+            asset_path=str(newton.utils.download_asset("franka_emika_panda") / "urdf/fr3_franka_hand.urdf"),
+        )
+    if kind == "usd":
+        if not os.path.isfile(FACTORY_USD_PATH):
+            raise RuntimeError(
+                "--robot usd was requested but IsaacLab Factory's franka_mimic.usd "
+                "is not present at:\n"
+                f"    {FACTORY_USD_PATH}\n\n"
+                "The USD asset is not committed to this repo for licensing reasons. "
+                "Copy it locally with:\n\n"
+                "    cp /tmp/Assets/Isaac/<version>/Isaac/IsaacLab/Factory/franka_mimic.usd \\\n"
+                f"       {FACTORY_USD_PATH}\n\n"
+                "See newton/examples/assets/franka_mimic/README.md for the\n"
+                "full workflow and license note."
+            )
+        return USD_PROFILE
+    raise ValueError(f"Unknown --robot kind: {kind!r} (expected 'urdf' or 'usd').")
 
 # SDF parameters for nut/bolt meshes (high resolution for threaded geometry)
 SDF_MAX_RESOLUTION_NUT_BOLT = 256
@@ -254,6 +396,12 @@ def set_target_pose_kernel(
     ee_index: int,
     nut_body_index: int,
     num_bodies_per_world: int,
+    # Quaternion (xyzw) post-applied to ee_quat_target before write-out.
+    # Maps the URDF-convention task target into the active asset's TCP-body
+    # frame, so the same kernel works for both fr3_hand_tcp (URDF, identity
+    # correction) and panda_fingertip_centered (USD, R = Rz(pi/4) Rx(pi)
+    # baked-in convention).
+    ik_target_correction: wp.quat,
     # outputs
     ee_pos_target: wp.array[wp.vec3],
     ee_pos_target_interpolated: wp.array[wp.vec3],
@@ -351,9 +499,14 @@ def set_target_pose_kernel(
         ee_pos_target[tid] = home_pos
 
     ee_pos_target_interpolated[tid] = ee_pos_prev * (1.0 - t) + ee_pos_target[tid] * t
-    ee_quat_interpolated = wp.quat_slerp(ee_quat_prev, ee_quat_target, t)
+    # Apply per-asset frame correction: maps the URDF-convention task
+    # target into the active robot's TCP-body frame (identity for URDF;
+    # R = Rz(pi/4)*Rx(pi) for USD).
+    ee_quat_target_corrected = ee_quat_target * ik_target_correction
+    ee_quat_prev_corrected = ee_quat_prev * ik_target_correction
+    ee_quat_interpolated = wp.quat_slerp(ee_quat_prev_corrected, ee_quat_target_corrected, t)
 
-    ee_rot_target[tid] = ee_quat_target[:4]
+    ee_rot_target[tid] = ee_quat_target_corrected[:4]
     ee_rot_target_interpolated[tid] = ee_quat_interpolated[:4]
 
     # Pick the "closed" finger target per task: tight full closure for the
@@ -618,6 +771,10 @@ class Example:
         self.robot_base_pos = ROBOT_BASE_POS
         self.bolt_base_pos = BOLT_BASE_POS
         self.nut_start_pos = NUT_START_POS
+
+        # Resolve which Franka asset to load (URDF vs Factory USD). Validates
+        # the USD is on disk and raises a clear copy-paste-ready error if not.
+        self.robot_profile = _resolve_robot_profile(args.robot)
 
         # Assembly-specific parameters (M20 or M16).
         self.assembly = ASSEMBLIES[args.assembly]
@@ -920,7 +1077,7 @@ class Example:
         scene = newton.ModelBuilder()
         scene.replicate(robot_builder, self.world_count)
         ground_shape_idx = scene.add_ground_plane()
-        base_link_suffixes = ("/fr3_link0", "/fr3_link1")
+        base_link_suffixes = self.robot_profile.base_link_suffixes
         for shape_idx, body_idx in enumerate(scene.shape_body):
             if body_idx < 0:
                 continue
@@ -959,25 +1116,28 @@ class Example:
 
         builder.default_shape_cfg = shape_cfg
 
-        builder.add_urdf(
-            newton.utils.download_asset("franka_emika_panda") / "urdf/fr3_franka_hand.urdf",
-            xform=wp.transform(self.robot_base_pos, wp.quat_identity()),
-            floating=False,
-            enable_self_collisions=False,
-            parse_visuals_as_colliders=True,
-        )
+        # Load the robot via the active profile (URDF or Factory USD).
+        profile = self.robot_profile
+        base_xform = wp.transform(self.robot_base_pos, wp.quat_identity())
+        if profile.kind == "urdf":
+            builder.add_urdf(
+                profile.asset_path,
+                xform=base_xform,
+                floating=False,
+                enable_self_collisions=False,
+                parse_visuals_as_colliders=True,
+            )
+        elif profile.kind == "usd":
+            builder.add_usd(profile.asset_path, xform=base_xform)
+        else:  # pragma: no cover - guarded by _resolve_robot_profile
+            raise ValueError(f"Unsupported robot profile kind: {profile.kind!r}")
 
-        # Initial joint configuration
-        init_q = [
-            -3.6802115e-03,
-            2.3901723e-02,
-            3.6804110e-03,
-            -2.3683236e00,
-            -1.2918962e-04,
-            2.3922248e00,
-            7.8549200e-01,
-        ]
-        builder.joint_q[:9] = [*init_q, 0.05, 0.05]
+        # Initial joint configuration. Both profiles default to Factory's
+        # published Panda init; the URDF and USD share kinematic conventions
+        # through link7 so values transfer directly.
+        init_q = list(profile.init_arm_q)
+        finger_q = list(profile.init_finger_q)
+        builder.joint_q[:9] = [*init_q, *finger_q]
         builder.joint_target_pos[:9] = [*init_q, 1.0, 1.0]
 
         # Joint gains (high values needed with gravity compensation)
@@ -993,25 +1153,27 @@ class Example:
         for dof_idx in range(7):
             gravcomp_attr.values[dof_idx] = True
 
-        # Gravity compensation on arm and hand bodies
-        # Body 0 = base, 1 = fr3_link0, 2-8 = fr3_link1-7,
-        # 9-11 = fr3_link8/fr3_hand/fr3_hand_tcp, 12-13 = fingers
+        # Gravity compensation on arm and hand bodies. Body indices are the
+        # same for URDF and USD here because both Franka layouts produce
+        # base + link0..link7 + (link8) + hand + tcp + 2 fingers in that
+        # order. The profile carries the [lo, hi) half-open range.
         gravcomp_body = builder.custom_attributes["mujoco:gravcomp"]
         if gravcomp_body.values is None:
             gravcomp_body.values = {}
-        for body_idx in range(2, 14):
+        gc_lo, gc_hi = profile.gravcomp_body_idx_range
+        for body_idx in range(gc_lo, gc_hi):
             gravcomp_body.values[body_idx] = 1.0
 
-        # Find finger and hand bodies for hydroelastic SDF
+        # Find finger and hand bodies for hydroelastic SDF.
         def find_body(name):
-            return next(i for i, lbl in enumerate(builder.body_label) if lbl.endswith(f"/{name}"))
+            return next(i for i, lbl in enumerate(builder.body_label) if lbl.endswith(f"/{name}") or lbl.endswith(name))
 
         finger_body_indices = {
-            find_body("fr3_leftfinger"),
-            find_body("fr3_rightfinger"),
-            find_body("fr3_hand"),
+            find_body(profile.finger_left),
+            find_body(profile.finger_right),
+            find_body(profile.hand_body),
         }
-        self.ee_index = find_body("fr3_hand_tcp")
+        self.ee_index = find_body(profile.tcp_body)
 
         # Enable hydroelastic SDF on finger/hand mesh shapes
         non_finger_shape_indices = []
@@ -1172,6 +1334,9 @@ class Example:
         self.ee_rot_target = wp.zeros(self.world_count, dtype=wp.vec4)
         self.ee_rot_target_interpolated = wp.zeros(self.world_count, dtype=wp.vec4)
         self.gripper_target = wp.zeros(shape=(self.world_count, 2), dtype=wp.float32)
+        # IK-target frame correction. URDF: identity. USD: Rz(pi/4) Rx(pi).
+        cx, cy, cz, cw = self.robot_profile.ik_target_correction_xyzw
+        self.ik_target_correction = wp.quat(cx, cy, cz, cw)
 
     def set_joint_targets(self):
         wp.launch(
@@ -1203,6 +1368,7 @@ class Example:
                 self.ee_index,
                 self.nut_body_index,
                 self.num_bodies_per_world,
+                self.ik_target_correction,
             ],
             outputs=[
                 self.ee_pos_target,
@@ -1975,6 +2141,15 @@ class Example:
         newton.examples.add_world_count_arg(parser)
         parser.set_defaults(num_frames=3000)
         parser.set_defaults(world_count=1)
+        parser.add_argument(
+            "--robot",
+            type=str,
+            default="urdf",
+            choices=("urdf", "usd"),
+            help="Which Franka asset to load. 'urdf' (default) uses Newton's "
+            "fr3_franka_hand.urdf; 'usd' uses IsaacLab Factory's franka_mimic.usd "
+            "(must be copied to newton/examples/assets/franka_mimic/ - see README).",
+        )
         parser.add_argument(
             "--assembly",
             type=str,
