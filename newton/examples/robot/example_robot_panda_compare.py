@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 
 import warp as wp
@@ -57,18 +58,40 @@ N_DOFS_PER_ROBOT = N_ARM_DOFS + N_FINGER_DOFS
 HAND_BODY_OFFSET = 10  # fr3_hand
 EE_BODY_OFFSET = 11  # fr3_hand_tcp
 
-# Initial joint configuration (radians) - lifted from the OSC example
-# so we share a common starting pose for visual comparison.
-INIT_ARM_Q = (
-    -3.6802115e-03,
-    2.3901723e-02,
-    3.6804110e-03,
-    -2.3683236e00,
-    -1.2918962e-04,
-    2.3922248e00,
-    7.8549200e-01,
+# Initial joint configuration (radians) - matches the OSC example. The two
+# named homes are:
+#   INIT_ARM_Q_FACTORY_SEED     - factory_env_cfg.py's published joint_pos
+#                                 (the IK seed; not where the arm settles).
+#   INIT_ARM_Q_FACTORY_TASK_HOME - Factory's deterministic post-IK pose
+#                                 (peg-insert, noise disabled). Probed by
+#                                 newton/examples/assets/factory_baseline/
+#                                 probe_joint_pos.py.
+# Newton's fr3 URDF and Factory's panda USD share identical joint axes and
+# link offsets through panda_hand, so values transfer with no sign flips.
+# The TCP-frame difference (panda_hand has a baked Z-flip + 45 deg about Z
+# that fr3_hand_tcp lacks) is accounted for by factory_offset rpy below.
+INIT_ARM_Q_FACTORY_SEED = (
+    0.00871,
+    -0.10368,
+    -0.00794,
+    -1.49139,
+    -0.00083,
+    1.38774,
+    0.0,
 )
-INIT_FINGER_Q = (0.05, 0.05)
+INIT_ARM_Q_FACTORY_TASK_HOME = (
+    -0.5294972062110901,
+    0.5211741924285889,
+    0.5377357006072998,
+    -2.0401036739349365,
+    -0.41427168250083923,
+    2.4552853107452393,
+    -0.7210570573806763,
+)
+# Default to the post-IK task home so the visual comparison sits at the
+# pose Factory's OSC actually operates from.
+INIT_ARM_Q = INIT_ARM_Q_FACTORY_TASK_HOME
+INIT_FINGER_Q = (0.04, 0.04)
 
 
 @wp.kernel(enable_backward=False)
@@ -305,14 +328,21 @@ class Example:
         self._gui_finger_q_b = list(INIT_FINGER_Q)
         self._joint_state_dirty = True
 
-        # Tunable Factory-equivalent TCP offset relative to fr3_hand. Default
-        # ~0.1121 m in z is what the IsaacLab probe (scripts/probe_fingertip.py)
-        # measured for ``panda_fingertip_centered`` relative to ``panda_hand``
-        # at the Franka init pose. The Newton URDF's own ``fr3_hand_tcp`` is
-        # 0.1035 m below ``fr3_hand``, so the magenta frame should sit ~9 mm
-        # below Robot A's fr3_hand_tcp. Adjust via sliders to verify.
-        self._factory_offset_pos = [0.0, 0.0, 0.1121]
-        self._factory_offset_rpy = [0.0, 0.0, 0.0]
+        # Tunable Factory-equivalent TCP offset relative to fr3_hand. The
+        # +0.112 m translation is the offset of panda_fingertip_centered from
+        # panda_hand origin, expressed in panda_hand's local frame. The
+        # rotation comes from a frame convention difference: panda_hand has a
+        # baked rotation R = [[0.707, 0.707, 0], [0.707, -0.707, 0],
+        # [0, 0, -1]] that the URDF's fr3_hand does not have. R is equivalent
+        # to RPY (pi, 0, pi/4): a 180 deg flip about X (so Z points away from
+        # the gripper instead of toward the wrist) followed by a 45 deg
+        # rotation about Z. Without this rotation, the magenta frame sits at
+        # the right point but with X/Y/Z axes oriented differently than
+        # Factory's panda_fingertip_centered, which makes "rotate about Z"
+        # mean different things in Newton vs Factory. With it, the axes
+        # align and rotation step-response trials are directly comparable.
+        self._factory_offset_pos = [0.0, 0.0, 0.112]
+        self._factory_offset_rpy = [math.pi, 0.0, math.pi / 4.0]
 
         # Cached per-link delta readout values, refreshed every N frames.
         self._delta_refresh_period = 10
