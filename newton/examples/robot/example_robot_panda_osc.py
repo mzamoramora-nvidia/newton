@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, replace
 
@@ -48,6 +49,38 @@ from newton.examples.robot.osc import (
 # at that path for the workflow.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 FACTORY_USD_PATH = os.path.normpath(os.path.join(_THIS_DIR, "..", "assets", "franka_mimic", "franka_mimic.usd"))
+
+# Per-DOF dynamics dump produced by
+# newton/examples/assets/factory_baseline/probe_joint_pos.py running under
+# IsaacLab. When the file contains the four optional keys
+# (joint_armature/friction/damping/stiffness), the USD path mirrors them so
+# the OSC step-response benchmark sees the same regularization Factory does.
+# Missing or absent keys are silently tolerated; the example falls back to
+# its tuned defaults.
+FACTORY_JOINT_POS_PATH = os.path.normpath(
+    os.path.join(_THIS_DIR, "..", "assets", "factory_baseline", "factory_joint_pos.json")
+)
+
+
+def _load_factory_dynamics() -> dict | None:
+    """Return per-DOF dynamics from factory_joint_pos.json, or None if absent.
+
+    Only the four keys this example needs are returned. Returns ``None`` if
+    the file is missing entirely or doesn't carry the new keys (i.e. the
+    user hasn't rerun the IsaacLab probe since the keys were added).
+    """
+    if not os.path.isfile(FACTORY_JOINT_POS_PATH):
+        return None
+    try:
+        with open(FACTORY_JOINT_POS_PATH) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    keys = ("joint_armature", "joint_friction", "joint_damping", "joint_stiffness")
+    if not all(k in data for k in keys):
+        return None
+    return {k: data[k] for k in keys}
+
 
 # Scene layout (metres, world frame). Lifted from example_robot_panda_nut_bolt.
 TABLE_HEIGHT = 0.1
@@ -637,6 +670,30 @@ class Example:
         # Validated in the nut-bolt experiment: this armature schedule
         # matches the closed-loop response between URDF and USD assets.
         builder.joint_armature[:N_ROBOT_DOFS] = [0.3] * 4 + [0.11] * 3 + [0.15] * 2
+
+        # USD path: mirror Factory's per-DOF dynamics (armature/friction/
+        # damping/stiffness) so the OSC step-response benchmark sees the
+        # same regularization Factory does. The values come from
+        # factory_baseline/factory_joint_pos.json, which is regenerated
+        # by running probe_joint_pos.py under IsaacLab. Mirroring is
+        # opt-in and graceful: if the JSON doesn't carry the keys (older
+        # snapshot, file missing) we silently fall back to the URDF-tuned
+        # defaults set above. URDF stays on the defaults regardless,
+        # since the JSON describes the USD asset's actuator config.
+        factory_dyn = _load_factory_dynamics()
+        if profile.kind == "usd" and factory_dyn is not None:
+            builder.joint_armature[:N_ROBOT_DOFS] = factory_dyn["joint_armature"][:N_ROBOT_DOFS]
+            builder.joint_friction[:N_ROBOT_DOFS] = factory_dyn["joint_friction"][:N_ROBOT_DOFS]
+            builder.joint_target_kd[:N_ROBOT_DOFS] = factory_dyn["joint_damping"][:N_ROBOT_DOFS]
+            builder.joint_target_ke[:N_ROBOT_DOFS] = factory_dyn["joint_stiffness"][:N_ROBOT_DOFS]
+            print("[panda-osc] usd: armature/friction/damping/stiffness mirrored from factory_joint_pos.json")
+        elif profile.kind == "usd":
+            print(
+                "[panda-osc] usd: factory_joint_pos.json missing the "
+                "armature/friction/damping/stiffness keys; using tuned "
+                "defaults. Rerun probe_joint_pos.py under IsaacLab to "
+                "refresh."
+            )
 
         # USD parser detail: franka_mimic.usd has PhysicsDrive prims with
         # stiffness=0, so the parser picks JointTargetMode.EFFORT for every
