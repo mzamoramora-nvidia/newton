@@ -8,8 +8,8 @@
 import argparse
 import json
 import os
-import torch
 
+import torch
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser()
@@ -21,10 +21,8 @@ args.headless = True
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
-import isaaclab.sim as sim_utils  # noqa: E402
-from isaaclab.envs import DirectRLEnvCfg  # noqa: E402
-from isaaclab_tasks.direct.factory.factory_env import FactoryEnv  # noqa: E402
-from isaaclab_tasks.direct.factory.factory_env_cfg import FactoryTaskPegInsertCfg  # noqa: E402
+from isaaclab_tasks.direct.factory.factory_env import FactoryEnv
+from isaaclab_tasks.direct.factory.factory_env_cfg import FactoryTaskPegInsertCfg
 
 cfg = FactoryTaskPegInsertCfg()
 cfg.scene.num_envs = args.num_envs
@@ -65,7 +63,12 @@ result = {
     "fingertip_world_pos": [float(v) for v in ft_pos],
     "fingertip_world_quat_xyzw": [float(v) for v in ft_quat_xyzw],
     "robot_base_world_pos": [float(v) for v in base_state[:3]],
-    "robot_base_world_quat_xyzw": [float(base_state[4]), float(base_state[5]), float(base_state[6]), float(base_state[3])],
+    "robot_base_world_quat_xyzw": [
+        float(base_state[4]),
+        float(base_state[5]),
+        float(base_state[6]),
+        float(base_state[3]),
+    ],
 }
 
 out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "factory_joint_pos.json")
@@ -73,8 +76,8 @@ with open(out, "w") as f:
     json.dump(result, f, indent=2)
 
 print(f"\nWrote {out}")
-print(f"\nJoint angles after IK reset:")
-for n, v in zip(joint_names, joint_pos):
+print("\nJoint angles after IK reset:")
+for n, v in zip(joint_names, joint_pos, strict=True):
     print(f"  {n:<22s}  {v:+.6f}")
 print(f"\nFingertip world pos:  {ft_pos}")
 print(f"Fingertip world quat (xyzw): {ft_quat_xyzw}")
