@@ -612,6 +612,22 @@ class OSCController:
         # first call so we never import torch unless nullspace is in use.
         self._torch_eye_arm = None
 
+        # LOCAL PATCH: articulation_view.eval_mass_matrix doesn't add
+        # joint_armature to H's diagonal -- it only returns J^T M J. The OSC
+        # needs the *effective* inertia (the same one the integrator uses) so
+        # that Lambda = (J H_eff^-1 J^T)^-1 reflects the dynamics torques will
+        # actually produce. We add diag(arm_armature) here at the consumer
+        # site. Lift into eval_mass_matrix in a follow-up PR; remove this
+        # patch once that lands. See newton/tests/test_mass_matrix_armature.py
+        # for the regression that pins the current upstream behavior.
+        joint_armature_np = model.joint_armature.numpy()
+        # Take the first articulation's first n_arm_dofs slots (each world
+        # replicates the same robot, so per-DOF armature is identical across
+        # worlds). Cached as a torch tensor at first use to match the dtype/
+        # device of H_arm without re-allocating each tick.
+        self._arm_armature_np = joint_armature_np[:n_arm_dofs].astype(joint_armature_np.dtype, copy=True)
+        self._arm_armature_torch = None
+
     def update_tcp_state(self, state) -> None:
         """Refresh per-world TCP pose, velocity, and EE-link COM from ``state``."""
         wp.launch(
@@ -684,11 +700,34 @@ class OSCController:
         """
         wp.copy(self.q_default, q_default)
 
+    def _arm_armature_diag(self, H_arm):
+        """Return ``diag(arm_armature)`` matching ``H_arm``'s dtype/device.
+
+        LOCAL PATCH helper: lazily materializes the cached arm-armature
+        torch tensor on the same device/dtype as ``H_arm`` (which mirrors
+        the H buffer Newton allocates). Cached after first call so we don't
+        rebuild the diag every tick.
+        """
+        import torch  # noqa: PLC0415
+
+        if (
+            self._arm_armature_torch is None
+            or self._arm_armature_torch.device != H_arm.device
+            or self._arm_armature_torch.dtype != H_arm.dtype
+        ):
+            self._arm_armature_torch = torch.as_tensor(self._arm_armature_np, device=H_arm.device, dtype=H_arm.dtype)
+        return torch.diag_embed(self._arm_armature_torch).expand_as(H_arm)
+
     def _apply_lambda_weighted_pd(self, state) -> None:
         """Compute arm_torque = J^T @ Lambda @ wrench (lambda-weighted PD).
 
-        Lambda = (J H^-1 J^T)^-1 is the task-space inertia matrix, with the
-        same regularized pinv treatment used in the nullspace path.
+        Lambda = (J H_eff^-1 J^T)^-1 is the task-space inertia matrix.
+
+        Matches IsaacLab's Factory ``compute_dof_torque`` (factory_control.py
+        lines 80-85): plain ``torch.inverse`` of both ``H_eff`` and
+        ``J H_eff^-1 J^T``, no SVD/rtol regularization on the default path.
+        ``lambda_damping > 0`` keeps a damped-least-squares fallback for
+        deployments that need it (Factory itself does not use one).
         """
         try:
             import torch  # noqa: PLC0415
@@ -706,18 +745,26 @@ class OSCController:
         )
         H_t = wp.to_torch(self.h_full)
         H_arm = H_t[..., : self.n_arm_dofs, : self.n_arm_dofs]
+        # LOCAL PATCH: articulation_view.eval_mass_matrix doesn't add
+        # joint_armature to H's diagonal. Lift into eval_mass_matrix in a
+        # follow-up PR. See __init__ for the cached arm-armature tensor.
+        H_arm = H_arm + self._arm_armature_diag(H_arm)
         J = wp.to_torch(self.j_tcp)  # (W, 6, 7)
         wrench_t = wp.to_torch(self.wrench)  # (W, 6)
         arm_torque_t = wp.to_torch(self.arm_torque)  # (W, 7), shared memory
 
-        H_inv = torch.linalg.pinv(H_arm, rtol=1e-3)
+        H_inv = torch.linalg.inv(H_arm)
         Jt = J.transpose(-2, -1)
         JHJt = J @ H_inv @ Jt
         if self.lambda_damping > 0.0:
             eye_task = torch.eye(JHJt.shape[-1], device=JHJt.device, dtype=JHJt.dtype)
             Lambda = torch.linalg.solve(JHJt + self.lambda_damping * eye_task, eye_task)
         else:
-            Lambda = torch.linalg.pinv(JHJt, rtol=self.lambda_rtol)
+            # Factory parity (factory_control.py line 82-84): plain inverse,
+            # no rtol regularization. ``self.lambda_rtol`` is retained as a
+            # public attribute for backward compatibility but no longer
+            # affects this default path.
+            Lambda = torch.linalg.inv(JHJt)
         if self.lambda_position_only:
             # Apply Lambda only to the position sub-wrench (first 3); pass the
             # rotation wrench through unweighted. Rotation modes typically have
@@ -754,6 +801,10 @@ class OSCController:
         )
         H_t = wp.to_torch(self.h_full)
         H_arm = H_t[..., : self.n_arm_dofs, : self.n_arm_dofs]
+        # LOCAL PATCH: articulation_view.eval_mass_matrix doesn't add
+        # joint_armature to H's diagonal. Lift into eval_mass_matrix in a
+        # follow-up PR.
+        H_arm = H_arm + self._arm_armature_diag(H_arm)
         J = wp.to_torch(self.j_tcp)  # (W, 6, 7)
         arm_torque_t = wp.to_torch(self.arm_torque)  # (W, 7), shared memory
 
@@ -766,21 +817,13 @@ class OSCController:
 
         q_default = wp.to_torch(self.q_default)
 
-        # SVD-based pseudo-inverses with an explicit rtol floor so the
-        # nullspace projection stays well-defined - and produces bounded
-        # output - when the arm passes through (or near) a kinematic
-        # singularity or when joints have near-zero inertia. The default
-        # rtol (machine epsilon) lets near-zero singular values blow up
-        # into enormous matrix entries, producing torque spikes that
-        # destabilize the OSC; clamping at 1e-3 damps those modes out.
-        # IsaacLab's Factory IK helper uses an explicit min_singular_value
-        # for the same reason (factory_control.py:172-180). hermitian=False
-        # (default) keeps the full SVD path - hermitian=True routes through
-        # eigh, which raises on ill-conditioned matrices instead of
-        # gracefully damping them.
-        H_inv = torch.linalg.pinv(H_arm, rtol=1e-3)
+        # Factory parity: plain ``torch.inverse`` for both H_eff and
+        # ``J H_eff^-1 J^T`` (factory_control.py lines 80-85). Factory uses no
+        # SVD/rtol regularization here -- the armature diagonal added above is
+        # what keeps H_eff well-conditioned in practice.
+        H_inv = torch.linalg.inv(H_arm)
         Jt = J.transpose(-2, -1)
-        Lambda = torch.linalg.pinv(J @ H_inv @ Jt, rtol=1e-3)
+        Lambda = torch.linalg.inv(J @ H_inv @ Jt)
         Jbar = Lambda @ J @ H_inv  # (W, 6, 7)
         # Cached identity matrix - allocated once on first call.
         if self._torch_eye_arm is None:
