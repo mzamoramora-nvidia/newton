@@ -45,6 +45,15 @@ robot = env.scene["robot"]
 joint_pos = robot.data.joint_pos.torch.cpu().numpy()[0]
 joint_names = robot.joint_names
 
+# Per-DOF actuator/dynamics config that the Newton USD path mirrors verbatim.
+# Pulled directly from the live ArticulationView so we capture exactly what
+# Factory's reset+settle is using (rather than re-reading the USD/cfg by hand
+# and risking a drift). Order matches `joint_names` above.
+joint_armature = robot.data.joint_armature.torch.cpu().numpy()[0]
+joint_friction = robot.data.joint_friction.torch.cpu().numpy()[0]
+joint_damping = robot.data.joint_damping.torch.cpu().numpy()[0]
+joint_stiffness = robot.data.joint_stiffness.torch.cpu().numpy()[0]
+
 # Get fingertip pose for verification.
 fingertip_idx = robot.body_names.index("panda_fingertip_centered")
 ft_state = robot.data.body_state_w.torch.cpu().numpy()[0, fingertip_idx]
@@ -60,6 +69,10 @@ result = {
     "task": "FactoryTaskPegInsertCfg",
     "joint_names": list(joint_names),
     "joint_pos_after_ik": [float(v) for v in joint_pos],
+    "joint_armature": [float(v) for v in joint_armature],
+    "joint_friction": [float(v) for v in joint_friction],
+    "joint_damping": [float(v) for v in joint_damping],
+    "joint_stiffness": [float(v) for v in joint_stiffness],
     "fingertip_world_pos": [float(v) for v in ft_pos],
     "fingertip_world_quat_xyzw": [float(v) for v in ft_quat_xyzw],
     "robot_base_world_pos": [float(v) for v in base_state[:3]],
@@ -79,6 +92,9 @@ print(f"\nWrote {out}")
 print("\nJoint angles after IK reset:")
 for n, v in zip(joint_names, joint_pos, strict=True):
     print(f"  {n:<22s}  {v:+.6f}")
+print("\nPer-DOF actuator/dynamics config (armature / friction / damping / stiffness):")
+for n, a, f, d, k in zip(joint_names, joint_armature, joint_friction, joint_damping, joint_stiffness, strict=True):
+    print(f"  {n:<22s}  arm={a:+.5f}  fri={f:+.5f}  damp={d:+.3f}  stif={k:+.3f}")
 print(f"\nFingertip world pos:  {ft_pos}")
 print(f"Fingertip world quat (xyzw): {ft_quat_xyzw}")
 print(f"Robot base world pos: {base_state[:3].tolist()}")
