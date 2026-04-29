@@ -436,6 +436,7 @@ class StepResponseExample(OSCExample):
         kd = self._step_response_args.arm_joint_kd
         out = {
             "task": "newton.robot_panda_osc_step_response",
+            "robot": self.robot_profile.kind,
             "control_dt": self._control_dt,
             "control_hz": 1.0 / self._control_dt,
             "trial_ticks": TRIAL_TICKS,
@@ -451,8 +452,11 @@ class StepResponseExample(OSCExample):
             "arm_armature": [scale * v for v in self.ARM_ARMATURE_BASE],
             "trials": self._results,
         }
+        # Default output filename includes the robot kind so URDF and USD
+        # sweeps don't clobber each other when running the same gain config.
+        robot = self.robot_profile.kind
         out_name = self._step_response_args.output_name or (
-            f"osc_newton_steps_armscale{scale:g}_kd{kd:g}_kp{self._kp_vec[0]:g}-{self._kp_vec[3]:g}.json"
+            f"osc_newton_steps_{robot}_armscale{scale:g}_kd{kd:g}_kp{self._kp_vec[0]:g}-{self._kp_vec[3]:g}.json"
         )
         out_path = os.path.join(OUTPUT_DIR, out_name)
         os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -593,8 +597,8 @@ class StepResponseExample(OSCExample):
             type=str,
             default=None,
             help="Output JSON filename (under factory_baseline/). Defaults to "
-            "osc_newton_steps_armscale<scale>_kd<kd>_kp<kp_pos>-<kp_rot>.json "
-            "so a sweep produces distinct files automatically.",
+            "osc_newton_steps_<robot>_armscale<scale>_kd<kd>_kp<kp_pos>-<kp_rot>.json "
+            "so URDF and USD sweeps produce distinct files automatically.",
         )
         return parser
 
