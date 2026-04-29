@@ -591,7 +591,11 @@ class Example:
 
         # Robot asset. URDF and USD share kinematic structure through
         # link7 but differ in body / joint names and hand-frame convention -
-        # see RobotProfile.
+        # see RobotProfile. Capture the body-index range the parser fills
+        # in so the gravcomp loop below can pick up *every* body the asset
+        # added (including ones we don't enumerate by name, like USD's
+        # fixed-jointed force_sensor between link7 and the hand).
+        body_count_before_parse = builder.body_count
         base_xform = wp.transform(ROBOT_BASE_POS, wp.quat_identity())
         if profile.kind == "urdf":
             builder.add_urdf(
@@ -661,39 +665,26 @@ class Example:
         # OSCController and the disturbance kernel.
         self.ee_index = _resolve_ee_body_index(builder, profile)
 
-        # Per-body gravity disable across the entire Franka articulation.
-        # Factory's robot articulation runs with disable_gravity=True
-        # (factory_env_cfg.py:129); to match Newton onto the same regime
-        # we set mujoco:gravcomp = 1.0 on every Franka body. The benchmark
-        # scene is robot + table only - nothing else needs gravity tweaks.
-        finger_l = profile.finger_left
-        finger_r = profile.finger_right
-        hand = profile.hand_body
-        franka_body_indices: set[int] = set()
-        for i, lbl in enumerate(builder.body_label):
-            if (
-                lbl.endswith(f"/{hand}")
-                or lbl.endswith(hand)
-                or lbl.endswith(f"/{finger_l}")
-                or lbl.endswith(finger_l)
-                or lbl.endswith(f"/{finger_r}")
-                or lbl.endswith(finger_r)
-                or lbl.endswith(f"/{profile.tcp_body}")
-                or lbl.endswith(profile.tcp_body)
-            ):
-                franka_body_indices.add(i)
-        # Pick up link0..link8 by name - URDF has link0..8, USD has link0..7;
-        # the missing link is silently skipped.
-        for k in range(9):
-            for i, lbl in enumerate(builder.body_label):
-                if lbl.endswith(f"/link{k}") or lbl.endswith(f"link{k}"):
-                    franka_body_indices.add(i)
-                    break
+        # Per-body gravity compensation. Factory's robot articulation runs
+        # with disable_gravity=True (factory_env_cfg.py:129); to match that
+        # regime in Newton's MuJoCo solver we set mujoco:gravcomp = 1.0 on
+        # every body the parser added, fingers included. Asset-agnostic
+        # so any inert body the asset author included (e.g. Factory USD's
+        # fixed-jointed panda_force_sensor between link7 and panda_hand)
+        # is automatically covered. Without force_sensor coverage that
+        # 10 g body's weight propagates as a residual wrench up the chain
+        # and shows up as steady-state TCP drift on the USD path. The
+        # OSC scene has the gripper open with no contact, so finger
+        # gravcomp is desirable: it removes the ~0.6 N of finger weight
+        # hanging off the wrist that the OSC would otherwise have to
+        # fight against. (Other examples that calibrate contact forces
+        # from finger PD - e.g. nut-bolt - may want to skip fingers.)
+        gravcomp_targets = set(range(body_count_before_parse, builder.body_count))
 
         gravcomp_body = builder.custom_attributes["mujoco:gravcomp"]
         if gravcomp_body.values is None:
             gravcomp_body.values = {}
-        for body_idx in franka_body_indices:
+        for body_idx in gravcomp_targets:
             gravcomp_body.values[body_idx] = 1.0
 
         return builder

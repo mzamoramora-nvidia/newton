@@ -1197,8 +1197,13 @@ class Example:
         builder.default_shape_cfg = shape_cfg
 
         # Load the robot via the active profile (URDF or Factory USD).
+        # Capture the body-index range the parser fills in so the gravcomp
+        # loop below can pick up *every* body the asset added (including
+        # ones we don't enumerate by name, like USD's fixed-jointed
+        # panda_force_sensor between link7 and the hand, or URDF's link8).
         profile = self.robot_profile
         base_xform = wp.transform(self.robot_base_pos, wp.quat_identity())
+        body_count_before_parse = builder.body_count
         if profile.kind == "urdf":
             builder.add_urdf(
                 profile.asset_path,
@@ -1247,6 +1252,19 @@ class Example:
         # also pin the per-actuator mujoco:ctrl_source attribute to
         # JOINT_TARGET so MuJoCo reads control.joint_target_pos rather
         # than the (unused) control.mujoco.ctrl array.
+        #
+        # FIXME(USD): even with all the URDF/USD parity fixes in place
+        # (actuator mode, ctrl_source, joint_armature, finger kh,
+        # gripper SDF resolution, COLLIDE_SHAPES filtering on visuals,
+        # gravcomp on every parsed body), the nut-bolt task with
+        # --robot usd is observed to be intermittently flaky -- the
+        # gripper sometimes fails to retain the nut during SCREW_ROTATE
+        # / SCREW_REGRIP, where the URDF path is reliable. Root cause
+        # not yet identified; suspects include residual body-inertia
+        # mismatch (USD's hand has Iyy ~8x larger than URDF's, finger
+        # COM/inertia differs ~10%) and the still-coarse SDF on USD's
+        # combined finger collision mesh. Track via a follow-up; for
+        # now --robot urdf is the recommended path on this example.
         if profile.kind == "usd":
             for d in range(9):
                 builder.joint_target_mode[d] = newton.JointTargetMode.POSITION
@@ -1276,20 +1294,24 @@ class Example:
         }
         self.ee_index = find_body(profile.tcp_body)
 
-        # Gravity compensation on every arm/hand/finger body in the asset.
-        # Both URDF and USD have link0..link7, hand, leftfinger, rightfinger
-        # somewhere in their tree; pick them out by name suffix so we don't
-        # depend on absolute body indices.
-        gravcomp_targets = {
-            find_body(profile.hand_body),
-            find_body(profile.finger_left),
-            find_body(profile.finger_right),
-        }
-        for k in range(8):
-            try:
-                gravcomp_targets.add(find_body(f"link{k}"))
-            except StopIteration:
-                pass  # link8 etc. is optional - URDF has it, USD doesn't.
+        # Gravity compensation on every body the parser added (link0..link7,
+        # optional link8 on URDF, force_sensor on USD, hand, fingers,
+        # tcp_body). Asset-agnostic: any inert body the asset author
+        # included is automatically covered. The previous suffix-list
+        # approach silently skipped USD's panda_force_sensor (10 g,
+        # fixed-jointed between link7 and panda_hand), letting its weight
+        # propagate up the chain as a residual wrench.
+        #
+        # Finger gravcomp note: the finger prismatic joint axis is
+        # perpendicular to gravity (gripper points down, fingers slide
+        # horizontally), so finger gravity doesn't project onto the joint
+        # axis. Including fingers in gravcomp does NOT change grip force
+        # calibration; it only cancels the small constraint reaction that
+        # would otherwise transmit ~0.6 N of finger weight into the wrist.
+        # The nut/bolt aren't added until after build_franka_with_table
+        # returns, so they're naturally outside this range and stay
+        # subject to gravity (the nut must fall onto the bolt).
+        gravcomp_targets = set(range(body_count_before_parse, builder.body_count))
         gravcomp_body = builder.custom_attributes["mujoco:gravcomp"]
         if gravcomp_body.values is None:
             gravcomp_body.values = {}
