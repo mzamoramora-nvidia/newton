@@ -22,9 +22,11 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import os
+import sys
 
 import warp as wp
 
@@ -59,22 +61,28 @@ FACTORY_KD = [20.0, 20.0, 20.0, math.sqrt(120.0), math.sqrt(120.0), math.sqrt(12
 #     is stiff in x but soft in y/z at the Factory home pose; uniform kp
 #     either undertracks x or destabilizes y/z.
 #   - Wrist effort cap at 12 N*m (FR3 spec): higher caps destabilize.
-NEWTON_TUNED_KP = [200.0, 200.0, 200.0, 30.0, 30.0, 30.0]
-NEWTON_TUNED_KD = [20.0, 20.0, 20.0, math.sqrt(120.0), math.sqrt(120.0), math.sqrt(120.0)]
+NEWTON_TUNED_KP = [200.0, 200.0, 200.0, 300.0, 300.0, 300.0]
+NEWTON_TUNED_KD = [20.0, 20.0, 20.0, math.sqrt(1200.0), math.sqrt(1200.0), math.sqrt(1200.0)]
 NEWTON_TUNED_LAMBDA_DAMPING = 1e-2
 
-# Tuning notes (re-tuned after switching INIT_ARM_Q to Factory's
-# deterministic post-IK task home):
-#   * Position: kp=200 with Factory's published kd_pos=20 gives 2.78 mm
-#     mean error vs Factory's 5.64 mm baseline at the same home. Beats
-#     Factory by ~2x on position step-response.
-#   * Rotation: rot_z error floor is ~7-8 deg regardless of kp_rot in
-#     [5, 200]. Higher kp_rot (100) reduces rot_z err to 7.7 deg but
-#     inflates position err to 8 mm. Factory achieves 0.19 deg rot_z
-#     - the gap is structural, likely from wrist-effort saturation (FR3
-#     12 N*m) and/or residual TCP-frame correction error, not a gain
-#     knob. Defaults sit at kp_rot=30 (Factory's published value) for
-#     a balanced operating point.
+# Tuning notes (validated by Phase 5 + R2 of factory_baseline/osc_tuning_plan.md):
+#   * Position: kp=200 with kd_pos=20, kd_joint=20, lambda_damping=0.01
+#     gives <= 0.02 mm final-pos error on every position trial when paired
+#     with kp_rot=300 (kinematic coupling: a stiff rotation channel
+#     prevents drift during a position step).
+#   * Rotation: kp_rot=300 lands rot_z error at 0.00 deg on both +/-z
+#     trials -- matching Factory's 0.04-0.06 deg. Wrist saturates briefly
+#     at the FR3 12 N*m cap (max_sat_frac ~ 0.07 over a trial) but never
+#     diverges. Earlier tuning capped kp_rot at 30 (Factory's *published*
+#     value) on the assumption the gap was structural; the 30 -> 300 jump
+#     is needed because Newton's lambda-weighted formulation
+#     (tau = J^T Lambda wrench) shrinks the rotation channel ~10x
+#     relative to Factory's plain J^T (factory_control.py:81), so Newton
+#     needs ~10x higher kp_rot to recover the same effective wrist
+#     authority. Plain J^T on Newton+USD does NOT recover Factory
+#     behavior at any kp because the underlying mass / armature /
+#     friction identification differs (verified by direct experiment;
+#     position errors blow up to 11-32 mm in J^T mode).
 
 POS_STEP_M = 0.05
 ROT_STEP_DEG = 30.0
@@ -209,6 +217,117 @@ def _step_response_metrics(target: list[float], measured: list[list[float]], con
 
 
 # ---------------------------------------------------------------------------
+# Live progress + early-abort helpers (pure functions, used by the runtime
+# loop and by newton/tests/test_panda_osc_step_response_abort.py)
+# ---------------------------------------------------------------------------
+
+
+def compute_running_trial_score(
+    measured: list[list[float]],
+    baseline: list[list[float]],
+    home_pos: list[float],
+    baseline_home_pos: list[float] | None = None,
+) -> tuple[float, float, float]:
+    """Normalized-L2 trial score for the samples seen so far.
+
+    Mirrors the global_score formula in the tuning plan, applied to a single
+    trial up to the current sample count. Aligns ``measured`` and
+    ``baseline`` element-wise (truncating to the shorter list).
+
+    Both trajectories are converted to *excursions from their own home pose*
+    before being compared so the score is invariant to world-frame offset.
+    This matters when ``measured`` and ``baseline`` come from sims whose
+    robot bases live at different world positions (e.g. Newton's USD scene
+    places the robot at ``ROBOT_BASE_POS`` while IsaacLab's Factory env
+    places it at the world origin).
+
+    Args:
+        measured: Newton-side TCP positions, world frame.
+        baseline: reference TCP positions, world frame.
+        home_pos: ``measured``'s home (subtracted from every measured sample
+            to get measured-frame excursion).
+        baseline_home_pos: ``baseline``'s home. Defaults to ``home_pos`` for
+            the single-frame case (so the test fixtures that pass synthetic
+            home-relative trajectories don't need to opt in).
+
+    Returns:
+        ``(score, err_mm, ref_mm)`` where:
+          * ``err_mm`` is the L2 distance between the latest measured and
+            baseline excursions [mm] -- handy for live-progress lines.
+          * ``ref_mm`` is the L2 magnitude of the latest baseline excursion
+            from its home [mm] -- the denominator's nominal scale.
+          * ``score`` is the running trial score (sum-of-squares excursion
+            mismatch / sum-of-squares baseline excursion). 0.0 on degenerate
+            inputs (no excursion to track).
+    """
+    if baseline_home_pos is None:
+        baseline_home_pos = home_pos
+    n = min(len(measured), len(baseline))
+    if n == 0:
+        return 0.0, 0.0, 0.0
+    err_sq = 0.0
+    ref_sq = 0.0
+    for i in range(n):
+        # Baseline excursion (from baseline's own home).
+        bx = baseline[i][0] - baseline_home_pos[0]
+        by = baseline[i][1] - baseline_home_pos[1]
+        bz = baseline[i][2] - baseline_home_pos[2]
+        ref_sq += bx * bx + by * by + bz * bz
+        # Measured excursion (from measured's home), then mismatch vs
+        # baseline excursion in the same coordinate space.
+        mx = measured[i][0] - home_pos[0]
+        my = measured[i][1] - home_pos[1]
+        mz = measured[i][2] - home_pos[2]
+        dx = mx - bx
+        dy = my - by
+        dz = mz - bz
+        err_sq += dx * dx + dy * dy + dz * dz
+    last = n - 1
+    last_bx = baseline[last][0] - baseline_home_pos[0]
+    last_by = baseline[last][1] - baseline_home_pos[1]
+    last_bz = baseline[last][2] - baseline_home_pos[2]
+    last_mx = measured[last][0] - home_pos[0]
+    last_my = measured[last][1] - home_pos[1]
+    last_mz = measured[last][2] - home_pos[2]
+    err_mm = math.sqrt((last_mx - last_bx) ** 2 + (last_my - last_by) ** 2 + (last_mz - last_bz) ** 2) * 1000.0
+    ref_mm = math.sqrt(last_bx * last_bx + last_by * last_by + last_bz * last_bz) * 1000.0
+    score = (err_sq / ref_sq) if ref_sq > 1e-18 else 0.0
+    return score, err_mm, ref_mm
+
+
+def check_abort(
+    tcp_pos: list[float],
+    home_pos: list[float],
+    running_score: float,
+    consecutive_over_threshold: int,
+    abort_tcp_excursion_m: float,
+    abort_trial_score: float,
+    abort_on_nan: bool,
+) -> str | None:
+    """Return an abort reason or ``None`` if the run should continue.
+
+    Pure function -- callers maintain ``consecutive_over_threshold``
+    themselves. Reasons in priority order:
+
+      * ``"nan"`` -- any NaN in tcp_pos (gated by ``abort_on_nan``).
+      * ``"tcp_excursion"`` -- max axis-wise |tcp_pos - home_pos| exceeds
+        ``abort_tcp_excursion_m``.
+      * ``"trial_score"`` -- running per-trial ``score`` exceeded
+        ``abort_trial_score`` for at least 5 consecutive samples (caller
+        increments / resets the counter as the score crosses the
+        threshold).
+    """
+    if abort_on_nan and any(math.isnan(v) for v in tcp_pos):
+        return "nan"
+    excursion = max(abs(tcp_pos[i] - home_pos[i]) for i in range(3))
+    if excursion > abort_tcp_excursion_m:
+        return "tcp_excursion"
+    if consecutive_over_threshold >= 5 and running_score > abort_trial_score:
+        return "trial_score"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Subclass the OSC example: reuse all of the scene / OSC setup, then drive
 # trial targets directly through the OSC's per-world target buffers. The GUI
 # target sync, step-clip, ImGui callbacks, and per-frame logging are skipped.
@@ -311,6 +430,44 @@ class StepResponseExample(OSCExample):
         self._done = False
         self._wrote_output = False
 
+        # Live-progress + early-abort wiring. Active only when --baseline
+        # points at an existing IsaacLab trajectory dump; otherwise the
+        # script behaves as before. The autonomous tuning loop relies on
+        # these to bail out of bad gain candidates in seconds rather than
+        # minutes (see osc_tuning_plan.md, Phase 4.5).
+        self._baseline_per_trial: dict[str, list[list[float]]] = {}
+        # IsaacLab's robot base sits at a different world position than
+        # Newton's, so the score has to compare excursions (relative to each
+        # one's home) rather than absolute world positions. Capture the
+        # baseline's recorded home_pos for that subtraction.
+        self._baseline_home_pos: list[float] = list(self._home_pos)
+        if getattr(args, "baseline", None):
+            try:
+                with open(args.baseline) as f:
+                    base = json.load(f)
+                for tr in base.get("trials", []):
+                    name = tr.get("name")
+                    ticks = tr.get("ticks", [])
+                    if name and ticks:
+                        self._baseline_per_trial[name] = [t["measured_pos"] for t in ticks]
+                base_home = base.get("home_pos")
+                if isinstance(base_home, list) and len(base_home) == 3:
+                    self._baseline_home_pos = [float(v) for v in base_home]
+                print(
+                    f"[step-response] baseline loaded: {args.baseline} "
+                    f"({len(self._baseline_per_trial)} trials, "
+                    f"home_pos={self._baseline_home_pos})"
+                )
+            except (OSError, json.JSONDecodeError, KeyError) as e:
+                print(f"[step-response] WARN: could not load --baseline {args.baseline}: {e}")
+        self._abort_tcp_excursion_m = float(getattr(args, "abort_tcp_excursion_m", 0.30))
+        self._abort_trial_score = float(getattr(args, "abort_trial_score", 5.0))
+        self._abort_on_nan = bool(getattr(args, "abort_on_nan", True))
+        self._progress_every_n = int(getattr(args, "progress_every_n_ticks", 10))
+        # Per-trial running state that the abort + progress logic reads.
+        self._consecutive_over_threshold = 0
+        self._max_score_so_far = 0.0
+
         # Print first trial header so the log is easy to scan.
         if self._trials:
             print(f"[step-response] starting return-to-home for trial 0/{len(self._trials)}")
@@ -363,10 +520,11 @@ class StepResponseExample(OSCExample):
         tcp_quat = self.osc.tcp_quat.numpy()[0]
         arm_torque = self.osc.arm_torque.numpy()[0]
         t_now = (self._tick_in_phase + 1) * self._control_dt
+        tcp_pos_list = [float(tcp_pos[0]), float(tcp_pos[1]), float(tcp_pos[2])]
         self._current_records.append(
             {
                 "t": float(t_now),
-                "measured_pos": [float(tcp_pos[0]), float(tcp_pos[1]), float(tcp_pos[2])],
+                "measured_pos": tcp_pos_list,
                 "measured_quat_xyzw": [
                     float(tcp_quat[0]),
                     float(tcp_quat[1]),
@@ -376,6 +534,47 @@ class StepResponseExample(OSCExample):
                 "joint_torque": [float(v) for v in arm_torque],
             }
         )
+
+        # Live progress + early-abort, only when --baseline is loaded.
+        if not self._baseline_per_trial:
+            return
+        trial = self._trials[self._trial_idx]
+        baseline = self._baseline_per_trial.get(trial["name"])
+        if not baseline:
+            return
+        measured = [r["measured_pos"] for r in self._current_records]
+        score, err_mm, ref_mm = compute_running_trial_score(measured, baseline, self._home_pos, self._baseline_home_pos)
+        if score > self._abort_trial_score:
+            self._consecutive_over_threshold += 1
+        else:
+            self._consecutive_over_threshold = 0
+        self._max_score_so_far = max(self._max_score_so_far, score)
+
+        reason = check_abort(
+            tcp_pos=tcp_pos_list,
+            home_pos=self._home_pos,
+            running_score=score,
+            consecutive_over_threshold=self._consecutive_over_threshold,
+            abort_tcp_excursion_m=self._abort_tcp_excursion_m,
+            abort_trial_score=self._abort_trial_score,
+            abort_on_nan=self._abort_on_nan,
+        )
+        if reason is not None:
+            print(
+                f"[step-response] ABORT reason={reason} trial={self._trial_idx + 1}/"
+                f"{len(self._trials)} t={t_now:.3f}s score={score:.3f}"
+            )
+            sys.exit(2)
+
+        # One progress line every N ticks, machine-parseable for the
+        # autonomous tuning loop to tail.
+        if (self._tick_in_phase + 1) % self._progress_every_n == 0:
+            print(
+                f"[step-response] trial={self._trial_idx + 1}/{len(self._trials)} "
+                f"t={t_now:.3f}s err_mm={err_mm:.2f} ref_mm={ref_mm:.2f} "
+                f"score={score:.3f} max_score={self._max_score_so_far:.3f}",
+                flush=True,
+            )
 
     def _advance_state_machine(self) -> None:
         self._tick_in_phase += 1
@@ -392,6 +591,9 @@ class StepResponseExample(OSCExample):
             self._phase = "trial"
             self._tick_in_phase = 0
             self._current_records = []
+            # Reset live-progress / abort state at trial start.
+            self._consecutive_over_threshold = 0
+            self._max_score_so_far = 0.0
             print(
                 f"[step-response] trial {self._trial_idx + 1}/{len(self._trials)} "
                 f"{trial['name']:<22s} target_pos={[f'{v:+.3f}' for v in tp]} "
@@ -489,9 +691,11 @@ class StepResponseExample(OSCExample):
         parser.add_argument(
             "--arm-joint-kd",
             type=float,
-            default=50.0,
+            default=20.0,
             help="Per-joint joint_target_kd applied to all 7 arm DOFs. "
-            "50 = parent default; smaller values let the OSC have more authority.",
+            "20 = autonomous-tuning winner (factory_baseline/tuning_summary.md), "
+            "20% better step-response score than the previous 50; smaller values "
+            "let the OSC have more authority and improve +/-x tracking in particular.",
         )
         parser.add_argument(
             "--osc-kp-pos",
@@ -524,20 +728,25 @@ class StepResponseExample(OSCExample):
             f"Default {NEWTON_TUNED_KD[3]:.3f} = Factory's published value. "
             "Pass 0 to auto-compute as 2*sqrt(kp_rot) (critically damped).",
         )
-        # Per-axis kp/kd. Defaults to Newton-tuned values (kp_x=1500 boosts x
-        # since Newton's URDF Jacobian is stiff in x at the Factory home).
-        for ax, default_kp in (("x", NEWTON_TUNED_KP[0]), ("y", NEWTON_TUNED_KP[1]), ("z", NEWTON_TUNED_KP[2])):
+        # Per-axis kp/kd overrides. Default of -1 means "fall through to
+        # --osc-kp-pos / --osc-kd-pos"; pass a positive value to override
+        # only that axis. Previously these defaulted to NEWTON_TUNED_KP[i],
+        # which made --osc-kp-pos a silent no-op (the per-axis branch
+        # always won because the default was positive). The autonomous
+        # tuning loop relies on --osc-kp-pos being effective, so this
+        # default needs to be -1 / opt-in.
+        for ax in ("x", "y", "z"):
             parser.add_argument(
                 f"--osc-kp-{ax}",
                 type=float,
-                default=default_kp,
-                help=f"Per-axis kp on {ax}. Newton-tuned default {default_kp}.",
+                default=-1.0,
+                help=f"Per-axis kp on {ax}. -1 (default) falls through to --osc-kp-pos.",
             )
             parser.add_argument(
                 f"--osc-kd-{ax}",
                 type=float,
                 default=-1.0,
-                help=f"Per-axis kd on {ax}. -1 auto-computes 2*sqrt(kp_{ax}).",
+                help=f"Per-axis kd on {ax}. -1 (default) auto-computes 2*sqrt(kp_{ax}).",
             )
         parser.add_argument(
             "--osc-kp-null",
@@ -599,6 +808,50 @@ class StepResponseExample(OSCExample):
             help="Output JSON filename (under factory_baseline/). Defaults to "
             "osc_newton_steps_<robot>_armscale<scale>_kd<kd>_kp<kp_pos>-<kp_rot>.json "
             "so URDF and USD sweeps produce distinct files automatically.",
+        )
+        # Live-progress + early-abort flags. Used by the autonomous tuning
+        # loop in osc_tuning_plan.md (Phase 5) to bail on bad gain
+        # candidates in seconds rather than minutes. Inactive by default
+        # (no --baseline) so manual runs behave as before.
+        parser.add_argument(
+            "--baseline",
+            type=str,
+            default=None,
+            help="Path to an osc_isaaclab_steps.json (or compatible) file. "
+            "When set, the script computes a running per-trial score "
+            "vs the baseline as it runs and prints a machine-parseable "
+            "[step-response] trial=... t=... err_mm=... score=... line "
+            "every --progress-every-n-ticks samples.",
+        )
+        parser.add_argument(
+            "--progress-every-n-ticks",
+            type=int,
+            default=10,
+            help="Print one [step-response] progress line every N record ticks "
+            "(only when --baseline is set). Default 10.",
+        )
+        parser.add_argument(
+            "--abort-tcp-excursion-m",
+            type=float,
+            default=0.30,
+            help="Abort the run with exit code 2 if TCP wanders more than this "
+            'many metres from home in any single axis. Catches "moves like '
+            'crazy" instantly. Default 0.30 m.',
+        )
+        parser.add_argument(
+            "--abort-trial-score",
+            type=float,
+            default=5.0,
+            help="Abort the run with exit code 2 if the running per-trial score "
+            "exceeds this threshold for 5 consecutive samples (only when "
+            "--baseline is set). Catches sustained tracking divergence on "
+            "a candidate gain config. Default 5.0.",
+        )
+        parser.add_argument(
+            "--abort-on-nan",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Abort the run with exit code 2 on the first NaN in TCP / joint state. Default on.",
         )
         return parser
 
