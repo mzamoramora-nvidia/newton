@@ -28,9 +28,8 @@ import math
 import os
 
 import gymnasium as gym
-import torch
-
 import isaaclab_tasks  # noqa: F401
+import torch
 from isaaclab_tasks.utils import add_launcher_args, launch_simulation, resolve_task_config
 
 with contextlib.suppress(ImportError):
@@ -123,7 +122,9 @@ def _build_trials(pos_step_m: float = 0.05, rot_step_deg: float = 30.0) -> list[
     return trials
 
 
-def _compute_target_pose(trial: dict, home_pos: list[float], home_quat_xyzw: list[float]) -> tuple[list[float], list[float]]:
+def _compute_target_pose(
+    trial: dict, home_pos: list[float], home_quat_xyzw: list[float]
+) -> tuple[list[float], list[float]]:
     if trial["kind"] == "pos":
         target_pos = [home_pos[i] + trial["delta_vec"][i] for i in range(3)]
         return target_pos, list(home_quat_xyzw)

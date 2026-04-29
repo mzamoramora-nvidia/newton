@@ -31,11 +31,12 @@ import warp as wp
 import newton
 import newton.examples
 from newton.examples.robot.example_robot_panda_osc import (
-    Example as OSCExample,
     N_ARM_DOFS,
     N_ROBOT_DOFS,
 )
-
+from newton.examples.robot.example_robot_panda_osc import (
+    Example as OSCExample,
+)
 
 # Factory's published gains (factory_tasks_cfg.py / measured by the IsaacLab
 # probe at newton/examples/assets/factory_baseline/osc_isaaclab_steps.json).
@@ -451,8 +452,7 @@ class StepResponseExample(OSCExample):
             "trials": self._results,
         }
         out_name = self._step_response_args.output_name or (
-            f"osc_newton_steps_armscale{scale:g}_kd{kd:g}"
-            f"_kp{self._kp_vec[0]:g}-{self._kp_vec[3]:g}.json"
+            f"osc_newton_steps_armscale{scale:g}_kd{kd:g}_kp{self._kp_vec[0]:g}-{self._kp_vec[3]:g}.json"
         )
         out_path = os.path.join(OUTPUT_DIR, out_name)
         os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -522,7 +522,7 @@ class StepResponseExample(OSCExample):
         )
         # Per-axis kp/kd. Defaults to Newton-tuned values (kp_x=1500 boosts x
         # since Newton's URDF Jacobian is stiff in x at the Factory home).
-        for ax, default_kp in (('x', NEWTON_TUNED_KP[0]), ('y', NEWTON_TUNED_KP[1]), ('z', NEWTON_TUNED_KP[2])):
+        for ax, default_kp in (("x", NEWTON_TUNED_KP[0]), ("y", NEWTON_TUNED_KP[1]), ("z", NEWTON_TUNED_KP[2])):
             parser.add_argument(
                 f"--osc-kp-{ax}",
                 type=float,
@@ -546,8 +546,7 @@ class StepResponseExample(OSCExample):
             "--osc-kd-null",
             type=float,
             default=-1.0,
-            help="Nullspace derivative gain (damps redundant DOF velocity). "
-            "-1 keeps the parent example's value (5.0).",
+            help="Nullspace derivative gain (damps redundant DOF velocity). -1 keeps the parent example's value (5.0).",
         )
         parser.add_argument(
             "--lambda-weighted",
