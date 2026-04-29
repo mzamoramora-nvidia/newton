@@ -37,16 +37,20 @@ EE_BODY_INDEX = 11
 N_ARM_DOFS = 7
 N_DOFS_PER_WORLD = 9
 
+# IsaacLab Factory's deterministic post-IK task home (peg-insert, all
+# noise disabled). See newton/examples/assets/factory_baseline/
+# probe_joint_pos.py for how this was probed. Same values as
+# example_robot_panda_osc.py's INIT_ARM_Q_FACTORY_TASK_HOME.
 INIT_ARM_Q = (
-    -3.6802115e-03,
-    2.3901723e-02,
-    3.6804110e-03,
-    -2.3683236e00,
-    -1.2918962e-04,
-    2.3922248e00,
-    7.8549200e-01,
+    -0.5294972062110901,
+    0.5211741924285889,
+    0.5377357006072998,
+    -2.0401036739349365,
+    -0.41427168250083923,
+    2.4552853107452393,
+    -0.7210570573806763,
 )
-INIT_FINGER_Q = (0.05, 0.05)
+INIT_FINGER_Q = (0.04, 0.04)
 
 
 def _build_panda_model(device, world_count: int = 1):
@@ -353,7 +357,7 @@ def test_arm_torque_scatter_leaves_finger_dofs_untouched(test, device):
     wp.launch(
         scatter_arm_torque_to_joint_f_kernel,
         dim=(world_count, N_ARM_DOFS),
-        inputs=[osc.arm_torque, N_ARM_DOFS, N_DOFS_PER_WORLD],
+        inputs=[osc.arm_torque, osc.effort_limit, N_ARM_DOFS, N_DOFS_PER_WORLD],
         outputs=[control.joint_f],
         device=device,
     )

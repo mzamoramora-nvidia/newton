@@ -381,21 +381,34 @@ def map_wrench_to_arm_torque_kernel(
 @wp.kernel(enable_backward=False)
 def scatter_arm_torque_to_joint_f_kernel(
     arm_torque: wp.array2d[float],  # (world_count, n_arm_dofs)
+    effort_limit: wp.array[float],  # (n_arm_dofs,) per-DOF effort limit; <=0 disables
     n_arm_dofs: int,
     n_dofs_per_world: int,
     joint_f: wp.array[float],  # flat (world_count * n_dofs_per_world,) - actually total model DOFs
 ):
-    """Write the per-world arm torque into the flat joint_f array.
+    """Write per-world arm torque into the flat joint_f array, clamped to effort limits.
 
     joint_f layout matches joint_q: per-world DOFs laid out in sequence. Within
     each world, arm DOFs occupy indices 0 .. n_arm_dofs-1 of that world's slice.
     Other DOFs (gripper, free objects) are left untouched.
+
+    The clamp is critical: arm DOFs run in effort mode (joint_target_ke = 0), so
+    MuJoCo applies arbitrary joint_f torques without enforcing actuator limits. A
+    naive OSC can command thousands of N*m per joint near singularities and fly
+    the arm off; this kernel applies the effort_limit per DOF before writing.
     """
     w, d = wp.tid()
     if d >= n_arm_dofs:
         return
     flat_idx = w * n_dofs_per_world + d
-    joint_f[flat_idx] = arm_torque[w, d]
+    tau = arm_torque[w, d]
+    lim = effort_limit[d]
+    if lim > 0.0:
+        if tau > lim:
+            tau = lim
+        elif tau < -lim:
+            tau = -lim
+    joint_f[flat_idx] = tau
 
 
 @wp.kernel(enable_backward=False)
@@ -537,12 +550,45 @@ class OSCController:
         self.rot_err = wp.zeros(world_count, dtype=wp.vec3, device=self.device)
         self.wrench = wp.zeros((world_count, 6), dtype=float, device=self.device)
         self.arm_torque = wp.zeros((world_count, n_arm_dofs), dtype=float, device=self.device)
+        # Per-DOF effort limit for arm torques (clamped before write to joint_f).
+        # Defaults to FR3 datasheet values (87 N*m on joints 1-4, 12 N*m on 5-7).
+        # Override with set_effort_limit() if your robot differs.
+        self.effort_limit = wp.array(
+            [87.0] * 4 + [12.0] * 3, dtype=float, device=self.device
+        )
 
         # Nullspace state (phase 6). See `enable_nullspace` to toggle.
         self.enable_nullspace = False
         self.q_default = wp.zeros((world_count, n_arm_dofs), dtype=float, device=self.device)
         self.kp_null = 5.0  # scalar gain on (q_default - q)
         self.kd_null = 1.0  # scalar gain on -qd
+
+        # Lambda-weighted OSC: when True, the task-space PD wrench is
+        # multiplied by the task-space inertia Lambda = (J H^-1 J^T)^-1
+        # before being mapped to joint torques (tau = J^T Lambda (Kp e - Kd v)).
+        # This is the formulation used by IsaacLab's Factory env
+        # (factory_control.py: arm_mass_matrix_task = inv(J*inv(M)*J^T)).
+        # The False default keeps the simpler Khatib form tau = J^T (Kp e - Kd v).
+        self.lambda_weighted = False
+        # When True together with lambda_weighted, only the POSITION sub-block
+        # (3x3 top-left) of Lambda is applied; the rotation wrench passes
+        # through J^T unweighted. Tested empirically: this is *worse* than
+        # full Lambda, because the position/rotation cross-coupling captured
+        # by the off-diagonal Lambda blocks matters for multi-joint arms.
+        # Kept as a knob in case it helps a different robot/configuration.
+        self.lambda_position_only = False
+        # rtol for the SVD-pseudo-inverse of (J H^-1 J^T) when computing Lambda.
+        # Used when lambda_damping <= 0 (the "pinv" path). Singular values
+        # below rtol*max get zeroed, which kills the OSC's authority in
+        # poorly-conditioned task directions (e.g. Y when forward-extended).
+        self.lambda_rtol = 1e-3
+        # Damped least-squares regularization for Lambda: when > 0,
+        # Lambda = inv(JHJ^T + lambda_damping * I) instead of pinv. This
+        # bounds Lambda everywhere without truncating weak directions, so
+        # the OSC keeps (reduced) authority in near-singular directions.
+        # Pick relative to the smallest expected JHJ^T eigenvalue (~3e-3
+        # for our home pose); 1e-3 to 1e-2 is the practical range.
+        self.lambda_damping = 0.0
 
         # Pre-allocated outputs for Newton's eval_jacobian / eval_mass_matrix.
         # Without these the underlying calls would allocate a fresh wp.array
@@ -640,6 +686,55 @@ class OSCController:
         """
         wp.copy(self.q_default, q_default)
 
+    def _apply_lambda_weighted_pd(self, state) -> None:
+        """Compute arm_torque = J^T @ Lambda @ wrench (lambda-weighted PD).
+
+        Lambda = (J H^-1 J^T)^-1 is the task-space inertia matrix, with the
+        same regularized pinv treatment used in the nullspace path.
+        """
+        try:
+            import torch  # noqa: PLC0415
+        except ImportError:
+            wp.launch(
+                map_wrench_to_arm_torque_kernel,
+                dim=(self.world_count, self.n_arm_dofs),
+                inputs=[self.j_tcp, self.wrench, self.n_arm_dofs],
+                outputs=[self.arm_torque],
+                device=self.device,
+            )
+            return
+        self.view.eval_mass_matrix(
+            state, H=self.h_full, J=self.j_full, body_I_s=self._body_I_s, joint_S_s=self._joint_S_s
+        )
+        H_t = wp.to_torch(self.h_full)
+        H_arm = H_t[..., : self.n_arm_dofs, : self.n_arm_dofs]
+        J = wp.to_torch(self.j_tcp)  # (W, 6, 7)
+        wrench_t = wp.to_torch(self.wrench)  # (W, 6)
+        arm_torque_t = wp.to_torch(self.arm_torque)  # (W, 7), shared memory
+
+        H_inv = torch.linalg.pinv(H_arm, rtol=1e-3)
+        Jt = J.transpose(-2, -1)
+        JHJt = J @ H_inv @ Jt
+        if self.lambda_damping > 0.0:
+            eye_task = torch.eye(JHJt.shape[-1], device=JHJt.device, dtype=JHJt.dtype)
+            Lambda = torch.linalg.solve(JHJt + self.lambda_damping * eye_task, eye_task)
+        else:
+            Lambda = torch.linalg.pinv(JHJt, rtol=self.lambda_rtol)
+        if self.lambda_position_only:
+            # Apply Lambda only to the position sub-wrench (first 3); pass the
+            # rotation wrench through unweighted. Rotation modes typically have
+            # high JHJ^T eigenvalues -> small Lambda_rot -> the OSC's effective
+            # rotation authority would otherwise be too low to overcome the
+            # wrist effort cap before any tracking happens.
+            lambda_pos = Lambda[..., :3, :3]
+            new_F = (lambda_pos @ wrench_t[..., :3].unsqueeze(-1)).squeeze(-1)
+            lambda_wrench = torch.cat([new_F, wrench_t[..., 3:]], dim=-1)
+        else:
+            lambda_wrench = (Lambda @ wrench_t.unsqueeze(-1)).squeeze(-1)  # (W, 6)
+        new_arm_torque = (Jt @ lambda_wrench.unsqueeze(-1)).squeeze(-1)  # (W, 7)
+        arm_torque_t.copy_(new_arm_torque)
+        torch.cuda.synchronize()
+
     def _add_nullspace_torque(self, state) -> None:
         """Add Khatib-style nullspace centering to ``arm_torque`` (PyTorch path).
 
@@ -673,9 +768,21 @@ class OSCController:
 
         q_default = wp.to_torch(self.q_default)
 
-        H_inv = torch.linalg.inv(H_arm)
+        # SVD-based pseudo-inverses with an explicit rtol floor so the
+        # nullspace projection stays well-defined - and produces bounded
+        # output - when the arm passes through (or near) a kinematic
+        # singularity or when joints have near-zero inertia. The default
+        # rtol (machine epsilon) lets near-zero singular values blow up
+        # into enormous matrix entries, producing torque spikes that
+        # destabilize the OSC; clamping at 1e-3 damps those modes out.
+        # IsaacLab's Factory IK helper uses an explicit min_singular_value
+        # for the same reason (factory_control.py:172-180). hermitian=False
+        # (default) keeps the full SVD path - hermitian=True routes through
+        # eigh, which raises on ill-conditioned matrices instead of
+        # gracefully damping them.
+        H_inv = torch.linalg.pinv(H_arm, rtol=1e-3)
         Jt = J.transpose(-2, -1)
-        Lambda = torch.linalg.inv(J @ H_inv @ Jt)
+        Lambda = torch.linalg.pinv(J @ H_inv @ Jt, rtol=1e-3)
         Jbar = Lambda @ J @ H_inv  # (W, 6, 7)
         # Cached identity matrix - allocated once on first call.
         if self._torch_eye_arm is None:
@@ -727,13 +834,21 @@ class OSCController:
             device=self.device,
         )
         # 3. tau_arm = J_tcp^T @ wrench  (per world, n_arm_dofs entries).
-        wp.launch(
-            map_wrench_to_arm_torque_kernel,
-            dim=(self.world_count, self.n_arm_dofs),
-            inputs=[self.j_tcp, self.wrench, self.n_arm_dofs],
-            outputs=[self.arm_torque],
-            device=self.device,
-        )
+        # Lambda-weighted variant: tau_arm = J_tcp^T @ Lambda @ wrench.
+        if self.lambda_weighted:
+            if state is None:
+                raise RuntimeError(
+                    "compute_torques: state must be provided when lambda_weighted=True"
+                )
+            self._apply_lambda_weighted_pd(state)
+        else:
+            wp.launch(
+                map_wrench_to_arm_torque_kernel,
+                dim=(self.world_count, self.n_arm_dofs),
+                inputs=[self.j_tcp, self.wrench, self.n_arm_dofs],
+                outputs=[self.arm_torque],
+                device=self.device,
+            )
         # 3b. Optional Khatib nullspace centering - adds onto arm_torque.
         if self.enable_nullspace:
             if state is None:
@@ -745,7 +860,7 @@ class OSCController:
         wp.launch(
             scatter_arm_torque_to_joint_f_kernel,
             dim=(self.world_count, self.n_arm_dofs),
-            inputs=[self.arm_torque, self.n_arm_dofs, self.n_dofs_per_world],
+            inputs=[self.arm_torque, self.effort_limit, self.n_arm_dofs, self.n_dofs_per_world],
             outputs=[control.joint_f],
             device=self.device,
         )

@@ -57,16 +57,50 @@ N_FINGER_DOFS = 2
 N_ROBOT_DOFS = N_ARM_DOFS + N_FINGER_DOFS
 
 # Initial joint configuration (radians). Same as nut-bolt branch.
-INIT_ARM_Q = (
-    -3.6802115e-03,
-    2.3901723e-02,
-    3.6804110e-03,
-    -2.3683236e00,
-    -1.2918962e-04,
-    2.3922248e00,
-    7.8549200e-01,
+# Two named home poses are available:
+#
+#   INIT_ARM_Q_FACTORY_SEED — the joint values published in
+#       factory_env_cfg.py (panda_joint1..7). This is the IK *seed* pose
+#       Factory uses before running its reset-time IK; the arm doesn't
+#       actually live here during a task.
+#
+#   INIT_ARM_Q_FACTORY_TASK_HOME — the deterministic post-IK joint config
+#       that Factory's reset settles to (peg-insert task, all noise
+#       disabled). This is the actual home pose the OSC step-response
+#       baseline was measured at. Captured by the IsaacLab probe in
+#       newton/examples/assets/factory_baseline/probe_joint_pos.py and
+#       mirrored to factory_joint_pos.json.
+#
+# Newton's URDF and Factory's USD share identical joint axes and link
+# offsets through panda_hand, so these radian values transfer directly
+# with no sign flips.
+INIT_ARM_Q_FACTORY_SEED = (
+    0.00871,
+    -0.10368,
+    -0.00794,
+    -1.49139,
+    -0.00083,
+    1.38774,
+    0.0,
 )
-INIT_FINGER_Q = (0.05, 0.05)
+INIT_ARM_Q_FACTORY_TASK_HOME = (
+    # Captured by factory_baseline/osc_step_response.py at the moment it
+    # records home_pos/home_quat for the baseline trajectories. With all
+    # IK randomization disabled and 8 settle steps after env.reset(), this
+    # is the exact pose every IsaacLab trial starts from in
+    # osc_isaaclab_steps.json.
+    -0.5294972062110901,
+    0.5211741924285889,
+    0.5377357006072998,
+    -2.0401036739349365,
+    -0.41427168250083923,
+    2.4552853107452393,
+    -0.7210570573806763,
+)
+# Default to the post-IK task home so Newton's home matches the pose at
+# which Factory's OSC step-response baseline was recorded.
+INIT_ARM_Q = INIT_ARM_Q_FACTORY_TASK_HOME
+INIT_FINGER_Q = (0.04, 0.04)
 
 
 class Example:
@@ -130,17 +164,16 @@ class Example:
 
         # Hardcoded MuJoCo solver: this example depends on `mujoco:gravcomp`
         # and `mujoco:jnt_actgravcomp` which are honored only by SolverMuJoCo.
-        # njmax/nconmax are per-world contact budgets. 1000 matches the
-        # panda-nut-bolt example and gives plenty of headroom for the simple
-        # arm-on-table scene here.
+        # njmax/nconmax are per-world contact budgets. 2000 keeps headroom
+        # for aggressive OSC trajectories that briefly graze the table.
         self.solver = newton.solvers.SolverMuJoCo(
             self.model,
             use_mujoco_contacts=False,
             solver="newton",
             integrator="implicitfast",
             cone="elliptic",
-            njmax=1000,
-            nconmax=1000,
+            njmax=4000,
+            nconmax=4000,
             iterations=15,
             ls_iterations=100,
             impratio=1000.0,
@@ -163,7 +196,18 @@ class Example:
         # scripts/probe_fingertip.py probe in IsaacLab measured the 0.1121
         # at the Franka init pose; subtracting the Newton URDF's 0.1035
         # gives this delta.
-        tcp_offset_local = wp.transform(wp.vec3(0.0, 0.0, 0.0086), wp.quat_identity())
+        # Align Newton's TCP frame with Factory's panda_fingertip_centered.
+        # Factory's USD bakes a frame rotation into panda_hand: R = [[0.707,
+        # 0.707, 0], [0.707, -0.707, 0], [0, 0, -1]] (Z flipped + 45 deg about
+        # the diagonal). Newton's fr3_hand_tcp link has identity orientation
+        # in URDF, so the TCP-frame X/Y/Z axes are oriented differently. The
+        # quat below (xyzw 0.9239, 0.3827, 0, 0) is R-as-quaternion. The
+        # +0.112m translation is the fingertip offset from panda_hand origin,
+        # expressed in USD-hand-frame.
+        tcp_offset_local = wp.transform(
+            wp.vec3(0.0, 0.0, 0.112),
+            wp.quat(0.9238795, 0.3826834, 0.0, 0.0),
+        )
 
         self.osc = OSCController(
             model=self.model,
