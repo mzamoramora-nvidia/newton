@@ -84,6 +84,30 @@ class RobotProfile:
             Z-flip + 45-deg yaw baked into panda_hand) so the same task
             kernels produce the same physical gripper orientation on
             either robot.
+        gripper_sdf_max_resolution: max SDF grid dimension used when
+            building the hydroelastic SDF on the finger/hand mesh shapes.
+            URDF (with ``parse_visuals_as_colliders=True``) emits two
+            small mesh shapes per finger (body + ~18 mm pad), so 64
+            already gives sub-millimeter voxel size on the pad. USD
+            ships a single combined finger collision mesh (bbox ~54 mm),
+            so 64 voxels span ~0.84 mm and smooth out the pad texture
+            — bump this for USD so the gripper's contact surface
+            resolves the grip bumps and stops the nut from squirting
+            out under load.
+        tcp_z_offset: world-frame Z correction [m] added to the IK
+            position target on grasp/place anchors (APPROACH,
+            REFINE_APPROACH, MOVE_TO_BOLT, REFINE_PLACE, SCREW_*). Both
+            assets drive their own TCP body to the target, but the two
+            TCP bodies sit at different points along the gripper axis:
+            URDF's ``fr3_hand_tcp`` is at the gripper-opening center,
+            while USD's ``panda_fingertip_centered`` is at the fingertip
+            tips (~8.6 mm farther from the hand body). Without a
+            correction, commanding the same world Z puts USD's gripper
+            opening 8.6 mm above the URDF case, so the gripper closes on
+            the top edge of the nut instead of around it. The offset is
+            only applied to anchor-based targets; HOLD-style branches
+            (GRASP/STABILIZE/LIFT/HOME/...) use ``ee_pos_prev`` which
+            already encodes the asset's TCP frame.
     """
 
     kind: str
@@ -97,6 +121,8 @@ class RobotProfile:
     init_arm_q: tuple
     init_finger_q: tuple
     ik_target_correction_xyzw: tuple
+    tcp_z_offset: float
+    gripper_sdf_max_resolution: int
 
 
 # Newton URDF profile.
@@ -122,8 +148,10 @@ URDF_PROFILE = RobotProfile(
     # Body 0 = base, 1 = fr3_link0, 2-8 = fr3_link1..7,
     # 9-11 = fr3_link8/fr3_hand/fr3_hand_tcp, 12-13 = fingers.
     init_arm_q=_URDF_INIT_ARM_Q,
-    init_finger_q=(0.05, 0.05),
+    init_finger_q=(0.04, 0.04),
     ik_target_correction_xyzw=(0.0, 0.0, 0.0, 1.0),  # identity
+    tcp_z_offset=0.0,
+    gripper_sdf_max_resolution=64,
 )
 
 # IsaacLab Factory USD profile. The IK target correction is the
@@ -164,6 +192,14 @@ USD_PROFILE = RobotProfile(
     # bodies is absorbed by the joint angles. So no IK target correction
     # is needed - the same world-frame target works for both assets.
     ik_target_correction_xyzw=(0.0, 0.0, 0.0, 1.0),
+    # panda_fingertip_centered sits 0.1121 m below panda_hand;
+    # fr3_hand_tcp sits 0.1035 m below fr3_hand. Lower the world Z
+    # target by the 8.6 mm difference so USD's gripper opening lines up
+    # at the same physical height as URDF's would.
+    tcp_z_offset=-0.0086,
+    # 3x finer than URDF to compensate for USD's combined (vs URDF's
+    # split body+pad) finger collision mesh — see field docstring.
+    gripper_sdf_max_resolution=192,
 )
 
 
@@ -195,7 +231,13 @@ def _resolve_robot_profile(kind: str) -> RobotProfile:
 SDF_MAX_RESOLUTION_NUT_BOLT = 256
 SDF_NARROW_BAND_NUT_BOLT = (-0.005, 0.005)
 
-# SDF parameters for gripper/table meshes
+# SDF parameters for gripper/table meshes. The default (URDF) value of 64
+# gives ~0.28 mm voxels over URDF's standalone gripper-pad mesh
+# (bbox ~18 mm). USD ships a single combined finger collision mesh
+# (bbox ~54 mm), so the same 64-cube grid gives ~0.84 mm voxels over the
+# pad — too coarse to resolve the rubber-pad grip texture, which lets the
+# nut slip during screwing. ``RobotProfile.gripper_sdf_max_resolution``
+# bumps it for USD.
 SDF_MAX_RESOLUTION_GRIPPER = 64
 SDF_NARROW_BAND_GRIPPER = (-0.01, 0.01)
 
@@ -216,7 +258,7 @@ TASK_OFFSET_RETRACT = wp.vec3(0.0, 0.0, 0.10)
 
 # Grasp geometry
 GRASP_YAW_OFFSET_DEG = 30.0  # gripper yaw relative to nut, about Z
-GRIPPER_OPEN_POS = 0.06  # per-finger full-open position [m]
+GRIPPER_OPEN_POS = 0.04  # per-finger full-open position [m]
 GRIPPER_KE = 100.0  # must match joint_target_ke for finger joints
 
 
@@ -416,6 +458,11 @@ def set_target_pose_kernel(
     # correction) and panda_fingertip_centered (USD, R = Rz(pi/4) Rx(pi)
     # baked-in convention).
     ik_target_correction: wp.quat,
+    # World-frame Z correction [m] added to anchor-based position targets
+    # (APPROACH/REFINE_APPROACH/MOVE_TO_BOLT/REFINE_PLACE/SCREW_*) to
+    # account for the per-asset offset between the TCP body and the
+    # gripper-opening center. URDF: 0.0; USD: -0.0086.
+    tcp_z_offset: float,
     # outputs
     ee_pos_target: wp.array[wp.vec3],
     ee_pos_target_interpolated: wp.array[wp.vec3],
@@ -456,12 +503,12 @@ def set_target_pose_kernel(
 
     if task == TaskType.APPROACH.value:
         # Move above the nut, align gripper offset by grasp_yaw_offset about Z
-        ee_pos_target[tid] = nut_pos + task_offset_approach
+        ee_pos_target[tid] = nut_pos + task_offset_approach + wp.vec3(0.0, 0.0, tcp_z_offset)
         yaw_rot = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), grasp_yaw_offset)
         ee_quat_target = yaw_rot * urdf_down * wp.quat_inverse(nut_quat)
     elif task == TaskType.REFINE_APPROACH.value:
         # Descend to nut grasping height
-        ee_pos_target[tid] = nut_pos + wp.vec3(0.0, 0.0, grasping_z_offset)
+        ee_pos_target[tid] = nut_pos + wp.vec3(0.0, 0.0, grasping_z_offset + tcp_z_offset)
         ee_quat_target = ee_quat_prev
     elif task == TaskType.GRASP.value:
         # Close gripper around nut
@@ -480,19 +527,19 @@ def set_target_pose_kernel(
         t_gripper = 1.0
     elif task == TaskType.MOVE_TO_BOLT.value:
         # Move above the bolt
-        ee_pos_target[tid] = bolt_place_pos + task_offset_bolt_approach
+        ee_pos_target[tid] = bolt_place_pos + task_offset_bolt_approach + wp.vec3(0.0, 0.0, tcp_z_offset)
         ee_quat_target = urdf_down
         t_gripper = 1.0
     elif task == TaskType.REFINE_PLACE.value:
         # Lower nut onto bolt top
-        ee_pos_target[tid] = bolt_place_pos + task_offset_place
+        ee_pos_target[tid] = bolt_place_pos + task_offset_place + wp.vec3(0.0, 0.0, tcp_z_offset)
         ee_quat_target = urdf_down
         t_gripper = 1.0
     elif task == TaskType.SCREW_ROTATE.value:
         # XY stays locked on the bolt axis (don't follow nut XY drift — that
         # would let the nut keep walking off the bolt). Z follows the nut's
         # current height so the arm descends with the threading.
-        ee_pos_target[tid] = wp.vec3(bolt_place_pos[0], bolt_place_pos[1], nut_pos[2])
+        ee_pos_target[tid] = wp.vec3(bolt_place_pos[0], bolt_place_pos[1], nut_pos[2] + tcp_z_offset)
         # Clockwise-from-above (negative about +Z) drives a right-handed thread
         # downward. The previous sign was counterclockwise — actively unscrewing.
         yaw_step = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), -screw_angle)
@@ -501,7 +548,9 @@ def set_target_pose_kernel(
     elif task == TaskType.SCREW_REGRIP.value:
         # Fully open gripper, lift slightly, rotate yaw back to the pre-rotate
         # angle. XY stays locked on the bolt axis.
-        ee_pos_target[tid] = wp.vec3(bolt_place_pos[0], bolt_place_pos[1], nut_pos[2] + screw_regrip_z_offset)
+        ee_pos_target[tid] = wp.vec3(
+            bolt_place_pos[0], bolt_place_pos[1], nut_pos[2] + screw_regrip_z_offset + tcp_z_offset
+        )
         yaw_step = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), screw_angle)
         ee_quat_target = yaw_step * ee_quat_prev
         t_gripper = 0.0
@@ -1171,23 +1220,20 @@ class Example:
         init_q = list(profile.init_arm_q)
         finger_q = list(profile.init_finger_q)
         builder.joint_q[:9] = [*init_q, *finger_q]
-        builder.joint_target_pos[:9] = [*init_q, 1.0, 1.0]
+        builder.joint_target_pos[:9] = [*init_q, *finger_q]
 
         # Joint gains. With gravity compensation enabled on both assets
         # (mujoco:jnt_actgravcomp + mujoco:gravcomp below), the gravity
         # load is removed and only the inertial response matters. The
-        # PD gains tuned for the URDF then transfer to USD as a
-        # reasonable starting point - USD's link1 has ~30x larger Iyy
-        # than the URDF, so the same kp gives a slower closed-loop
-        # response on USD, but it still tracks. Joint armature is
-        # skipped for USD: the USD file already encodes its own per-joint
-        # inertia regularization, and the URDF-tuned 0.3/0.11/0.15
-        # values would compound on top.
+        # PD gains tuned for the URDF transfer to USD as a reasonable
+        # starting point - USD's link1 has ~30x larger Iyy than the
+        # URDF, so the same kp gives a slower closed-loop response on
+        # USD, but it still tracks. The same armature schedule works
+        # for both assets too.
         builder.joint_target_ke[:9] = [4500, 4500, 3500, 3500, 2000, 2000, 2000, 100, 100]
         builder.joint_target_kd[:9] = [450, 450, 350, 350, 200, 200, 200, 10, 10]
         builder.joint_effort_limit[:9] = [87, 87, 87, 87, 12, 12, 12, 100, 100]
-        if profile.kind == "urdf":
-            builder.joint_armature[:9] = [0.3] * 4 + [0.11] * 3 + [0.15] * 2
+        builder.joint_armature[:9] = [0.3] * 4 + [0.11] * 3 + [0.15] * 2
 
         # Force POSITION-mode actuators on the 9 robot DOFs. USD's parser
         # decides actuator mode from the file's PhysicsDrive at load time:
@@ -1255,6 +1301,14 @@ class Example:
         # URDF (with parse_visuals_as_colliders=True) emits a single MESH
         # per body. Treat both GeoType.MESH and GeoType.CONVEX_MESH as
         # candidates so the same code path covers both assets.
+        #
+        # We also force-overwrite shape_material_kh on every finger/hand
+        # mesh: the URDF parser clones default_shape_cfg (so kh = finger_kh
+        # already), but the USD parser allocates a fresh ShapeConfig per
+        # shape and never reads kh from default_shape_cfg, leaving USD's
+        # finger collisions at the ShapeConfig class default of 1e10
+        # (10x softer than URDF). Writing kh here keeps the two assets'
+        # contact stiffness in lockstep.
         _MESHLIKE = (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH)
         non_finger_shape_indices = []
         for shape_idx, body_idx in enumerate(builder.shape_body):
@@ -1267,11 +1321,12 @@ class Example:
                         builder.shape_source[shape_idx] = mesh
                         builder.shape_scale[shape_idx] = (1.0, 1.0, 1.0)
                     mesh.build_sdf(
-                        max_resolution=SDF_MAX_RESOLUTION_GRIPPER,
+                        max_resolution=profile.gripper_sdf_max_resolution,
                         narrow_band_range=SDF_NARROW_BAND_GRIPPER,
                         margin=shape_cfg.gap,
                     )
                 builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
+                builder.shape_material_kh[shape_idx] = self.finger_kh
             elif body_idx not in finger_body_indices:
                 non_finger_shape_indices.append(shape_idx)
 
@@ -1426,6 +1481,9 @@ class Example:
         # IK-target frame correction. URDF: identity. USD: Rz(pi/4) Rx(pi).
         cx, cy, cz, cw = self.robot_profile.ik_target_correction_xyzw
         self.ik_target_correction = wp.quat(cx, cy, cz, cw)
+        # World-frame Z offset between the asset's TCP body and the
+        # gripper-opening center, used by anchor-based target branches.
+        self.tcp_z_offset = float(self.robot_profile.tcp_z_offset)
 
     def set_joint_targets(self):
         wp.launch(
@@ -1458,6 +1516,7 @@ class Example:
                 self.nut_body_index,
                 self.num_bodies_per_world,
                 self.ik_target_correction,
+                self.tcp_z_offset,
             ],
             outputs=[
                 self.ee_pos_target,
