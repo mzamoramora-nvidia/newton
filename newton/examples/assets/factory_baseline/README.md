@@ -10,6 +10,19 @@ was measured.
 
 ## Files
 
+### `factory_joint_pos.json`
+
+Output of `probe_joint_pos.py`. Resets Factory's peg-insert env with **all
+randomization noise disabled** (so the post-reset pose is deterministic),
+runs a few settle steps to let Factory's IK converge, and dumps the
+resulting joint angles plus fingertip world pose. The post-IK joint
+values are baked into Newton's example as
+`INIT_ARM_Q_FACTORY_TASK_HOME` (in `example_robot_panda_osc.py` /
+`example_robot_panda_compare.py`) so Newton's home matches the pose at
+which `osc_isaaclab_steps.json` was recorded - any apples-to-apples
+step-response comparison should set Newton's `INIT_ARM_Q` to this
+constant.
+
 ### `factory_tcp_probe.json`
 
 Output of `probe_fingertip.py`. Sets the Factory env to a few test
@@ -44,6 +57,23 @@ trial_ticks      = 60            # 4 s of data per trial
 Each trial entry contains the step target, summary metrics
 (`rise_time_s`, `settling_time_s`, `overshoot_mm`, `final_pos_err_mm`,
 `final_rot_err_deg`), and the full per-tick trajectory.
+
+### `probe_joint_pos.py`
+
+Companion to `factory_joint_pos.json`. Drops into IsaacLab's `scripts/`
+directory and runs as:
+
+```bash
+cd <IsaacLab>
+./isaaclab.sh -p scripts/probe_joint_pos.py
+```
+
+Disables Factory's IK randomization (`hand_init_pos_noise`,
+`hand_init_orn_noise`, `fixed_asset_init_pos_noise`,
+`fixed_asset_init_orn_range_deg`) so the post-reset pose is
+deterministic, runs eight zero-action settle steps, and writes the
+resulting joint config and fingertip world pose to
+`<IsaacLab>/scripts/factory_joint_pos.json`.
 
 ### `probe_fingertip.py`
 

@@ -205,6 +205,14 @@ def main():
 
     env_cfg, _ = resolve_task_config(args_cli.task, args_cli.agent)
     env_cfg.scene.num_envs = 1
+    # Disable randomization so the post-reset task home is deterministic
+    # and step-response trajectories are repeatable for benchmarking.
+    env_cfg.task.hand_init_pos_noise = [0.0, 0.0, 0.0]
+    env_cfg.task.hand_init_orn_noise = [0.0, 0.0, 0.0]
+    if hasattr(env_cfg.task, "fixed_asset_init_pos_noise"):
+        env_cfg.task.fixed_asset_init_pos_noise = [0.0, 0.0, 0.0]
+    if hasattr(env_cfg.task, "fixed_asset_init_orn_range_deg"):
+        env_cfg.task.fixed_asset_init_orn_range_deg = 0.0
 
     with launch_simulation(env_cfg, args_cli):
         env = gym.make(args_cli.task, cfg=env_cfg)
@@ -218,13 +226,24 @@ def main():
         control_dt = float(physics_dt * decimation)
         print(f"[step] control_dt = {control_dt:.4f} s ({1.0 / control_dt:.1f} Hz), decimation = {decimation}")
 
+        # Settle so the IK driven inside reset has converged before we
+        # record the home pose. With noise disabled this also gives a
+        # deterministic home that downstream Newton runs can match.
+        for _ in range(8):
+            env.step(torch.zeros(env.action_space.shape, device=device))
+
         # Refresh intermediate values so fingertip_midpoint_pos is current.
         u._compute_intermediate_values(dt=physics_dt)
         home_pos = u.fingertip_midpoint_pos[0].cpu().tolist()
         home_quat_wxyz = u.fingertip_midpoint_quat[0].cpu().tolist()
         home_quat_xyzw = _wxyz_to_xyzw(home_quat_wxyz)
+        # Also capture the actual settled joint config so Newton can
+        # initialize at the identical pose.
+        home_joint_pos = u._robot.data.joint_pos.torch[0].cpu().tolist()
+        home_joint_names = list(u._robot.joint_names)
         print(f"[step] home_pos (m) = {home_pos}")
         print(f"[step] home_quat (xyzw) = {home_quat_xyzw}")
+        print(f"[step] home_joint_pos = {home_joint_pos}")
 
         # Cache home tensors for the return-to-home phase.
         home_pos_t = torch.tensor(home_pos, device=device).unsqueeze(0)
@@ -247,6 +266,8 @@ def main():
             "rot_step_deg": args_cli.rot_step_deg,
             "home_pos": home_pos,
             "home_quat_xyzw": home_quat_xyzw,
+            "home_joint_pos": home_joint_pos,
+            "home_joint_names": home_joint_names,
             "task_prop_gains": task_prop_gains,
             "task_deriv_gains": task_deriv_gains,
             "trials": [],
