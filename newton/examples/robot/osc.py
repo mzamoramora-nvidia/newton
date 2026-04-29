@@ -553,9 +553,7 @@ class OSCController:
         # Per-DOF effort limit for arm torques (clamped before write to joint_f).
         # Defaults to FR3 datasheet values (87 N*m on joints 1-4, 12 N*m on 5-7).
         # Override with set_effort_limit() if your robot differs.
-        self.effort_limit = wp.array(
-            [87.0] * 4 + [12.0] * 3, dtype=float, device=self.device
-        )
+        self.effort_limit = wp.array([87.0] * 4 + [12.0] * 3, dtype=float, device=self.device)
 
         # Nullspace state (phase 6). See `enable_nullspace` to toggle.
         self.enable_nullspace = False
@@ -837,9 +835,7 @@ class OSCController:
         # Lambda-weighted variant: tau_arm = J_tcp^T @ Lambda @ wrench.
         if self.lambda_weighted:
             if state is None:
-                raise RuntimeError(
-                    "compute_torques: state must be provided when lambda_weighted=True"
-                )
+                raise RuntimeError("compute_torques: state must be provided when lambda_weighted=True")
             self._apply_lambda_weighted_pd(state)
         else:
             wp.launch(
