@@ -95,18 +95,6 @@ _MESH_SHAPES = frozenset(
     }
 )
 
-# Builders for the primitive (non-mesh-asset) object shapes. Each entry takes the
-# per-world half-size and returns a ``newton.Mesh`` -- we convert primitives to
-# meshes so every world ends up with the same shape type, which the MuJoCo
-# solver requires in ``separate_worlds=True`` mode.
-_PRIMITIVE_MESH_FACTORIES = {
-    ObjectShape.BOX: lambda hs: newton.Mesh.create_box(hs, hs, hs, compute_inertia=False),
-    ObjectShape.SPHERE: lambda hs: newton.Mesh.create_sphere(hs, compute_inertia=False),
-    ObjectShape.CYLINDER: lambda hs: newton.Mesh.create_cylinder(hs, hs, up_axis=newton.Axis.X, compute_inertia=False),
-    ObjectShape.CAPSULE: lambda hs: newton.Mesh.create_capsule(hs, hs, up_axis=newton.Axis.X, compute_inertia=False),
-    ObjectShape.ELLIPSOID: lambda hs: newton.Mesh.create_ellipsoid(hs * 2.0, hs, hs, compute_inertia=False),
-}
-
 
 class CollisionMode(IntEnum):
     MUJOCO = 0
@@ -126,261 +114,6 @@ class TaskType(IntEnum):
 
 NUM_TASKS = len(TaskType)
 TASK_NAMES = [t.name for t in TaskType]
-
-
-@wp.func
-def s_curve_profile(t: float, T: float, ramp_fraction: float) -> float:
-    """S-curve trapezoidal position profile, normalized to [0, 1]."""
-    t = wp.clamp(t, 0.0, T)
-    f = wp.clamp(ramp_fraction, 0.01, 0.5)
-    t_r = f * T
-    v_max = 1.0 / (T - t_r)
-
-    if t < t_r:
-        return v_max * (t * 0.5 - t_r / (2.0 * wp.pi) * wp.sin(wp.pi * t / t_r))
-    elif t < T - t_r:
-        p1_end = v_max * t_r * 0.5
-        return p1_end + v_max * (t - t_r)
-    else:
-        t_decel = t - (T - t_r)
-        p12_end = v_max * t_r * 0.5 + v_max * (T - 2.0 * t_r)
-        return p12_end + v_max * (t_decel * 0.5 + t_r / (2.0 * wp.pi) * wp.sin(wp.pi * t_decel / t_r))
-
-
-def _load_mesh_asset_no_sdf(asset_path, prim_path):
-    """Load a USD mesh asset with scale baked in. SDF built later per-world."""
-    stage = Usd.Stage.Open(str(asset_path / "model.usda"))
-    prim = stage.GetPrimAtPath(prim_path)
-    mesh = newton.usd.get_mesh(prim, load_normals=True, face_varying_normal_conversion="vertex_splitting")
-    parent_prim = stage.GetPrimAtPath("/root/Model")
-    scale = np.asarray(newton.usd.get_scale(parent_prim), dtype=np.float32)
-    if not np.allclose(scale, 1.0):
-        mesh = mesh.copy(vertices=mesh.vertices * scale, recompute_inertia=True)
-    return mesh
-
-
-# ---- LEGO brick mesh generation ----
-
-
-def _lego_cylinder_mesh(radius, height, segments, cx=0.0, cy=0.0, cz=0.0, bottom_cap=True):
-    n = segments
-    angles = np.linspace(0, 2 * np.pi, n, endpoint=False)
-    cos_a, sin_a = np.cos(angles), np.sin(angles)
-    ring_x = cx + radius * cos_a
-    ring_y = cy + radius * sin_a
-    verts = []
-    faces = []
-    side_bot = np.column_stack([ring_x, ring_y, np.full(n, cz)]).astype(np.float32)
-    side_top = np.column_stack([ring_x, ring_y, np.full(n, cz + height)]).astype(np.float32)
-    verts.append(side_bot)
-    verts.append(side_top)
-    for i in range(n):
-        j = (i + 1) % n
-        faces.append([i, n + j, n + i])
-        faces.append([i, j, n + j])
-    off_top = 2 * n
-    cap_top_ring = np.column_stack([ring_x, ring_y, np.full(n, cz + height)]).astype(np.float32)
-    cap_top_center = np.array([[cx, cy, cz + height]], dtype=np.float32)
-    verts.append(cap_top_ring)
-    verts.append(cap_top_center)
-    tc = off_top + n
-    for i in range(n):
-        j = (i + 1) % n
-        faces.append([tc, off_top + i, off_top + j])
-    if bottom_cap:
-        off_bot = off_top + n + 1
-        cap_bot_ring = np.column_stack([ring_x, ring_y, np.full(n, cz)]).astype(np.float32)
-        cap_bot_center = np.array([[cx, cy, cz]], dtype=np.float32)
-        verts.append(cap_bot_ring)
-        verts.append(cap_bot_center)
-        bc = off_bot + n
-        for i in range(n):
-            j = (i + 1) % n
-            faces.append([bc, off_bot + j, off_bot + i])
-    return np.vstack(verts), np.array(faces, dtype=np.int32)
-
-
-def _lego_combine_meshes(mesh_list):
-    all_v, all_f, off = [], [], 0
-    for v, f in mesh_list:
-        all_v.append(v)
-        all_f.append(f + off)
-        off += len(v)
-    return np.vstack(all_v).astype(np.float32), np.vstack(all_f).astype(np.int32)
-
-
-def _lego_make_shell_mesh(nx, ny):
-    ox = nx * _LEGO_PITCH / 2.0
-    oy = ny * _LEGO_PITCH / 2.0
-    inx = ox - _LEGO_WALL_THICKNESS
-    iny = oy - _LEGO_WALL_THICKNESS
-    H = _LEGO_BRICK_HEIGHT
-    T = _LEGO_TOP_THICKNESS
-    v = np.array(
-        [
-            [-ox, -oy, 0],
-            [+ox, -oy, 0],
-            [+ox, +oy, 0],
-            [-ox, +oy, 0],
-            [-ox, -oy, H],
-            [+ox, -oy, H],
-            [+ox, +oy, H],
-            [-ox, +oy, H],
-            [-inx, -iny, 0],
-            [+inx, -iny, 0],
-            [+inx, +iny, 0],
-            [-inx, +iny, 0],
-            [-inx, -iny, H - T],
-            [+inx, -iny, H - T],
-            [+inx, +iny, H - T],
-            [-inx, +iny, H - T],
-        ],
-        dtype=np.float32,
-    )
-    f = np.array(
-        [
-            [4, 5, 6],
-            [4, 6, 7],
-            [0, 1, 5],
-            [0, 5, 4],
-            [2, 3, 7],
-            [2, 7, 6],
-            [3, 0, 4],
-            [3, 4, 7],
-            [1, 2, 6],
-            [1, 6, 5],
-            [0, 8, 9],
-            [0, 9, 1],
-            [1, 9, 10],
-            [1, 10, 2],
-            [2, 10, 11],
-            [2, 11, 3],
-            [3, 11, 8],
-            [3, 8, 0],
-            [9, 8, 12],
-            [9, 12, 13],
-            [11, 10, 14],
-            [11, 14, 15],
-            [8, 11, 15],
-            [8, 15, 12],
-            [10, 9, 13],
-            [10, 13, 14],
-            [12, 15, 14],
-            [12, 14, 13],
-        ],
-        dtype=np.int32,
-    )
-    return v, f
-
-
-def _lego_make_brick_mesh(nx=4, ny=2):
-    shell_v, shell_f = _lego_make_shell_mesh(nx, ny)
-    seg = _LEGO_CYLINDER_SEGMENTS
-    stud_meshes = []
-    for i in range(nx):
-        for j in range(ny):
-            sx = (i - (nx - 1) / 2.0) * _LEGO_PITCH
-            sy = (j - (ny - 1) / 2.0) * _LEGO_PITCH
-            stud_meshes.append(
-                _lego_cylinder_mesh(
-                    _LEGO_STUD_RADIUS,
-                    _LEGO_STUD_HEIGHT,
-                    seg,
-                    cx=sx,
-                    cy=sy,
-                    cz=_LEGO_BRICK_HEIGHT,
-                    bottom_cap=False,
-                )
-            )
-    tube_meshes = []
-    if ny == 2:
-        tube_height = _LEGO_BRICK_HEIGHT - _LEGO_TOP_THICKNESS
-        for i in range(nx - 1):
-            tx = (i - (nx - 2) / 2.0) * _LEGO_PITCH
-            tube_meshes.append(_lego_cylinder_mesh(_LEGO_TUBE_OUTER_RADIUS, tube_height, seg, cx=tx, cy=0.0, cz=0.0))
-    v, f = _lego_combine_meshes([(shell_v, shell_f), *stud_meshes, *tube_meshes])
-    center = (v.min(axis=0) + v.max(axis=0)) / 2.0
-    v -= center
-    return newton.Mesh(v, f.flatten())
-
-
-# ---- Mesh loading helpers for local USD and external OBJ assets ----
-
-
-def _load_usd_mesh_local(usd_path, prim_path):
-    stage = Usd.Stage.Open(str(usd_path))
-    prim = stage.GetPrimAtPath(prim_path)
-    mesh = newton.usd.get_mesh(prim, load_normals=False)
-    verts = mesh.vertices
-    center = (verts.min(axis=0) + verts.max(axis=0)) / 2.0
-    if not np.allclose(center, 0.0, atol=1e-4):
-        mesh = mesh.copy(vertices=verts - center, recompute_inertia=True)
-    return mesh
-
-
-def _load_obj_mesh_trimesh(obj_path):
-    import trimesh  # noqa: PLC0415
-
-    tm = trimesh.load(obj_path, force="mesh")
-    vertices = np.array(tm.vertices, dtype=np.float32)
-    indices = np.array(tm.faces.flatten(), dtype=np.int32)
-    center = (vertices.min(axis=0) + vertices.max(axis=0)) / 2.0
-    vertices -= center
-    return newton.Mesh(vertices, indices)
-
-
-def zero_init(shape, dtype: type = wp.float32):
-    """Allocate a Warp array filled with zeros. Thin wrapper for readability at call sites."""
-    return wp.zeros(shape, dtype=dtype)
-
-
-def full_init(shape, value, dtype: type = wp.float32):
-    """Allocate a Warp array filled with ``value``. Thin wrapper for readability at call sites."""
-    return wp.full(shape, value, dtype=dtype)
-
-
-def alloc_line_buffers(n: int):
-    """Allocate a paired ``(begin, end)`` ``wp.vec3`` buffer for log_lines channels."""
-    return wp.zeros(n, dtype=wp.vec3), wp.zeros(n, dtype=wp.vec3)
-
-
-def _print_table(title, columns, rows, *, separator="="):
-    """Render a right-aligned table with auto-sized columns.
-
-    ``columns``: ``[(header, formatter), ...]`` where ``formatter(row) -> str``.
-    ``rows``: any iterable; each element is passed to every formatter.
-    """
-    headers = [h for h, _ in columns]
-    cells = [[fmt(row) for _, fmt in columns] for row in rows]
-    widths = [max(len(h), *(len(c[i]) for c in cells)) if cells else len(h) for i, h in enumerate(headers)]
-    line_len = sum(widths) + 2 * max(0, len(widths) - 1)
-    print(f"\n{separator * line_len}\n  {title}\n{separator * line_len}")
-    print("  ".join(h.rjust(w) for h, w in zip(headers, widths, strict=True)))
-    print("-" * line_len)
-    for row_cells in cells:
-        print("  ".join(c.rjust(w) for c, w in zip(row_cells, widths, strict=True)))
-
-
-def margin_pct_to_ctrl(margin_pct: float, y_half_m: float, stroke_mm: float = 85.0) -> float:
-    """Convert per-shape margin_pct (fraction of object y-width) to Robotiq [0, 255] control.
-
-    ``ctrl = 255 * (1 - (y_width - 2*margin) / stroke)``, clamped to ``[0, 255]``.
-    Default stroke is the Robotiq 2F-85 full opening (85 mm).
-    """
-    y_width_mm = 2.0 * y_half_m * 1000.0
-    margin_mm = margin_pct * y_width_mm
-    ctrl = 255.0 * (1.0 - (y_width_mm - 2.0 * margin_mm) / stroke_mm)
-    return min(255.0, max(0.0, ctrl))
-
-
-def _quat_to_euler_zyx_deg(q: wp.quat) -> wp.vec3:
-    """Convert a wp.quat to ZYX intrinsic Euler angles in degrees."""
-    return 180.0 / wp.pi * wp.quat_to_rpy(q)
-
-
-def _euler_zyx_deg_to_quat(rpy_deg: wp.vec3) -> wp.quat:
-    """Convert ZYX intrinsic Euler angles in degrees to a wp.quat."""
-    return wp.quat_from_euler(wp.pi / 180.0 * rpy_deg, 0, 1, 2)
 
 
 # Per-shape vertical seed for the GUI's offset_local.z slider. Computed at init
@@ -414,17 +147,6 @@ class GraspDesign:
     margin_pct: float = 0.05
 
 
-def derive_offset_local_z(
-    shape: ObjectShape,
-    half_size: float,
-    z_half: float,
-    grasp_clearance: float = _GRASP_CLEARANCE,
-) -> float:
-    """Seed offset_local.z so the EE starts at spawn_center + grasp_clearance for the shape."""
-    extra = _GRASP_Z_EXTRA.get(shape, 0.0)
-    return (_GRASP_FLOOR_OFFSET_M + max(0.0, 2.0 * z_half - grasp_clearance) - z_half + extra) / half_size
-
-
 GRASP_DESIGNS: dict[ObjectShape, GraspDesign] = {
     ObjectShape.BOX: GraspDesign(margin_pct=0.05),
     ObjectShape.SPHERE: GraspDesign(margin_pct=0.05),
@@ -446,894 +168,6 @@ GRASP_DESIGNS: dict[ObjectShape, GraspDesign] = {
     ),
     ObjectShape.BOLT: GraspDesign(margin_pct=0.30),
 }
-
-
-# ---- Warp kernels for IK + state machine ----
-
-
-@wp.kernel(enable_backward=False)
-def compute_grasp_targets(
-    body_q: wp.array[wp.transform],
-    body_com: wp.array[wp.vec3],
-    body_world_start: wp.array[wp.int32],
-    object_body_offset: wp.int32,
-    world_hs: wp.array[wp.float32],
-    design_offset_local: wp.array[wp.vec3],
-    design_quat_local: wp.array[wp.quat],
-    design_ctrl: wp.array[wp.float32],
-    base_ee_rot: wp.quat,
-    # outputs
-    grasp_pos: wp.array[wp.vec3],
-    grasp_rot: wp.array[wp.quat],
-    grasp_ctrl: wp.array[wp.float32],
-):
-    """Compute world-frame grasp target from per-shape COM-frame design.
-
-    Rotation composition: ``body_q.q * base_ee_rot * design_quat_local[w]``.
-    """
-    w = wp.tid()
-    obj_global = body_world_start[w] + object_body_offset
-    x_wb = body_q[obj_global]
-    body_tr = wp.transform_get_translation(x_wb)
-    body_q_rot = wp.transform_get_rotation(x_wb)
-
-    com_local = body_com[obj_global]
-    com_world = body_tr + wp.quat_rotate(body_q_rot, com_local)
-
-    hs_w = world_hs[w]
-    offset_local = design_offset_local[w] * hs_w
-    offset_world = wp.quat_rotate(body_q_rot, offset_local)
-
-    grasp_pos[w] = com_world + offset_world
-    grasp_rot[w] = body_q_rot * base_ee_rot * design_quat_local[w]
-    grasp_ctrl[w] = design_ctrl[w]
-
-
-@wp.kernel(enable_backward=False)
-def compute_grasp_targets_slot(
-    world_id: wp.int32,
-    body_q: wp.array[wp.transform],
-    body_com: wp.array[wp.vec3],
-    body_world_start: wp.array[wp.int32],
-    object_body_offset: wp.int32,
-    world_hs: wp.array[wp.float32],
-    design_offset_local: wp.array[wp.vec3],
-    design_quat_local: wp.array[wp.quat],
-    design_ctrl: wp.array[wp.float32],
-    base_ee_rot: wp.quat,
-    # outputs (only slot world_id is written)
-    grasp_pos: wp.array[wp.vec3],
-    grasp_rot: wp.array[wp.quat],
-    grasp_ctrl: wp.array[wp.float32],
-):
-    """Single-slot variant of compute_grasp_targets. Launched with dim=1."""
-    w = world_id
-    obj_global = body_world_start[w] + object_body_offset
-    x_wb = body_q[obj_global]
-    body_tr = wp.transform_get_translation(x_wb)
-    body_q_rot = wp.transform_get_rotation(x_wb)
-    com_local = body_com[obj_global]
-    com_world = body_tr + wp.quat_rotate(body_q_rot, com_local)
-    hs_w = world_hs[w]
-    offset_world = wp.quat_rotate(body_q_rot, design_offset_local[w] * hs_w)
-    grasp_pos[w] = com_world + offset_world
-    grasp_rot[w] = body_q_rot * base_ee_rot * design_quat_local[w]
-    grasp_ctrl[w] = design_ctrl[w]
-
-
-@wp.func
-def _write_triad(
-    base: wp.int32,
-    origin: wp.vec3,
-    rot: wp.quat,
-    axis_length: wp.float32,
-    line_begin: wp.array[wp.vec3],
-    line_end: wp.array[wp.vec3],
-):
-    """Write three RGB axis lines from ``origin`` rotated by ``rot``, into slots [base..base+2]."""
-    ex = wp.quat_rotate(rot, wp.vec3(axis_length, 0.0, 0.0))
-    ey = wp.quat_rotate(rot, wp.vec3(0.0, axis_length, 0.0))
-    ez = wp.quat_rotate(rot, wp.vec3(0.0, 0.0, axis_length))
-    line_begin[base + 0] = origin
-    line_end[base + 0] = origin + ex
-    line_begin[base + 1] = origin
-    line_end[base + 1] = origin + ey
-    line_begin[base + 2] = origin
-    line_end[base + 2] = origin + ez
-
-
-@wp.func
-def _zero_triad(
-    base: wp.int32,
-    line_begin: wp.array[wp.vec3],
-    line_end: wp.array[wp.vec3],
-):
-    """Clear the three line segments owned by world ``base // 3``."""
-    zero = wp.vec3(0.0, 0.0, 0.0)
-    line_begin[base + 0] = zero
-    line_end[base + 0] = zero
-    line_begin[base + 1] = zero
-    line_end[base + 1] = zero
-    line_begin[base + 2] = zero
-    line_end[base + 2] = zero
-
-
-@wp.kernel(enable_backward=False)
-def compute_object_frame_lines(
-    body_q: wp.array[wp.transform],
-    body_world_start: wp.array[wp.int32],
-    object_body_offset: wp.int32,
-    world_offsets: wp.array[wp.vec3],
-    visible_worlds_mask: wp.array[wp.int32],
-    axis_length: wp.float32,
-    # outputs
-    line_begin: wp.array[wp.vec3],
-    line_end: wp.array[wp.vec3],
-):
-    """Draw an XYZ triad per object body at body_q.t with body_q.q-aligned axes."""
-    w = wp.tid()
-    base = w * 3
-    if visible_worlds_mask and visible_worlds_mask[w] == 0:
-        _zero_triad(base, line_begin, line_end)
-        return
-    x_wb = body_q[body_world_start[w] + object_body_offset]
-    origin = wp.transform_get_translation(x_wb) + world_offsets[w]
-    _write_triad(base, origin, wp.transform_get_rotation(x_wb), axis_length, line_begin, line_end)
-
-
-@wp.kernel(enable_backward=False)
-def compute_object_com_frame_lines(
-    body_q: wp.array[wp.transform],
-    body_com: wp.array[wp.vec3],
-    body_world_start: wp.array[wp.int32],
-    object_body_offset: wp.int32,
-    world_offsets: wp.array[wp.vec3],
-    visible_worlds_mask: wp.array[wp.int32],
-    axis_length: wp.float32,
-    line_begin: wp.array[wp.vec3],
-    line_end: wp.array[wp.vec3],
-):
-    """Draw an XYZ triad at body_q * body_com with body_q.q-aligned axes."""
-    w = wp.tid()
-    base = w * 3
-    if visible_worlds_mask and visible_worlds_mask[w] == 0:
-        _zero_triad(base, line_begin, line_end)
-        return
-    obj_global = body_world_start[w] + object_body_offset
-    x_wb = body_q[obj_global]
-    rot = wp.transform_get_rotation(x_wb)
-    com_w = wp.transform_get_translation(x_wb) + wp.quat_rotate(rot, body_com[obj_global]) + world_offsets[w]
-    _write_triad(base, com_w, rot, axis_length, line_begin, line_end)
-
-
-@wp.kernel(enable_backward=False)
-def compute_ee_base_frame_lines(
-    body_q: wp.array[wp.transform],
-    body_world_start: wp.array[wp.int32],
-    ee_body_offset: wp.int32,
-    world_offsets: wp.array[wp.vec3],
-    visible_worlds_mask: wp.array[wp.int32],
-    axis_length: wp.float32,
-    line_begin: wp.array[wp.vec3],
-    line_end: wp.array[wp.vec3],
-):
-    """Draw an XYZ triad at the EE body's body_q.t with body_q.q-aligned axes."""
-    w = wp.tid()
-    base = w * 3
-    if visible_worlds_mask and visible_worlds_mask[w] == 0:
-        _zero_triad(base, line_begin, line_end)
-        return
-    x_wb = body_q[body_world_start[w] + ee_body_offset]
-    origin = wp.transform_get_translation(x_wb) + world_offsets[w]
-    _write_triad(base, origin, wp.transform_get_rotation(x_wb), axis_length, line_begin, line_end)
-
-
-@wp.kernel(enable_backward=False)
-def compute_tcp_frame_lines(
-    body_q: wp.array[wp.transform],
-    body_world_start: wp.array[wp.int32],
-    ee_body_offset: wp.int32,
-    tcp_offset: wp.float32,
-    world_offsets: wp.array[wp.vec3],
-    visible_worlds_mask: wp.array[wp.int32],
-    axis_length: wp.float32,
-    line_begin: wp.array[wp.vec3],
-    line_end: wp.array[wp.vec3],
-):
-    """Draw an XYZ triad at the TCP (EE body translated by tcp_offset along its local Z)."""
-    w = wp.tid()
-    base = w * 3
-    if visible_worlds_mask and visible_worlds_mask[w] == 0:
-        _zero_triad(base, line_begin, line_end)
-        return
-    x_wb = body_q[body_world_start[w] + ee_body_offset]
-    rot = wp.transform_get_rotation(x_wb)
-    tcp_local = wp.vec3(0.0, 0.0, tcp_offset)
-    origin = wp.transform_get_translation(x_wb) + wp.quat_rotate(rot, tcp_local) + world_offsets[w]
-    _write_triad(base, origin, rot, axis_length, line_begin, line_end)
-
-
-@wp.kernel(enable_backward=False)
-def compute_world_frame_lines(
-    world_offsets: wp.array[wp.vec3],
-    visible_worlds_mask: wp.array[wp.int32],
-    axis_length: wp.float32,
-    line_begin: wp.array[wp.vec3],
-    line_end: wp.array[wp.vec3],
-):
-    """Draw a world-axis-aligned XYZ triad at each world's render origin."""
-    w = wp.tid()
-    base = w * 3
-    if visible_worlds_mask and visible_worlds_mask[w] == 0:
-        _zero_triad(base, line_begin, line_end)
-        return
-    _write_triad(base, world_offsets[w], wp.quat_identity(), axis_length, line_begin, line_end)
-
-
-@wp.kernel(enable_backward=False)
-def compute_spawn_region_lines(
-    world_offsets: wp.array[wp.vec3],
-    visible_worlds_mask: wp.array[wp.int32],
-    region_center: wp.vec3,
-    half_x: wp.float32,
-    half_y: wp.float32,
-    # outputs: 4 line segments per world (square outline)
-    line_begin: wp.array[wp.vec3],
-    line_end: wp.array[wp.vec3],
-):
-    """Draw a flat square outline at the per-world object spawn region (XY range, on the table top)."""
-    w = wp.tid()
-    base = w * 4
-    if visible_worlds_mask and visible_worlds_mask[w] == 0:
-        zero = wp.vec3(0.0, 0.0, 0.0)
-        for i in range(4):
-            line_begin[base + i] = zero
-            line_end[base + i] = zero
-        return
-    c = region_center + world_offsets[w]
-    p_mm = wp.vec3(c[0] - half_x, c[1] - half_y, c[2])
-    p_pm = wp.vec3(c[0] + half_x, c[1] - half_y, c[2])
-    p_pp = wp.vec3(c[0] + half_x, c[1] + half_y, c[2])
-    p_mp = wp.vec3(c[0] - half_x, c[1] + half_y, c[2])
-    line_begin[base + 0] = p_mm
-    line_end[base + 0] = p_pm
-    line_begin[base + 1] = p_pm
-    line_end[base + 1] = p_pp
-    line_begin[base + 2] = p_pp
-    line_end[base + 2] = p_mp
-    line_begin[base + 3] = p_mp
-    line_end[base + 3] = p_mm
-
-
-@wp.kernel(enable_backward=False)
-def set_target_pose_kernel(
-    task_idx: wp.array[wp.int32],
-    task_timer: wp.array[wp.float32],
-    task_durations: wp.array[wp.float32],
-    grasp_pos: wp.array[wp.vec3],
-    grasp_rot: wp.array[wp.quat],
-    grasp_ctrl: wp.array[wp.float32],
-    lift_distance_m: wp.float32,
-    task_init_body_q: wp.array[wp.transform],
-    ee_body_global_indices: wp.array[wp.int32],
-    # outputs
-    ee_pos_target: wp.array[wp.vec3],
-    ee_rot_target: wp.array[wp.vec4],
-    ee_pos_target_interp: wp.array[wp.vec3],
-    ee_rot_target_interp: wp.array[wp.vec4],
-    gripper_target: wp.array[wp.float32],
-):
-    """Compute IK target pose with interpolation from task start pose."""
-    tid = wp.tid()
-    state = task_idx[tid]
-    timer = task_timer[tid]
-
-    gp = grasp_pos[tid]
-    gr = grasp_rot[tid]
-    gc = grasp_ctrl[tid]
-    lift_vec = wp.vec3(0.0, 0.0, lift_distance_m)
-
-    if state == wp.static(int(TaskType.APPROACH)):
-        target_pos = gp
-        ctrl = 0.0
-    elif state == wp.static(int(TaskType.CLOSE_GRIPPER)):
-        target_pos = gp
-        dur_close = task_durations[wp.static(int(TaskType.CLOSE_GRIPPER))]
-        alpha = wp.clamp(timer / dur_close, 0.0, 1.0)
-        ctrl = alpha * gc
-    elif state == wp.static(int(TaskType.SETTLE)):
-        target_pos = gp
-        ctrl = gc
-    elif state == wp.static(int(TaskType.LIFT)):
-        target_pos = gp + lift_vec
-        ctrl = gc
-    elif state == wp.static(int(TaskType.HOLD)):
-        target_pos = gp + lift_vec
-        ctrl = gc
-    else:
-        target_pos = gp + lift_vec
-        ctrl = gc
-
-    ee_pos_target[tid] = target_pos
-    # rot target: wp.vec4 because downstream consumers still take vec4
-    ee_rot_target[tid] = wp.vec4(gr[0], gr[1], gr[2], gr[3])
-    gripper_target[tid] = ctrl
-
-    dur = task_durations[state] if state < wp.static(int(TaskType.DONE)) else 1.0
-    t = wp.clamp(timer / dur, 0.0, 1.0)
-
-    ee_body_idx = ee_body_global_indices[tid]
-    ee_pos_prev = wp.transform_get_translation(task_init_body_q[ee_body_idx])
-    ee_quat_prev = wp.transform_get_rotation(task_init_body_q[ee_body_idx])
-    tcp_offset_local = wp.vec3(0.0, 0.0, wp.static(_ROBOTIQ_TCP_OFFSET_M))
-    tcp_pos_prev = ee_pos_prev + wp.quat_rotate(ee_quat_prev, tcp_offset_local)
-
-    ee_pos_target_interp[tid] = tcp_pos_prev * (1.0 - t) + target_pos * t
-    ee_quat_interp = wp.quat_slerp(ee_quat_prev, gr, t)
-    ee_rot_target_interp[tid] = wp.vec4(ee_quat_interp[0], ee_quat_interp[1], ee_quat_interp[2], ee_quat_interp[3])
-
-
-@wp.kernel(enable_backward=False)
-def advance_task_kernel(
-    task_idx: wp.array[wp.int32],
-    task_timer: wp.array[wp.float32],
-    task_durations: wp.array[wp.float32],
-    ee_pos_target: wp.array[wp.vec3],
-    ee_pos_actual: wp.array[wp.vec3],
-    body_q: wp.array[wp.transform],
-    task_init_body_q: wp.array[wp.transform],
-    body_count: int,
-    frame_dt: float,
-):
-    """Advance the per-world state machine. On transition, snapshot body_q."""
-    tid = wp.tid()
-    state = task_idx[tid]
-
-    if state >= wp.static(int(TaskType.DONE)):
-        return
-
-    task_timer[tid] = task_timer[tid] + frame_dt
-
-    dur = task_durations[state]
-    timer = task_timer[tid]
-
-    if timer < dur:
-        return
-
-    # For APPROACH and LIFT, also require EE position settling
-    if state == wp.static(int(TaskType.APPROACH)) or state == wp.static(int(TaskType.LIFT)):
-        target = ee_pos_target[tid]
-        actual = ee_pos_actual[tid]
-        err_x = wp.abs(target[0] - actual[0])
-        err_y = wp.abs(target[1] - actual[1])
-        err_z = wp.abs(target[2] - actual[2])
-        settled = err_x < 0.001 and err_y < 0.001 and err_z < 0.00075
-        if not settled:
-            return
-
-    # Advance to next state
-    task_idx[tid] = state + 1
-    task_timer[tid] = 0.0
-
-    # Snapshot current body_q as start pose for the next task's interpolation
-    body_start = tid * body_count
-    for i in range(body_count):
-        task_init_body_q[body_start + i] = body_q[body_start + i]
-
-
-@wp.kernel(enable_backward=False)
-def extract_ee_pos_kernel(
-    body_q: wp.array[wp.transform],
-    ee_body_global_indices: wp.array[wp.int32],
-    # output
-    ee_pos_actual: wp.array[wp.vec3],
-):
-    """Extract world-frame TCP position per world from body_q."""
-    tid = wp.tid()
-    body_idx = ee_body_global_indices[tid]
-    ee_pos = wp.transform_get_translation(body_q[body_idx])
-    ee_quat = wp.transform_get_rotation(body_q[body_idx])
-    tcp_offset_local = wp.vec3(0.0, 0.0, wp.static(_ROBOTIQ_TCP_OFFSET_M))
-    ee_pos_actual[tid] = ee_pos + wp.quat_rotate(ee_quat, tcp_offset_local)
-
-
-@wp.kernel(enable_backward=False)
-def update_penetration_kernel(
-    contact_dist: wp.array[wp.float32],  # mjw_data.contact.dist, shape (naconmax,)
-    contact_worldid: wp.array[wp.int32],  # mjw_data.contact.worldid, shape (naconmax,)
-    nacon: wp.array[wp.int32],  # mjw_data.nacon, shape (1,)
-    world_count: wp.int32,
-    penetration_cur: wp.array[wp.float32],  # shape (world_count,)
-    penetration_max: wp.array[wp.float32],  # shape (world_count,)
-):
-    tid = wp.tid()
-    if tid >= nacon[0]:
-        return
-    w = contact_worldid[tid]
-    if w < 0 or w >= world_count:
-        return
-    pen = wp.max(-contact_dist[tid], 0.0)
-    wp.atomic_max(penetration_cur, w, pen)
-    wp.atomic_max(penetration_max, w, pen)
-
-
-@wp.kernel(enable_backward=False)
-def update_metrics_kernel(
-    pad_force_matrix: wp.array2d[wp.vec3],
-    pad_force_matrix_friction: wp.array2d[wp.vec3],
-    table_force_matrix: wp.array2d[wp.vec3],
-    table_force_matrix_friction: wp.array2d[wp.vec3],
-    body_q: wp.array[wp.transform],
-    body_qd: wp.array[wp.spatial_vector],
-    body_world_start: wp.array[wp.int32],
-    object_body_offset: wp.int32,
-    task_idx: wp.array[wp.int32],
-    prev_task_idx: wp.array[wp.int32],
-    task_state_count: wp.int32,
-    hold_state: wp.int32,
-    frame_count: wp.int32,
-    pad_force_cur: wp.array[wp.float32],
-    pad_friction_cur: wp.array[wp.float32],
-    table_force_cur: wp.array[wp.float32],
-    table_friction_cur: wp.array[wp.float32],
-    pad_force_max: wp.array[wp.float32],
-    pad_friction_max: wp.array[wp.float32],
-    table_force_max: wp.array[wp.float32],
-    table_friction_max: wp.array[wp.float32],
-    object_z_max: wp.array[wp.float32],
-    object_z_hold_start: wp.array[wp.float32],
-    object_z_hold_end: wp.array[wp.float32],
-    object_vel_sum: wp.array[wp.float32],
-    object_vel_count: wp.array[wp.int32],
-    world_nan_frame: wp.array[wp.int32],
-    state_pad_force_sum: wp.array2d[wp.float32],
-    state_pad_force_max: wp.array2d[wp.float32],
-    state_table_force_sum: wp.array2d[wp.float32],
-    state_table_force_max: wp.array2d[wp.float32],
-    state_pen_sum: wp.array2d[wp.float32],
-    state_pen_max: wp.array2d[wp.float32],
-    state_vel_sum: wp.array2d[wp.float32],
-    state_count: wp.array2d[wp.int32],
-    penetration_cur: wp.array[wp.float32],
-):
-    w = wp.tid()
-    n_counterparts = pad_force_matrix.shape[1]
-
-    # Pad force + friction (sum over counterparts, then magnitude)
-    pad_f_sum = wp.vec3(0.0, 0.0, 0.0)
-    pad_fr_sum = wp.vec3(0.0, 0.0, 0.0)
-    for c in range(n_counterparts):
-        pad_f_sum = pad_f_sum + pad_force_matrix[w, c]
-        pad_fr_sum = pad_fr_sum + pad_force_matrix_friction[w, c]
-    pf = wp.length(pad_f_sum)
-    pfr = wp.length(pad_fr_sum)
-
-    # Table force + friction
-    table_counterpart_count = table_force_matrix.shape[1]
-    tbl_f_sum = wp.vec3(0.0, 0.0, 0.0)
-    tbl_fr_sum = wp.vec3(0.0, 0.0, 0.0)
-    for c in range(table_counterpart_count):
-        tbl_f_sum = tbl_f_sum + table_force_matrix[w, c]
-        tbl_fr_sum = tbl_fr_sum + table_force_matrix_friction[w, c]
-    tf = wp.length(tbl_f_sum)
-    tfr = wp.length(tbl_fr_sum)
-
-    pad_force_cur[w] = pf
-    pad_friction_cur[w] = pfr
-    table_force_cur[w] = tf
-    table_friction_cur[w] = tfr
-    pad_force_max[w] = wp.max(pad_force_max[w], pf)
-    pad_friction_max[w] = wp.max(pad_friction_max[w], pfr)
-    table_force_max[w] = wp.max(table_force_max[w], tf)
-    table_friction_max[w] = wp.max(table_friction_max[w], tfr)
-
-    # Object pose + velocity
-    obj_global = body_world_start[w] + object_body_offset
-    obj_q = body_q[obj_global]
-    obj_pos = wp.transform_get_translation(obj_q)
-    obj_z = obj_pos[2]
-    obj_vel = wp.spatial_bottom(body_qd[obj_global])
-    vel_mag = wp.length(obj_vel)
-
-    # NaN detection
-    obj_z_is_nan = wp.isnan(obj_z)
-    if obj_z_is_nan and world_nan_frame[w] < 0:
-        world_nan_frame[w] = frame_count
-
-    if not obj_z_is_nan:
-        object_z_max[w] = wp.max(object_z_max[w], obj_z)
-
-    vel_is_nan = wp.isnan(vel_mag)
-    if not vel_is_nan:
-        object_vel_sum[w] = object_vel_sum[w] + vel_mag
-        object_vel_count[w] = object_vel_count[w] + 1
-
-    # State-bucketed accumulation
-    cur_task = task_idx[w]
-    prev_task = prev_task_idx[w]
-    if cur_task < task_state_count:
-        t = cur_task
-        pen_mm = penetration_cur[w] * 1000.0
-        state_pad_force_sum[w, t] = state_pad_force_sum[w, t] + pf
-        state_pad_force_max[w, t] = wp.max(state_pad_force_max[w, t], pf)
-        state_table_force_sum[w, t] = state_table_force_sum[w, t] + tf
-        state_table_force_max[w, t] = wp.max(state_table_force_max[w, t], tf)
-        state_pen_sum[w, t] = state_pen_sum[w, t] + pen_mm
-        state_pen_max[w, t] = wp.max(state_pen_max[w, t], pen_mm)
-        if not vel_is_nan:
-            state_vel_sum[w, t] = state_vel_sum[w, t] + vel_mag * 1000.0
-        state_count[w, t] = state_count[w, t] + 1
-
-    # HOLD transition
-    if cur_task == hold_state:
-        if prev_task != hold_state:
-            object_z_hold_start[w] = obj_z
-        object_z_hold_end[w] = obj_z
-
-
-@wp.kernel(enable_backward=False)
-def copy_prev_task_kernel(
-    task_idx: wp.array[wp.int32],
-    prev_task_idx: wp.array[wp.int32],
-):
-    tid = wp.tid()
-    prev_task_idx[tid] = task_idx[tid]
-
-
-# GUI staging buffer indices (keep in sync with stage_gui_metrics_kernel below).
-_GUI_STAGE_FIELDS = [
-    "pad_force_cur",
-    "pad_force_max",
-    "pad_friction_cur",
-    "pad_friction_max",
-    "table_force_cur",
-    "table_force_max",
-    "table_friction_cur",
-    "table_friction_max",
-    "penetration_cur",
-    "penetration_max",
-    "avg_vel",
-    "object_z",
-    "object_z_init",
-    "object_z_max",
-    "task_idx",  # stored as float for uniform array
-    "world_nan_frame",  # -1 sentinel -> NaN semantics preserved via float cast
-    "task_timer",  # task_timer[selected_world]
-    "task_dur",  # task_durations[cur_task], or 0 if cur_task >= task_duration_count
-    "ee_target_x",
-    "ee_target_y",
-    "ee_target_z",
-    "ee_actual_x",
-    "ee_actual_y",
-    "ee_actual_z",
-]
-_GUI_STAGE_SIZE = len(_GUI_STAGE_FIELDS)
-
-
-@wp.kernel(enable_backward=False)
-def stage_gui_metrics_kernel(
-    selected_world: wp.int32,
-    body_q: wp.array[wp.transform],
-    body_world_start: wp.array[wp.int32],
-    object_body_offset: wp.int32,
-    pad_force_cur: wp.array[wp.float32],
-    pad_force_max: wp.array[wp.float32],
-    pad_friction_cur: wp.array[wp.float32],
-    pad_friction_max: wp.array[wp.float32],
-    table_force_cur: wp.array[wp.float32],
-    table_force_max: wp.array[wp.float32],
-    table_friction_cur: wp.array[wp.float32],
-    table_friction_max: wp.array[wp.float32],
-    penetration_cur: wp.array[wp.float32],
-    penetration_max: wp.array[wp.float32],
-    object_vel_sum: wp.array[wp.float32],
-    object_vel_count: wp.array[wp.int32],
-    object_z_init: wp.array[wp.float32],
-    object_z_max: wp.array[wp.float32],
-    task_idx: wp.array[wp.int32],
-    world_nan_frame: wp.array[wp.int32],
-    task_timer: wp.array[wp.float32],
-    task_durations: wp.array[wp.float32],
-    task_duration_count: wp.int32,
-    ee_pos_target: wp.array[wp.vec3],
-    ee_pos_actual: wp.array[wp.vec3],
-    out: wp.array[wp.float32],
-):
-    # dim=1 -- single-thread pack.
-    # Output indices must match _GUI_STAGE_FIELDS order.
-    w = selected_world
-    obj_global = body_world_start[w] + object_body_offset
-    obj_pos = wp.transform_get_translation(body_q[obj_global])
-    out[0] = pad_force_cur[w]
-    out[1] = pad_force_max[w]
-    out[2] = pad_friction_cur[w]
-    out[3] = pad_friction_max[w]
-    out[4] = table_force_cur[w]
-    out[5] = table_force_max[w]
-    out[6] = table_friction_cur[w]
-    out[7] = table_friction_max[w]
-    out[8] = penetration_cur[w]
-    out[9] = penetration_max[w]
-    vel_count = object_vel_count[w]
-    if vel_count > 0:
-        out[10] = object_vel_sum[w] / wp.float32(vel_count)
-    else:
-        out[10] = 0.0
-    out[11] = obj_pos[2]
-    out[12] = object_z_init[w]
-    out[13] = object_z_max[w]
-    out[14] = wp.float32(task_idx[w])
-    # world_nan_frame is an int32 frame index; float32 exactly represents
-    # integers up to 2**24 (~16.7M frames), well beyond any realistic episode.
-    out[15] = wp.float32(world_nan_frame[w])
-    out[16] = task_timer[w]
-    cur_task = task_idx[w]
-    # Guard: task_idx can be >= task_duration_count (DONE state); pack 0.0 then.
-    if cur_task < task_duration_count:
-        out[17] = task_durations[cur_task]
-    else:
-        out[17] = 0.0
-    ee_t = ee_pos_target[w]
-    ee_a = ee_pos_actual[w]
-    out[18] = ee_t[0]
-    out[19] = ee_t[1]
-    out[20] = ee_t[2]
-    out[21] = ee_a[0]
-    out[22] = ee_a[1]
-    out[23] = ee_a[2]
-
-
-@wp.kernel(enable_backward=False)
-def _seed_object_z_init_kernel(
-    body_q: wp.array[wp.transform],
-    body_world_start: wp.array[wp.int32],
-    object_body_offset: wp.int32,
-    object_z_init: wp.array[wp.float32],
-):
-    w = wp.tid()
-    obj_global = body_world_start[w] + object_body_offset
-    object_z_init[w] = wp.transform_get_translation(body_q[obj_global])[2]
-
-
-class GraspMetrics:
-    """GPU-resident per-world + per-state metric accumulators for the grasp example.
-
-    All state lives in Warp arrays. ``update()`` launches Warp kernels only --
-    no Python-level branches on GPU data, no ``.numpy()`` calls. CPU readbacks
-    happen only in ``stage_gui()`` (one selected world, throttled by the GUI)
-    and ``readback_all()`` (one batched copy at episode end for ``test_final``).
-    """
-
-    def __init__(self, world_count: int, task_state_count: int, hold_state: int, object_body_offset: int):
-        self.world_count = world_count
-        self.task_state_count = task_state_count
-        self.hold_state = hold_state
-        self.object_body_offset = object_body_offset
-
-        # Per-world running scalars
-        n = world_count
-        self.pad_force_cur = zero_init(n)
-        self.pad_friction_cur = zero_init(n)
-        self.table_force_cur = zero_init(n)
-        self.table_friction_cur = zero_init(n)
-        self.penetration_cur = zero_init(n)
-
-        self.pad_force_max = zero_init(n)
-        self.pad_friction_max = zero_init(n)
-        self.table_force_max = zero_init(n)
-        self.table_friction_max = zero_init(n)
-        self.penetration_max = zero_init(n)
-
-        self.object_z_max = full_init(n, -wp.inf)
-        self.object_z_init = zero_init(n)
-        self.object_z_hold_start = full_init(n, wp.nan)
-        self.object_z_hold_end = full_init(n, wp.nan)
-        self.object_vel_sum = zero_init(n)
-        self.object_vel_count = zero_init(n, wp.int32)
-
-        self.world_nan_frame = full_init(n, -1, wp.int32)
-        self.prev_task_idx = zero_init(n, wp.int32)
-
-        # GUI staging (pre-allocated; populated on demand).
-        self.gui_staging = zero_init(_GUI_STAGE_SIZE)
-
-        per_state = (n, task_state_count)
-        self.state_pad_force_sum = zero_init(per_state)
-        self.state_pad_force_max = zero_init(per_state)
-        self.state_table_force_sum = zero_init(per_state)
-        self.state_table_force_max = zero_init(per_state)
-        self.state_pen_sum = zero_init(per_state)
-        self.state_pen_max = zero_init(per_state)
-        self.state_vel_sum = zero_init(per_state)
-        self.state_count = zero_init(per_state, wp.int32)
-
-    def capture_initial_object_z(self, state_0, body_world_start_array):
-        wp.launch(
-            _seed_object_z_init_kernel,
-            dim=self.world_count,
-            inputs=[state_0.body_q, body_world_start_array, self.object_body_offset],
-            outputs=[self.object_z_init],
-        )
-
-    def update(
-        self,
-        state_0,
-        pad_sensor,
-        table_sensor,
-        mjw_data,
-        task_idx,
-        body_world_start_array,
-        frame_count: int,
-    ):
-        self.penetration_cur.zero_()
-        naconmax = mjw_data.naconmax
-        if naconmax > 0:
-            wp.launch(
-                update_penetration_kernel,
-                dim=naconmax,
-                inputs=[
-                    mjw_data.contact.dist,
-                    mjw_data.contact.worldid,
-                    mjw_data.nacon,
-                    self.world_count,
-                ],
-                outputs=[self.penetration_cur, self.penetration_max],
-            )
-
-        wp.launch(
-            update_metrics_kernel,
-            dim=self.world_count,
-            inputs=[
-                pad_sensor.force_matrix,
-                pad_sensor.force_matrix_friction,
-                table_sensor.force_matrix,
-                table_sensor.force_matrix_friction,
-                state_0.body_q,
-                state_0.body_qd,
-                body_world_start_array,
-                self.object_body_offset,
-                task_idx,
-                self.prev_task_idx,
-                self.task_state_count,
-                self.hold_state,
-                frame_count,
-            ],
-            outputs=[
-                self.pad_force_cur,
-                self.pad_friction_cur,
-                self.table_force_cur,
-                self.table_friction_cur,
-                self.pad_force_max,
-                self.pad_friction_max,
-                self.table_force_max,
-                self.table_friction_max,
-                self.object_z_max,
-                self.object_z_hold_start,
-                self.object_z_hold_end,
-                self.object_vel_sum,
-                self.object_vel_count,
-                self.world_nan_frame,
-                self.state_pad_force_sum,
-                self.state_pad_force_max,
-                self.state_table_force_sum,
-                self.state_table_force_max,
-                self.state_pen_sum,
-                self.state_pen_max,
-                self.state_vel_sum,
-                self.state_count,
-                self.penetration_cur,
-            ],
-        )
-
-        wp.launch(copy_prev_task_kernel, dim=self.world_count, inputs=[task_idx], outputs=[self.prev_task_idx])
-
-    def stage_gui(
-        self,
-        selected_world: int,
-        state_0,
-        body_world_start_array,
-        task_idx,
-        task_timer,
-        task_durations,
-        ee_pos_target,
-        ee_pos_actual,
-    ):
-        """Pack selected-world metrics into a small staging buffer. Returns numpy view."""
-        wp.launch(
-            stage_gui_metrics_kernel,
-            dim=1,
-            inputs=[
-                int(selected_world),
-                state_0.body_q,
-                body_world_start_array,
-                self.object_body_offset,
-                self.pad_force_cur,
-                self.pad_force_max,
-                self.pad_friction_cur,
-                self.pad_friction_max,
-                self.table_force_cur,
-                self.table_force_max,
-                self.table_friction_cur,
-                self.table_friction_max,
-                self.penetration_cur,
-                self.penetration_max,
-                self.object_vel_sum,
-                self.object_vel_count,
-                self.object_z_init,
-                self.object_z_max,
-                task_idx,
-                self.world_nan_frame,
-                task_timer,
-                task_durations,
-                int(task_durations.shape[0]),
-                ee_pos_target,
-                ee_pos_actual,
-            ],
-            outputs=[self.gui_staging],
-        )
-        return self.gui_staging.numpy()  # single small array readback (24 floats)
-
-    def readback_all(self) -> dict[str, np.ndarray]:
-        """Single batched GPU -> CPU transfer at episode end. Use in test_final only."""
-        return {
-            "pad_force_max": self.pad_force_max.numpy(),
-            "pad_friction_max": self.pad_friction_max.numpy(),
-            "table_force_max": self.table_force_max.numpy(),
-            "table_friction_max": self.table_friction_max.numpy(),
-            "penetration_max": self.penetration_max.numpy(),
-            "object_z_max": self.object_z_max.numpy(),
-            "object_z_init": self.object_z_init.numpy(),
-            "object_z_hold_start": self.object_z_hold_start.numpy(),
-            "object_z_hold_end": self.object_z_hold_end.numpy(),
-            "object_vel_sum": self.object_vel_sum.numpy(),
-            "object_vel_count": self.object_vel_count.numpy(),
-            "world_nan_frame": self.world_nan_frame.numpy(),
-            "state_pad_force_sum": self.state_pad_force_sum.numpy(),
-            "state_pad_force_max": self.state_pad_force_max.numpy(),
-            "state_table_force_sum": self.state_table_force_sum.numpy(),
-            "state_table_force_max": self.state_table_force_max.numpy(),
-            "state_pen_sum": self.state_pen_sum.numpy(),
-            "state_pen_max": self.state_pen_max.numpy(),
-            "state_vel_sum": self.state_vel_sum.numpy(),
-            "state_count": self.state_count.numpy(),
-        }
-
-
-@wp.kernel(enable_backward=False)
-def write_gripper_targets_kernel(
-    ik_solution: wp.array2d[wp.float32],
-    gripper_target: wp.array[wp.float32],
-    joint_targets: wp.array2d[wp.float32],
-    arm_dof_count: int,
-    gripper_dof_start: int,
-    gripper_dof_count: int,
-):
-    """Copy IK arm solution + gripper target to joint_targets 2D array."""
-    tid = wp.tid()
-
-    # Copy arm DOFs from IK solution
-    for j in range(arm_dof_count):
-        joint_targets[tid, j] = ik_solution[tid, j]
-
-    # Write gripper DOFs: all gripper joints get the same control value
-    ctrl = gripper_target[tid]
-    for j in range(gripper_dof_count):
-        joint_targets[tid, gripper_dof_start + j] = ctrl
-
-
-@wp.kernel(enable_backward=False)
-def write_mujoco_ctrl_kernel(
-    ik_solution: wp.array2d[wp.float32],
-    gripper_target: wp.array[wp.float32],
-    mujoco_ctrl: wp.array2d[wp.float32],
-    arm_actuator_count: int,
-    gripper_actuator_idx: int,
-):
-    """Write IK arm solution + gripper target to MuJoCo ctrl."""
-    tid = wp.tid()
-    for j in range(arm_actuator_count):
-        mujoco_ctrl[tid, j] = ik_solution[tid, j]
-    mujoco_ctrl[tid, gripper_actuator_idx] = gripper_target[tid]
 
 
 class Example:
@@ -2842,6 +1676,1205 @@ class Example:
             end=self._spawn_region_end,
             colors=self._spawn_region_colors,
         )
+
+
+# ----------------------------------------------------------------------------
+# Utility helpers
+# ----------------------------------------------------------------------------
+
+
+def zero_init(shape, dtype: type = wp.float32):
+    """Allocate a Warp array filled with zeros. Thin wrapper for readability at call sites."""
+    return wp.zeros(shape, dtype=dtype)
+
+
+def full_init(shape, value, dtype: type = wp.float32):
+    """Allocate a Warp array filled with ``value``. Thin wrapper for readability at call sites."""
+    return wp.full(shape, value, dtype=dtype)
+
+
+def alloc_line_buffers(n: int):
+    """Allocate a paired ``(begin, end)`` ``wp.vec3`` buffer for log_lines channels."""
+    return wp.zeros(n, dtype=wp.vec3), wp.zeros(n, dtype=wp.vec3)
+
+
+def _print_table(title, columns, rows, *, separator="="):
+    """Render a right-aligned table with auto-sized columns.
+
+    ``columns``: ``[(header, formatter), ...]`` where ``formatter(row) -> str``.
+    ``rows``: any iterable; each element is passed to every formatter.
+    """
+    headers = [h for h, _ in columns]
+    cells = [[fmt(row) for _, fmt in columns] for row in rows]
+    widths = [max(len(h), *(len(c[i]) for c in cells)) if cells else len(h) for i, h in enumerate(headers)]
+    line_len = sum(widths) + 2 * max(0, len(widths) - 1)
+    print(f"\n{separator * line_len}\n  {title}\n{separator * line_len}")
+    print("  ".join(h.rjust(w) for h, w in zip(headers, widths, strict=True)))
+    print("-" * line_len)
+    for row_cells in cells:
+        print("  ".join(c.rjust(w) for c, w in zip(row_cells, widths, strict=True)))
+
+
+def margin_pct_to_ctrl(margin_pct: float, y_half_m: float, stroke_mm: float = 85.0) -> float:
+    """Convert per-shape margin_pct (fraction of object y-width) to Robotiq [0, 255] control.
+
+    ``ctrl = 255 * (1 - (y_width - 2*margin) / stroke)``, clamped to ``[0, 255]``.
+    Default stroke is the Robotiq 2F-85 full opening (85 mm).
+    """
+    y_width_mm = 2.0 * y_half_m * 1000.0
+    margin_mm = margin_pct * y_width_mm
+    ctrl = 255.0 * (1.0 - (y_width_mm - 2.0 * margin_mm) / stroke_mm)
+    return min(255.0, max(0.0, ctrl))
+
+
+def _quat_to_euler_zyx_deg(q: wp.quat) -> wp.vec3:
+    """Convert a wp.quat to ZYX intrinsic Euler angles in degrees."""
+    return 180.0 / wp.pi * wp.quat_to_rpy(q)
+
+
+def _euler_zyx_deg_to_quat(rpy_deg: wp.vec3) -> wp.quat:
+    """Convert ZYX intrinsic Euler angles in degrees to a wp.quat."""
+    return wp.quat_from_euler(wp.pi / 180.0 * rpy_deg, 0, 1, 2)
+
+
+def derive_offset_local_z(
+    shape: ObjectShape,
+    half_size: float,
+    z_half: float,
+    grasp_clearance: float = _GRASP_CLEARANCE,
+) -> float:
+    """Seed offset_local.z so the EE starts at spawn_center + grasp_clearance for the shape."""
+    extra = _GRASP_Z_EXTRA.get(shape, 0.0)
+    return (_GRASP_FLOOR_OFFSET_M + max(0.0, 2.0 * z_half - grasp_clearance) - z_half + extra) / half_size
+
+
+# Builders for the primitive (non-mesh-asset) object shapes. Each entry takes the
+# per-world half-size and returns a ``newton.Mesh`` -- we convert primitives to
+# meshes so every world ends up with the same shape type, which the MuJoCo
+# solver requires in ``separate_worlds=True`` mode.
+_PRIMITIVE_MESH_FACTORIES = {
+    ObjectShape.BOX: lambda hs: newton.Mesh.create_box(hs, hs, hs, compute_inertia=False),
+    ObjectShape.SPHERE: lambda hs: newton.Mesh.create_sphere(hs, compute_inertia=False),
+    ObjectShape.CYLINDER: lambda hs: newton.Mesh.create_cylinder(hs, hs, up_axis=newton.Axis.X, compute_inertia=False),
+    ObjectShape.CAPSULE: lambda hs: newton.Mesh.create_capsule(hs, hs, up_axis=newton.Axis.X, compute_inertia=False),
+    ObjectShape.ELLIPSOID: lambda hs: newton.Mesh.create_ellipsoid(hs * 2.0, hs, hs, compute_inertia=False),
+}
+
+
+# ----------------------------------------------------------------------------
+# GraspMetrics
+# ----------------------------------------------------------------------------
+
+
+class GraspMetrics:
+    """GPU-resident per-world + per-state metric accumulators for the grasp example.
+
+    All state lives in Warp arrays. ``update()`` launches Warp kernels only --
+    no Python-level branches on GPU data, no ``.numpy()`` calls. CPU readbacks
+    happen only in ``stage_gui()`` (one selected world, throttled by the GUI)
+    and ``readback_all()`` (one batched copy at episode end for ``test_final``).
+    """
+
+    def __init__(self, world_count: int, task_state_count: int, hold_state: int, object_body_offset: int):
+        self.world_count = world_count
+        self.task_state_count = task_state_count
+        self.hold_state = hold_state
+        self.object_body_offset = object_body_offset
+
+        # Per-world running scalars
+        n = world_count
+        self.pad_force_cur = zero_init(n)
+        self.pad_friction_cur = zero_init(n)
+        self.table_force_cur = zero_init(n)
+        self.table_friction_cur = zero_init(n)
+        self.penetration_cur = zero_init(n)
+
+        self.pad_force_max = zero_init(n)
+        self.pad_friction_max = zero_init(n)
+        self.table_force_max = zero_init(n)
+        self.table_friction_max = zero_init(n)
+        self.penetration_max = zero_init(n)
+
+        self.object_z_max = full_init(n, -wp.inf)
+        self.object_z_init = zero_init(n)
+        self.object_z_hold_start = full_init(n, wp.nan)
+        self.object_z_hold_end = full_init(n, wp.nan)
+        self.object_vel_sum = zero_init(n)
+        self.object_vel_count = zero_init(n, wp.int32)
+
+        self.world_nan_frame = full_init(n, -1, wp.int32)
+        self.prev_task_idx = zero_init(n, wp.int32)
+
+        # GUI staging (pre-allocated; populated on demand).
+        self.gui_staging = zero_init(_GUI_STAGE_SIZE)
+
+        per_state = (n, task_state_count)
+        self.state_pad_force_sum = zero_init(per_state)
+        self.state_pad_force_max = zero_init(per_state)
+        self.state_table_force_sum = zero_init(per_state)
+        self.state_table_force_max = zero_init(per_state)
+        self.state_pen_sum = zero_init(per_state)
+        self.state_pen_max = zero_init(per_state)
+        self.state_vel_sum = zero_init(per_state)
+        self.state_count = zero_init(per_state, wp.int32)
+
+    def capture_initial_object_z(self, state_0, body_world_start_array):
+        wp.launch(
+            _seed_object_z_init_kernel,
+            dim=self.world_count,
+            inputs=[state_0.body_q, body_world_start_array, self.object_body_offset],
+            outputs=[self.object_z_init],
+        )
+
+    def update(
+        self,
+        state_0,
+        pad_sensor,
+        table_sensor,
+        mjw_data,
+        task_idx,
+        body_world_start_array,
+        frame_count: int,
+    ):
+        self.penetration_cur.zero_()
+        naconmax = mjw_data.naconmax
+        if naconmax > 0:
+            wp.launch(
+                update_penetration_kernel,
+                dim=naconmax,
+                inputs=[
+                    mjw_data.contact.dist,
+                    mjw_data.contact.worldid,
+                    mjw_data.nacon,
+                    self.world_count,
+                ],
+                outputs=[self.penetration_cur, self.penetration_max],
+            )
+
+        wp.launch(
+            update_metrics_kernel,
+            dim=self.world_count,
+            inputs=[
+                pad_sensor.force_matrix,
+                pad_sensor.force_matrix_friction,
+                table_sensor.force_matrix,
+                table_sensor.force_matrix_friction,
+                state_0.body_q,
+                state_0.body_qd,
+                body_world_start_array,
+                self.object_body_offset,
+                task_idx,
+                self.prev_task_idx,
+                self.task_state_count,
+                self.hold_state,
+                frame_count,
+            ],
+            outputs=[
+                self.pad_force_cur,
+                self.pad_friction_cur,
+                self.table_force_cur,
+                self.table_friction_cur,
+                self.pad_force_max,
+                self.pad_friction_max,
+                self.table_force_max,
+                self.table_friction_max,
+                self.object_z_max,
+                self.object_z_hold_start,
+                self.object_z_hold_end,
+                self.object_vel_sum,
+                self.object_vel_count,
+                self.world_nan_frame,
+                self.state_pad_force_sum,
+                self.state_pad_force_max,
+                self.state_table_force_sum,
+                self.state_table_force_max,
+                self.state_pen_sum,
+                self.state_pen_max,
+                self.state_vel_sum,
+                self.state_count,
+                self.penetration_cur,
+            ],
+        )
+
+        wp.launch(copy_prev_task_kernel, dim=self.world_count, inputs=[task_idx], outputs=[self.prev_task_idx])
+
+    def stage_gui(
+        self,
+        selected_world: int,
+        state_0,
+        body_world_start_array,
+        task_idx,
+        task_timer,
+        task_durations,
+        ee_pos_target,
+        ee_pos_actual,
+    ):
+        """Pack selected-world metrics into a small staging buffer. Returns numpy view."""
+        wp.launch(
+            stage_gui_metrics_kernel,
+            dim=1,
+            inputs=[
+                int(selected_world),
+                state_0.body_q,
+                body_world_start_array,
+                self.object_body_offset,
+                self.pad_force_cur,
+                self.pad_force_max,
+                self.pad_friction_cur,
+                self.pad_friction_max,
+                self.table_force_cur,
+                self.table_force_max,
+                self.table_friction_cur,
+                self.table_friction_max,
+                self.penetration_cur,
+                self.penetration_max,
+                self.object_vel_sum,
+                self.object_vel_count,
+                self.object_z_init,
+                self.object_z_max,
+                task_idx,
+                self.world_nan_frame,
+                task_timer,
+                task_durations,
+                int(task_durations.shape[0]),
+                ee_pos_target,
+                ee_pos_actual,
+            ],
+            outputs=[self.gui_staging],
+        )
+        return self.gui_staging.numpy()  # single small array readback (24 floats)
+
+    def readback_all(self) -> dict[str, np.ndarray]:
+        """Single batched GPU -> CPU transfer at episode end. Use in test_final only."""
+        return {
+            "pad_force_max": self.pad_force_max.numpy(),
+            "pad_friction_max": self.pad_friction_max.numpy(),
+            "table_force_max": self.table_force_max.numpy(),
+            "table_friction_max": self.table_friction_max.numpy(),
+            "penetration_max": self.penetration_max.numpy(),
+            "object_z_max": self.object_z_max.numpy(),
+            "object_z_init": self.object_z_init.numpy(),
+            "object_z_hold_start": self.object_z_hold_start.numpy(),
+            "object_z_hold_end": self.object_z_hold_end.numpy(),
+            "object_vel_sum": self.object_vel_sum.numpy(),
+            "object_vel_count": self.object_vel_count.numpy(),
+            "world_nan_frame": self.world_nan_frame.numpy(),
+            "state_pad_force_sum": self.state_pad_force_sum.numpy(),
+            "state_pad_force_max": self.state_pad_force_max.numpy(),
+            "state_table_force_sum": self.state_table_force_sum.numpy(),
+            "state_table_force_max": self.state_table_force_max.numpy(),
+            "state_pen_sum": self.state_pen_sum.numpy(),
+            "state_pen_max": self.state_pen_max.numpy(),
+            "state_vel_sum": self.state_vel_sum.numpy(),
+            "state_count": self.state_count.numpy(),
+        }
+
+
+# ----------------------------------------------------------------------------
+# Warp kernels: grasp targets
+# ----------------------------------------------------------------------------
+
+
+@wp.kernel(enable_backward=False)
+def compute_grasp_targets(
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    body_world_start: wp.array[wp.int32],
+    object_body_offset: wp.int32,
+    world_hs: wp.array[wp.float32],
+    design_offset_local: wp.array[wp.vec3],
+    design_quat_local: wp.array[wp.quat],
+    design_ctrl: wp.array[wp.float32],
+    base_ee_rot: wp.quat,
+    # outputs
+    grasp_pos: wp.array[wp.vec3],
+    grasp_rot: wp.array[wp.quat],
+    grasp_ctrl: wp.array[wp.float32],
+):
+    """Compute world-frame grasp target from per-shape COM-frame design.
+
+    Rotation composition: ``body_q.q * base_ee_rot * design_quat_local[w]``.
+    """
+    w = wp.tid()
+    obj_global = body_world_start[w] + object_body_offset
+    x_wb = body_q[obj_global]
+    body_tr = wp.transform_get_translation(x_wb)
+    body_q_rot = wp.transform_get_rotation(x_wb)
+
+    com_local = body_com[obj_global]
+    com_world = body_tr + wp.quat_rotate(body_q_rot, com_local)
+
+    hs_w = world_hs[w]
+    offset_local = design_offset_local[w] * hs_w
+    offset_world = wp.quat_rotate(body_q_rot, offset_local)
+
+    grasp_pos[w] = com_world + offset_world
+    grasp_rot[w] = body_q_rot * base_ee_rot * design_quat_local[w]
+    grasp_ctrl[w] = design_ctrl[w]
+
+
+@wp.kernel(enable_backward=False)
+def compute_grasp_targets_slot(
+    world_id: wp.int32,
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    body_world_start: wp.array[wp.int32],
+    object_body_offset: wp.int32,
+    world_hs: wp.array[wp.float32],
+    design_offset_local: wp.array[wp.vec3],
+    design_quat_local: wp.array[wp.quat],
+    design_ctrl: wp.array[wp.float32],
+    base_ee_rot: wp.quat,
+    # outputs (only slot world_id is written)
+    grasp_pos: wp.array[wp.vec3],
+    grasp_rot: wp.array[wp.quat],
+    grasp_ctrl: wp.array[wp.float32],
+):
+    """Single-slot variant of compute_grasp_targets. Launched with dim=1."""
+    w = world_id
+    obj_global = body_world_start[w] + object_body_offset
+    x_wb = body_q[obj_global]
+    body_tr = wp.transform_get_translation(x_wb)
+    body_q_rot = wp.transform_get_rotation(x_wb)
+    com_local = body_com[obj_global]
+    com_world = body_tr + wp.quat_rotate(body_q_rot, com_local)
+    hs_w = world_hs[w]
+    offset_world = wp.quat_rotate(body_q_rot, design_offset_local[w] * hs_w)
+    grasp_pos[w] = com_world + offset_world
+    grasp_rot[w] = body_q_rot * base_ee_rot * design_quat_local[w]
+    grasp_ctrl[w] = design_ctrl[w]
+
+
+# ----------------------------------------------------------------------------
+# Warp kernels: state machine
+# ----------------------------------------------------------------------------
+
+
+@wp.func
+def s_curve_profile(t: float, T: float, ramp_fraction: float) -> float:
+    """S-curve trapezoidal position profile, normalized to [0, 1]."""
+    t = wp.clamp(t, 0.0, T)
+    f = wp.clamp(ramp_fraction, 0.01, 0.5)
+    t_r = f * T
+    v_max = 1.0 / (T - t_r)
+
+    if t < t_r:
+        return v_max * (t * 0.5 - t_r / (2.0 * wp.pi) * wp.sin(wp.pi * t / t_r))
+    elif t < T - t_r:
+        p1_end = v_max * t_r * 0.5
+        return p1_end + v_max * (t - t_r)
+    else:
+        t_decel = t - (T - t_r)
+        p12_end = v_max * t_r * 0.5 + v_max * (T - 2.0 * t_r)
+        return p12_end + v_max * (t_decel * 0.5 + t_r / (2.0 * wp.pi) * wp.sin(wp.pi * t_decel / t_r))
+
+
+@wp.kernel(enable_backward=False)
+def set_target_pose_kernel(
+    task_idx: wp.array[wp.int32],
+    task_timer: wp.array[wp.float32],
+    task_durations: wp.array[wp.float32],
+    grasp_pos: wp.array[wp.vec3],
+    grasp_rot: wp.array[wp.quat],
+    grasp_ctrl: wp.array[wp.float32],
+    lift_distance_m: wp.float32,
+    task_init_body_q: wp.array[wp.transform],
+    ee_body_global_indices: wp.array[wp.int32],
+    # outputs
+    ee_pos_target: wp.array[wp.vec3],
+    ee_rot_target: wp.array[wp.vec4],
+    ee_pos_target_interp: wp.array[wp.vec3],
+    ee_rot_target_interp: wp.array[wp.vec4],
+    gripper_target: wp.array[wp.float32],
+):
+    """Compute IK target pose with interpolation from task start pose."""
+    tid = wp.tid()
+    state = task_idx[tid]
+    timer = task_timer[tid]
+
+    gp = grasp_pos[tid]
+    gr = grasp_rot[tid]
+    gc = grasp_ctrl[tid]
+    lift_vec = wp.vec3(0.0, 0.0, lift_distance_m)
+
+    if state == wp.static(int(TaskType.APPROACH)):
+        target_pos = gp
+        ctrl = 0.0
+    elif state == wp.static(int(TaskType.CLOSE_GRIPPER)):
+        target_pos = gp
+        dur_close = task_durations[wp.static(int(TaskType.CLOSE_GRIPPER))]
+        alpha = wp.clamp(timer / dur_close, 0.0, 1.0)
+        ctrl = alpha * gc
+    elif state == wp.static(int(TaskType.SETTLE)):
+        target_pos = gp
+        ctrl = gc
+    elif state == wp.static(int(TaskType.LIFT)):
+        target_pos = gp + lift_vec
+        ctrl = gc
+    elif state == wp.static(int(TaskType.HOLD)):
+        target_pos = gp + lift_vec
+        ctrl = gc
+    else:
+        target_pos = gp + lift_vec
+        ctrl = gc
+
+    ee_pos_target[tid] = target_pos
+    # rot target: wp.vec4 because downstream consumers still take vec4
+    ee_rot_target[tid] = wp.vec4(gr[0], gr[1], gr[2], gr[3])
+    gripper_target[tid] = ctrl
+
+    dur = task_durations[state] if state < wp.static(int(TaskType.DONE)) else 1.0
+    t = wp.clamp(timer / dur, 0.0, 1.0)
+
+    ee_body_idx = ee_body_global_indices[tid]
+    ee_pos_prev = wp.transform_get_translation(task_init_body_q[ee_body_idx])
+    ee_quat_prev = wp.transform_get_rotation(task_init_body_q[ee_body_idx])
+    tcp_offset_local = wp.vec3(0.0, 0.0, wp.static(_ROBOTIQ_TCP_OFFSET_M))
+    tcp_pos_prev = ee_pos_prev + wp.quat_rotate(ee_quat_prev, tcp_offset_local)
+
+    ee_pos_target_interp[tid] = tcp_pos_prev * (1.0 - t) + target_pos * t
+    ee_quat_interp = wp.quat_slerp(ee_quat_prev, gr, t)
+    ee_rot_target_interp[tid] = wp.vec4(ee_quat_interp[0], ee_quat_interp[1], ee_quat_interp[2], ee_quat_interp[3])
+
+
+@wp.kernel(enable_backward=False)
+def advance_task_kernel(
+    task_idx: wp.array[wp.int32],
+    task_timer: wp.array[wp.float32],
+    task_durations: wp.array[wp.float32],
+    ee_pos_target: wp.array[wp.vec3],
+    ee_pos_actual: wp.array[wp.vec3],
+    body_q: wp.array[wp.transform],
+    task_init_body_q: wp.array[wp.transform],
+    body_count: int,
+    frame_dt: float,
+):
+    """Advance the per-world state machine. On transition, snapshot body_q."""
+    tid = wp.tid()
+    state = task_idx[tid]
+
+    if state >= wp.static(int(TaskType.DONE)):
+        return
+
+    task_timer[tid] = task_timer[tid] + frame_dt
+
+    dur = task_durations[state]
+    timer = task_timer[tid]
+
+    if timer < dur:
+        return
+
+    # For APPROACH and LIFT, also require EE position settling
+    if state == wp.static(int(TaskType.APPROACH)) or state == wp.static(int(TaskType.LIFT)):
+        target = ee_pos_target[tid]
+        actual = ee_pos_actual[tid]
+        err_x = wp.abs(target[0] - actual[0])
+        err_y = wp.abs(target[1] - actual[1])
+        err_z = wp.abs(target[2] - actual[2])
+        settled = err_x < 0.001 and err_y < 0.001 and err_z < 0.00075
+        if not settled:
+            return
+
+    # Advance to next state
+    task_idx[tid] = state + 1
+    task_timer[tid] = 0.0
+
+    # Snapshot current body_q as start pose for the next task's interpolation
+    body_start = tid * body_count
+    for i in range(body_count):
+        task_init_body_q[body_start + i] = body_q[body_start + i]
+
+
+@wp.kernel(enable_backward=False)
+def extract_ee_pos_kernel(
+    body_q: wp.array[wp.transform],
+    ee_body_global_indices: wp.array[wp.int32],
+    # output
+    ee_pos_actual: wp.array[wp.vec3],
+):
+    """Extract world-frame TCP position per world from body_q."""
+    tid = wp.tid()
+    body_idx = ee_body_global_indices[tid]
+    ee_pos = wp.transform_get_translation(body_q[body_idx])
+    ee_quat = wp.transform_get_rotation(body_q[body_idx])
+    tcp_offset_local = wp.vec3(0.0, 0.0, wp.static(_ROBOTIQ_TCP_OFFSET_M))
+    ee_pos_actual[tid] = ee_pos + wp.quat_rotate(ee_quat, tcp_offset_local)
+
+
+@wp.kernel(enable_backward=False)
+def write_gripper_targets_kernel(
+    ik_solution: wp.array2d[wp.float32],
+    gripper_target: wp.array[wp.float32],
+    joint_targets: wp.array2d[wp.float32],
+    arm_dof_count: int,
+    gripper_dof_start: int,
+    gripper_dof_count: int,
+):
+    """Copy IK arm solution + gripper target to joint_targets 2D array."""
+    tid = wp.tid()
+
+    # Copy arm DOFs from IK solution
+    for j in range(arm_dof_count):
+        joint_targets[tid, j] = ik_solution[tid, j]
+
+    # Write gripper DOFs: all gripper joints get the same control value
+    ctrl = gripper_target[tid]
+    for j in range(gripper_dof_count):
+        joint_targets[tid, gripper_dof_start + j] = ctrl
+
+
+@wp.kernel(enable_backward=False)
+def write_mujoco_ctrl_kernel(
+    ik_solution: wp.array2d[wp.float32],
+    gripper_target: wp.array[wp.float32],
+    mujoco_ctrl: wp.array2d[wp.float32],
+    arm_actuator_count: int,
+    gripper_actuator_idx: int,
+):
+    """Write IK arm solution + gripper target to MuJoCo ctrl."""
+    tid = wp.tid()
+    for j in range(arm_actuator_count):
+        mujoco_ctrl[tid, j] = ik_solution[tid, j]
+    mujoco_ctrl[tid, gripper_actuator_idx] = gripper_target[tid]
+
+
+# ----------------------------------------------------------------------------
+# Warp kernels: metrics
+# ----------------------------------------------------------------------------
+
+
+@wp.kernel(enable_backward=False)
+def update_penetration_kernel(
+    contact_dist: wp.array[wp.float32],  # mjw_data.contact.dist, shape (naconmax,)
+    contact_worldid: wp.array[wp.int32],  # mjw_data.contact.worldid, shape (naconmax,)
+    nacon: wp.array[wp.int32],  # mjw_data.nacon, shape (1,)
+    world_count: wp.int32,
+    penetration_cur: wp.array[wp.float32],  # shape (world_count,)
+    penetration_max: wp.array[wp.float32],  # shape (world_count,)
+):
+    tid = wp.tid()
+    if tid >= nacon[0]:
+        return
+    w = contact_worldid[tid]
+    if w < 0 or w >= world_count:
+        return
+    pen = wp.max(-contact_dist[tid], 0.0)
+    wp.atomic_max(penetration_cur, w, pen)
+    wp.atomic_max(penetration_max, w, pen)
+
+
+@wp.kernel(enable_backward=False)
+def update_metrics_kernel(
+    pad_force_matrix: wp.array2d[wp.vec3],
+    pad_force_matrix_friction: wp.array2d[wp.vec3],
+    table_force_matrix: wp.array2d[wp.vec3],
+    table_force_matrix_friction: wp.array2d[wp.vec3],
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_world_start: wp.array[wp.int32],
+    object_body_offset: wp.int32,
+    task_idx: wp.array[wp.int32],
+    prev_task_idx: wp.array[wp.int32],
+    task_state_count: wp.int32,
+    hold_state: wp.int32,
+    frame_count: wp.int32,
+    pad_force_cur: wp.array[wp.float32],
+    pad_friction_cur: wp.array[wp.float32],
+    table_force_cur: wp.array[wp.float32],
+    table_friction_cur: wp.array[wp.float32],
+    pad_force_max: wp.array[wp.float32],
+    pad_friction_max: wp.array[wp.float32],
+    table_force_max: wp.array[wp.float32],
+    table_friction_max: wp.array[wp.float32],
+    object_z_max: wp.array[wp.float32],
+    object_z_hold_start: wp.array[wp.float32],
+    object_z_hold_end: wp.array[wp.float32],
+    object_vel_sum: wp.array[wp.float32],
+    object_vel_count: wp.array[wp.int32],
+    world_nan_frame: wp.array[wp.int32],
+    state_pad_force_sum: wp.array2d[wp.float32],
+    state_pad_force_max: wp.array2d[wp.float32],
+    state_table_force_sum: wp.array2d[wp.float32],
+    state_table_force_max: wp.array2d[wp.float32],
+    state_pen_sum: wp.array2d[wp.float32],
+    state_pen_max: wp.array2d[wp.float32],
+    state_vel_sum: wp.array2d[wp.float32],
+    state_count: wp.array2d[wp.int32],
+    penetration_cur: wp.array[wp.float32],
+):
+    w = wp.tid()
+    n_counterparts = pad_force_matrix.shape[1]
+
+    # Pad force + friction (sum over counterparts, then magnitude)
+    pad_f_sum = wp.vec3(0.0, 0.0, 0.0)
+    pad_fr_sum = wp.vec3(0.0, 0.0, 0.0)
+    for c in range(n_counterparts):
+        pad_f_sum = pad_f_sum + pad_force_matrix[w, c]
+        pad_fr_sum = pad_fr_sum + pad_force_matrix_friction[w, c]
+    pf = wp.length(pad_f_sum)
+    pfr = wp.length(pad_fr_sum)
+
+    # Table force + friction
+    table_counterpart_count = table_force_matrix.shape[1]
+    tbl_f_sum = wp.vec3(0.0, 0.0, 0.0)
+    tbl_fr_sum = wp.vec3(0.0, 0.0, 0.0)
+    for c in range(table_counterpart_count):
+        tbl_f_sum = tbl_f_sum + table_force_matrix[w, c]
+        tbl_fr_sum = tbl_fr_sum + table_force_matrix_friction[w, c]
+    tf = wp.length(tbl_f_sum)
+    tfr = wp.length(tbl_fr_sum)
+
+    pad_force_cur[w] = pf
+    pad_friction_cur[w] = pfr
+    table_force_cur[w] = tf
+    table_friction_cur[w] = tfr
+    pad_force_max[w] = wp.max(pad_force_max[w], pf)
+    pad_friction_max[w] = wp.max(pad_friction_max[w], pfr)
+    table_force_max[w] = wp.max(table_force_max[w], tf)
+    table_friction_max[w] = wp.max(table_friction_max[w], tfr)
+
+    # Object pose + velocity
+    obj_global = body_world_start[w] + object_body_offset
+    obj_q = body_q[obj_global]
+    obj_pos = wp.transform_get_translation(obj_q)
+    obj_z = obj_pos[2]
+    obj_vel = wp.spatial_bottom(body_qd[obj_global])
+    vel_mag = wp.length(obj_vel)
+
+    # NaN detection
+    obj_z_is_nan = wp.isnan(obj_z)
+    if obj_z_is_nan and world_nan_frame[w] < 0:
+        world_nan_frame[w] = frame_count
+
+    if not obj_z_is_nan:
+        object_z_max[w] = wp.max(object_z_max[w], obj_z)
+
+    vel_is_nan = wp.isnan(vel_mag)
+    if not vel_is_nan:
+        object_vel_sum[w] = object_vel_sum[w] + vel_mag
+        object_vel_count[w] = object_vel_count[w] + 1
+
+    # State-bucketed accumulation
+    cur_task = task_idx[w]
+    prev_task = prev_task_idx[w]
+    if cur_task < task_state_count:
+        t = cur_task
+        pen_mm = penetration_cur[w] * 1000.0
+        state_pad_force_sum[w, t] = state_pad_force_sum[w, t] + pf
+        state_pad_force_max[w, t] = wp.max(state_pad_force_max[w, t], pf)
+        state_table_force_sum[w, t] = state_table_force_sum[w, t] + tf
+        state_table_force_max[w, t] = wp.max(state_table_force_max[w, t], tf)
+        state_pen_sum[w, t] = state_pen_sum[w, t] + pen_mm
+        state_pen_max[w, t] = wp.max(state_pen_max[w, t], pen_mm)
+        if not vel_is_nan:
+            state_vel_sum[w, t] = state_vel_sum[w, t] + vel_mag * 1000.0
+        state_count[w, t] = state_count[w, t] + 1
+
+    # HOLD transition
+    if cur_task == hold_state:
+        if prev_task != hold_state:
+            object_z_hold_start[w] = obj_z
+        object_z_hold_end[w] = obj_z
+
+
+@wp.kernel(enable_backward=False)
+def copy_prev_task_kernel(
+    task_idx: wp.array[wp.int32],
+    prev_task_idx: wp.array[wp.int32],
+):
+    tid = wp.tid()
+    prev_task_idx[tid] = task_idx[tid]
+
+
+# GUI staging buffer indices (keep in sync with stage_gui_metrics_kernel below).
+_GUI_STAGE_FIELDS = [
+    "pad_force_cur",
+    "pad_force_max",
+    "pad_friction_cur",
+    "pad_friction_max",
+    "table_force_cur",
+    "table_force_max",
+    "table_friction_cur",
+    "table_friction_max",
+    "penetration_cur",
+    "penetration_max",
+    "avg_vel",
+    "object_z",
+    "object_z_init",
+    "object_z_max",
+    "task_idx",  # stored as float for uniform array
+    "world_nan_frame",  # -1 sentinel -> NaN semantics preserved via float cast
+    "task_timer",  # task_timer[selected_world]
+    "task_dur",  # task_durations[cur_task], or 0 if cur_task >= task_duration_count
+    "ee_target_x",
+    "ee_target_y",
+    "ee_target_z",
+    "ee_actual_x",
+    "ee_actual_y",
+    "ee_actual_z",
+]
+_GUI_STAGE_SIZE = len(_GUI_STAGE_FIELDS)
+
+
+@wp.kernel(enable_backward=False)
+def stage_gui_metrics_kernel(
+    selected_world: wp.int32,
+    body_q: wp.array[wp.transform],
+    body_world_start: wp.array[wp.int32],
+    object_body_offset: wp.int32,
+    pad_force_cur: wp.array[wp.float32],
+    pad_force_max: wp.array[wp.float32],
+    pad_friction_cur: wp.array[wp.float32],
+    pad_friction_max: wp.array[wp.float32],
+    table_force_cur: wp.array[wp.float32],
+    table_force_max: wp.array[wp.float32],
+    table_friction_cur: wp.array[wp.float32],
+    table_friction_max: wp.array[wp.float32],
+    penetration_cur: wp.array[wp.float32],
+    penetration_max: wp.array[wp.float32],
+    object_vel_sum: wp.array[wp.float32],
+    object_vel_count: wp.array[wp.int32],
+    object_z_init: wp.array[wp.float32],
+    object_z_max: wp.array[wp.float32],
+    task_idx: wp.array[wp.int32],
+    world_nan_frame: wp.array[wp.int32],
+    task_timer: wp.array[wp.float32],
+    task_durations: wp.array[wp.float32],
+    task_duration_count: wp.int32,
+    ee_pos_target: wp.array[wp.vec3],
+    ee_pos_actual: wp.array[wp.vec3],
+    out: wp.array[wp.float32],
+):
+    # dim=1 -- single-thread pack.
+    # Output indices must match _GUI_STAGE_FIELDS order.
+    w = selected_world
+    obj_global = body_world_start[w] + object_body_offset
+    obj_pos = wp.transform_get_translation(body_q[obj_global])
+    out[0] = pad_force_cur[w]
+    out[1] = pad_force_max[w]
+    out[2] = pad_friction_cur[w]
+    out[3] = pad_friction_max[w]
+    out[4] = table_force_cur[w]
+    out[5] = table_force_max[w]
+    out[6] = table_friction_cur[w]
+    out[7] = table_friction_max[w]
+    out[8] = penetration_cur[w]
+    out[9] = penetration_max[w]
+    vel_count = object_vel_count[w]
+    if vel_count > 0:
+        out[10] = object_vel_sum[w] / wp.float32(vel_count)
+    else:
+        out[10] = 0.0
+    out[11] = obj_pos[2]
+    out[12] = object_z_init[w]
+    out[13] = object_z_max[w]
+    out[14] = wp.float32(task_idx[w])
+    # world_nan_frame is an int32 frame index; float32 exactly represents
+    # integers up to 2**24 (~16.7M frames), well beyond any realistic episode.
+    out[15] = wp.float32(world_nan_frame[w])
+    out[16] = task_timer[w]
+    cur_task = task_idx[w]
+    # Guard: task_idx can be >= task_duration_count (DONE state); pack 0.0 then.
+    if cur_task < task_duration_count:
+        out[17] = task_durations[cur_task]
+    else:
+        out[17] = 0.0
+    ee_t = ee_pos_target[w]
+    ee_a = ee_pos_actual[w]
+    out[18] = ee_t[0]
+    out[19] = ee_t[1]
+    out[20] = ee_t[2]
+    out[21] = ee_a[0]
+    out[22] = ee_a[1]
+    out[23] = ee_a[2]
+
+
+@wp.kernel(enable_backward=False)
+def _seed_object_z_init_kernel(
+    body_q: wp.array[wp.transform],
+    body_world_start: wp.array[wp.int32],
+    object_body_offset: wp.int32,
+    object_z_init: wp.array[wp.float32],
+):
+    w = wp.tid()
+    obj_global = body_world_start[w] + object_body_offset
+    object_z_init[w] = wp.transform_get_translation(body_q[obj_global])[2]
+
+
+# ----------------------------------------------------------------------------
+# Warp kernels: frame visualization
+# ----------------------------------------------------------------------------
+
+
+@wp.func
+def _write_triad(
+    base: wp.int32,
+    origin: wp.vec3,
+    rot: wp.quat,
+    axis_length: wp.float32,
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    """Write three RGB axis lines from ``origin`` rotated by ``rot``, into slots [base..base+2]."""
+    ex = wp.quat_rotate(rot, wp.vec3(axis_length, 0.0, 0.0))
+    ey = wp.quat_rotate(rot, wp.vec3(0.0, axis_length, 0.0))
+    ez = wp.quat_rotate(rot, wp.vec3(0.0, 0.0, axis_length))
+    line_begin[base + 0] = origin
+    line_end[base + 0] = origin + ex
+    line_begin[base + 1] = origin
+    line_end[base + 1] = origin + ey
+    line_begin[base + 2] = origin
+    line_end[base + 2] = origin + ez
+
+
+@wp.func
+def _zero_triad(
+    base: wp.int32,
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    """Clear the three line segments owned by world ``base // 3``."""
+    zero = wp.vec3(0.0, 0.0, 0.0)
+    line_begin[base + 0] = zero
+    line_end[base + 0] = zero
+    line_begin[base + 1] = zero
+    line_end[base + 1] = zero
+    line_begin[base + 2] = zero
+    line_end[base + 2] = zero
+
+
+@wp.kernel(enable_backward=False)
+def compute_object_frame_lines(
+    body_q: wp.array[wp.transform],
+    body_world_start: wp.array[wp.int32],
+    object_body_offset: wp.int32,
+    world_offsets: wp.array[wp.vec3],
+    visible_worlds_mask: wp.array[wp.int32],
+    axis_length: wp.float32,
+    # outputs
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    """Draw an XYZ triad per object body at body_q.t with body_q.q-aligned axes."""
+    w = wp.tid()
+    base = w * 3
+    if visible_worlds_mask and visible_worlds_mask[w] == 0:
+        _zero_triad(base, line_begin, line_end)
+        return
+    x_wb = body_q[body_world_start[w] + object_body_offset]
+    origin = wp.transform_get_translation(x_wb) + world_offsets[w]
+    _write_triad(base, origin, wp.transform_get_rotation(x_wb), axis_length, line_begin, line_end)
+
+
+@wp.kernel(enable_backward=False)
+def compute_object_com_frame_lines(
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    body_world_start: wp.array[wp.int32],
+    object_body_offset: wp.int32,
+    world_offsets: wp.array[wp.vec3],
+    visible_worlds_mask: wp.array[wp.int32],
+    axis_length: wp.float32,
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    """Draw an XYZ triad at body_q * body_com with body_q.q-aligned axes."""
+    w = wp.tid()
+    base = w * 3
+    if visible_worlds_mask and visible_worlds_mask[w] == 0:
+        _zero_triad(base, line_begin, line_end)
+        return
+    obj_global = body_world_start[w] + object_body_offset
+    x_wb = body_q[obj_global]
+    rot = wp.transform_get_rotation(x_wb)
+    com_w = wp.transform_get_translation(x_wb) + wp.quat_rotate(rot, body_com[obj_global]) + world_offsets[w]
+    _write_triad(base, com_w, rot, axis_length, line_begin, line_end)
+
+
+@wp.kernel(enable_backward=False)
+def compute_ee_base_frame_lines(
+    body_q: wp.array[wp.transform],
+    body_world_start: wp.array[wp.int32],
+    ee_body_offset: wp.int32,
+    world_offsets: wp.array[wp.vec3],
+    visible_worlds_mask: wp.array[wp.int32],
+    axis_length: wp.float32,
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    """Draw an XYZ triad at the EE body's body_q.t with body_q.q-aligned axes."""
+    w = wp.tid()
+    base = w * 3
+    if visible_worlds_mask and visible_worlds_mask[w] == 0:
+        _zero_triad(base, line_begin, line_end)
+        return
+    x_wb = body_q[body_world_start[w] + ee_body_offset]
+    origin = wp.transform_get_translation(x_wb) + world_offsets[w]
+    _write_triad(base, origin, wp.transform_get_rotation(x_wb), axis_length, line_begin, line_end)
+
+
+@wp.kernel(enable_backward=False)
+def compute_tcp_frame_lines(
+    body_q: wp.array[wp.transform],
+    body_world_start: wp.array[wp.int32],
+    ee_body_offset: wp.int32,
+    tcp_offset: wp.float32,
+    world_offsets: wp.array[wp.vec3],
+    visible_worlds_mask: wp.array[wp.int32],
+    axis_length: wp.float32,
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    """Draw an XYZ triad at the TCP (EE body translated by tcp_offset along its local Z)."""
+    w = wp.tid()
+    base = w * 3
+    if visible_worlds_mask and visible_worlds_mask[w] == 0:
+        _zero_triad(base, line_begin, line_end)
+        return
+    x_wb = body_q[body_world_start[w] + ee_body_offset]
+    rot = wp.transform_get_rotation(x_wb)
+    tcp_local = wp.vec3(0.0, 0.0, tcp_offset)
+    origin = wp.transform_get_translation(x_wb) + wp.quat_rotate(rot, tcp_local) + world_offsets[w]
+    _write_triad(base, origin, rot, axis_length, line_begin, line_end)
+
+
+@wp.kernel(enable_backward=False)
+def compute_world_frame_lines(
+    world_offsets: wp.array[wp.vec3],
+    visible_worlds_mask: wp.array[wp.int32],
+    axis_length: wp.float32,
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    """Draw a world-axis-aligned XYZ triad at each world's render origin."""
+    w = wp.tid()
+    base = w * 3
+    if visible_worlds_mask and visible_worlds_mask[w] == 0:
+        _zero_triad(base, line_begin, line_end)
+        return
+    _write_triad(base, world_offsets[w], wp.quat_identity(), axis_length, line_begin, line_end)
+
+
+@wp.kernel(enable_backward=False)
+def compute_spawn_region_lines(
+    world_offsets: wp.array[wp.vec3],
+    visible_worlds_mask: wp.array[wp.int32],
+    region_center: wp.vec3,
+    half_x: wp.float32,
+    half_y: wp.float32,
+    # outputs: 4 line segments per world (square outline)
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    """Draw a flat square outline at the per-world object spawn region (XY range, on the table top)."""
+    w = wp.tid()
+    base = w * 4
+    if visible_worlds_mask and visible_worlds_mask[w] == 0:
+        zero = wp.vec3(0.0, 0.0, 0.0)
+        for i in range(4):
+            line_begin[base + i] = zero
+            line_end[base + i] = zero
+        return
+    c = region_center + world_offsets[w]
+    p_mm = wp.vec3(c[0] - half_x, c[1] - half_y, c[2])
+    p_pm = wp.vec3(c[0] + half_x, c[1] - half_y, c[2])
+    p_pp = wp.vec3(c[0] + half_x, c[1] + half_y, c[2])
+    p_mp = wp.vec3(c[0] - half_x, c[1] + half_y, c[2])
+    line_begin[base + 0] = p_mm
+    line_end[base + 0] = p_pm
+    line_begin[base + 1] = p_pm
+    line_end[base + 1] = p_pp
+    line_begin[base + 2] = p_pp
+    line_end[base + 2] = p_mp
+    line_begin[base + 3] = p_mp
+    line_end[base + 3] = p_mm
+
+
+# ----------------------------------------------------------------------------
+# Asset / geometry helpers
+# ----------------------------------------------------------------------------
+
+
+def _load_mesh_asset_no_sdf(asset_path, prim_path):
+    """Load a USD mesh asset with scale baked in. SDF built later per-world."""
+    stage = Usd.Stage.Open(str(asset_path / "model.usda"))
+    prim = stage.GetPrimAtPath(prim_path)
+    mesh = newton.usd.get_mesh(prim, load_normals=True, face_varying_normal_conversion="vertex_splitting")
+    parent_prim = stage.GetPrimAtPath("/root/Model")
+    scale = np.asarray(newton.usd.get_scale(parent_prim), dtype=np.float32)
+    if not np.allclose(scale, 1.0):
+        mesh = mesh.copy(vertices=mesh.vertices * scale, recompute_inertia=True)
+    return mesh
+
+
+# ---- LEGO brick mesh generation ----
+
+
+def _lego_cylinder_mesh(radius, height, segments, cx=0.0, cy=0.0, cz=0.0, bottom_cap=True):
+    n = segments
+    angles = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    cos_a, sin_a = np.cos(angles), np.sin(angles)
+    ring_x = cx + radius * cos_a
+    ring_y = cy + radius * sin_a
+    verts = []
+    faces = []
+    side_bot = np.column_stack([ring_x, ring_y, np.full(n, cz)]).astype(np.float32)
+    side_top = np.column_stack([ring_x, ring_y, np.full(n, cz + height)]).astype(np.float32)
+    verts.append(side_bot)
+    verts.append(side_top)
+    for i in range(n):
+        j = (i + 1) % n
+        faces.append([i, n + j, n + i])
+        faces.append([i, j, n + j])
+    off_top = 2 * n
+    cap_top_ring = np.column_stack([ring_x, ring_y, np.full(n, cz + height)]).astype(np.float32)
+    cap_top_center = np.array([[cx, cy, cz + height]], dtype=np.float32)
+    verts.append(cap_top_ring)
+    verts.append(cap_top_center)
+    tc = off_top + n
+    for i in range(n):
+        j = (i + 1) % n
+        faces.append([tc, off_top + i, off_top + j])
+    if bottom_cap:
+        off_bot = off_top + n + 1
+        cap_bot_ring = np.column_stack([ring_x, ring_y, np.full(n, cz)]).astype(np.float32)
+        cap_bot_center = np.array([[cx, cy, cz]], dtype=np.float32)
+        verts.append(cap_bot_ring)
+        verts.append(cap_bot_center)
+        bc = off_bot + n
+        for i in range(n):
+            j = (i + 1) % n
+            faces.append([bc, off_bot + j, off_bot + i])
+    return np.vstack(verts), np.array(faces, dtype=np.int32)
+
+
+def _lego_combine_meshes(mesh_list):
+    all_v, all_f, off = [], [], 0
+    for v, f in mesh_list:
+        all_v.append(v)
+        all_f.append(f + off)
+        off += len(v)
+    return np.vstack(all_v).astype(np.float32), np.vstack(all_f).astype(np.int32)
+
+
+def _lego_make_shell_mesh(nx, ny):
+    ox = nx * _LEGO_PITCH / 2.0
+    oy = ny * _LEGO_PITCH / 2.0
+    inx = ox - _LEGO_WALL_THICKNESS
+    iny = oy - _LEGO_WALL_THICKNESS
+    H = _LEGO_BRICK_HEIGHT
+    T = _LEGO_TOP_THICKNESS
+    v = np.array(
+        [
+            [-ox, -oy, 0],
+            [+ox, -oy, 0],
+            [+ox, +oy, 0],
+            [-ox, +oy, 0],
+            [-ox, -oy, H],
+            [+ox, -oy, H],
+            [+ox, +oy, H],
+            [-ox, +oy, H],
+            [-inx, -iny, 0],
+            [+inx, -iny, 0],
+            [+inx, +iny, 0],
+            [-inx, +iny, 0],
+            [-inx, -iny, H - T],
+            [+inx, -iny, H - T],
+            [+inx, +iny, H - T],
+            [-inx, +iny, H - T],
+        ],
+        dtype=np.float32,
+    )
+    f = np.array(
+        [
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+            [1, 2, 6],
+            [1, 6, 5],
+            [0, 8, 9],
+            [0, 9, 1],
+            [1, 9, 10],
+            [1, 10, 2],
+            [2, 10, 11],
+            [2, 11, 3],
+            [3, 11, 8],
+            [3, 8, 0],
+            [9, 8, 12],
+            [9, 12, 13],
+            [11, 10, 14],
+            [11, 14, 15],
+            [8, 11, 15],
+            [8, 15, 12],
+            [10, 9, 13],
+            [10, 13, 14],
+            [12, 15, 14],
+            [12, 14, 13],
+        ],
+        dtype=np.int32,
+    )
+    return v, f
+
+
+def _lego_make_brick_mesh(nx=4, ny=2):
+    shell_v, shell_f = _lego_make_shell_mesh(nx, ny)
+    seg = _LEGO_CYLINDER_SEGMENTS
+    stud_meshes = []
+    for i in range(nx):
+        for j in range(ny):
+            sx = (i - (nx - 1) / 2.0) * _LEGO_PITCH
+            sy = (j - (ny - 1) / 2.0) * _LEGO_PITCH
+            stud_meshes.append(
+                _lego_cylinder_mesh(
+                    _LEGO_STUD_RADIUS,
+                    _LEGO_STUD_HEIGHT,
+                    seg,
+                    cx=sx,
+                    cy=sy,
+                    cz=_LEGO_BRICK_HEIGHT,
+                    bottom_cap=False,
+                )
+            )
+    tube_meshes = []
+    if ny == 2:
+        tube_height = _LEGO_BRICK_HEIGHT - _LEGO_TOP_THICKNESS
+        for i in range(nx - 1):
+            tx = (i - (nx - 2) / 2.0) * _LEGO_PITCH
+            tube_meshes.append(_lego_cylinder_mesh(_LEGO_TUBE_OUTER_RADIUS, tube_height, seg, cx=tx, cy=0.0, cz=0.0))
+    v, f = _lego_combine_meshes([(shell_v, shell_f), *stud_meshes, *tube_meshes])
+    center = (v.min(axis=0) + v.max(axis=0)) / 2.0
+    v -= center
+    return newton.Mesh(v, f.flatten())
+
+
+# ---- Mesh loading helpers for local USD and external OBJ assets ----
+
+
+def _load_usd_mesh_local(usd_path, prim_path):
+    stage = Usd.Stage.Open(str(usd_path))
+    prim = stage.GetPrimAtPath(prim_path)
+    mesh = newton.usd.get_mesh(prim, load_normals=False)
+    verts = mesh.vertices
+    center = (verts.min(axis=0) + verts.max(axis=0)) / 2.0
+    if not np.allclose(center, 0.0, atol=1e-4):
+        mesh = mesh.copy(vertices=verts - center, recompute_inertia=True)
+    return mesh
+
+
+def _load_obj_mesh_trimesh(obj_path):
+    import trimesh  # noqa: PLC0415
+
+    tm = trimesh.load(obj_path, force="mesh")
+    vertices = np.array(tm.vertices, dtype=np.float32)
+    indices = np.array(tm.faces.flatten(), dtype=np.int32)
+    center = (vertices.min(axis=0) + vertices.max(axis=0)) / 2.0
+    vertices -= center
+    return newton.Mesh(vertices, indices)
 
 
 if __name__ == "__main__":
