@@ -127,12 +127,12 @@ _GRASP_Z_EXTRA = {
 
 
 @dataclass(frozen=True)
-class GraspDesign:
+class GraspSpec:
     """Per-shape grasp pose, authored in the object's COM frame.
 
     Both ``offset_local`` and ``quat_local`` are expressed in the body's COM-aligned
     frame. ``offset_local`` is in **units of the per-world object half-size** so the
-    design stays size-invariant under per-world half-size jitter; the kernel
+    spec stays size-invariant under per-world half-size jitter; the kernel
     multiplies it by ``half_size`` to recover meters. ``quat_local`` rotates the EE
     target around the body, on top of the shared ``base_ee_rot``.
 
@@ -147,26 +147,26 @@ class GraspDesign:
     margin_pct: float = 0.05
 
 
-GRASP_DESIGNS: dict[ObjectShape, GraspDesign] = {
-    ObjectShape.BOX: GraspDesign(margin_pct=0.05),
-    ObjectShape.SPHERE: GraspDesign(margin_pct=0.05),
-    ObjectShape.CYLINDER: GraspDesign(margin_pct=0.05),
-    ObjectShape.CAPSULE: GraspDesign(margin_pct=0.05),
-    ObjectShape.ELLIPSOID: GraspDesign(margin_pct=0.05),
-    ObjectShape.CUP: GraspDesign(margin_pct=0.22),
-    ObjectShape.RUBBER_DUCK: GraspDesign(margin_pct=0.10),
-    ObjectShape.LEGO_BRICK: GraspDesign(margin_pct=0.15),
-    ObjectShape.RJ45_PLUG: GraspDesign(
+GRASP_SPECS: dict[ObjectShape, GraspSpec] = {
+    ObjectShape.BOX: GraspSpec(margin_pct=0.05),
+    ObjectShape.SPHERE: GraspSpec(margin_pct=0.05),
+    ObjectShape.CYLINDER: GraspSpec(margin_pct=0.05),
+    ObjectShape.CAPSULE: GraspSpec(margin_pct=0.05),
+    ObjectShape.ELLIPSOID: GraspSpec(margin_pct=0.05),
+    ObjectShape.CUP: GraspSpec(margin_pct=0.22),
+    ObjectShape.RUBBER_DUCK: GraspSpec(margin_pct=0.10),
+    ObjectShape.LEGO_BRICK: GraspSpec(margin_pct=0.15),
+    ObjectShape.RJ45_PLUG: GraspSpec(
         offset_local=wp.vec3(0.0, 0.30, 0.0),
         quat_local=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 90.0 * wp.pi / 180.0),
         margin_pct=0.10,
     ),
-    ObjectShape.BEAR: GraspDesign(margin_pct=0.25),
-    ObjectShape.NUT: GraspDesign(
+    ObjectShape.BEAR: GraspSpec(margin_pct=0.25),
+    ObjectShape.NUT: GraspSpec(
         quat_local=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 30.0 * wp.pi / 180.0),
         margin_pct=0.15,
     ),
-    ObjectShape.BOLT: GraspDesign(margin_pct=0.30),
+    ObjectShape.BOLT: GraspSpec(margin_pct=0.30),
 }
 
 
@@ -847,37 +847,36 @@ class Example:
         newton.eval_fk(self.model_arm_only, self.model_arm_only.joint_q, self.model_arm_only.joint_qd, state_arm)
         arm_ee_rot = wp.transform_get_rotation(wp.transform(*state_arm.body_q.numpy()[self.ik_ee_index]))
 
-        # --- Object-centric grasp: per-world design inputs + SoA runtime buffers ---
-        # Pre-allocated once; the Apply path reuses them in place.
+        # --- Object-centric grasp: per-world spec inputs + SoA runtime outputs ---
         self._shape_mask: dict[ObjectShape, np.ndarray] = {
             shape: np.where(np.asarray(self.world_shapes) == shape)[0].astype(np.int32)
             for shape in set(self.world_shapes)
         }
 
-        # CPU mirrors
-        self._design_offset_local_np = np.zeros((self.world_count, 3), dtype=np.float32)
-        self._design_quat_local_np = np.tile(np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32), (self.world_count, 1))
-        self._design_ctrl_np = np.zeros(self.world_count, dtype=np.float32)
-
-        # Fill per-world from GRASP_DESIGNS, deriving offset_local.z per shape
+        # Per-world spec materialized as parallel CPU/GPU arrays. Fill the CPU side
+        # from GRASP_SPECS, then construct the GPU mirror once.
+        offset_np = np.zeros((self.world_count, 3), dtype=np.float32)
+        quat_np = np.tile(np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32), (self.world_count, 1))
+        ctrl_np = np.zeros(self.world_count, dtype=np.float32)
         for i, shape in enumerate(self.world_shapes):
-            design = GRASP_DESIGNS[shape]
+            spec = GRASP_SPECS[shape]
             z_local = derive_offset_local_z(shape, half_size=self.world_half_sizes[i], z_half=self._world_z_half[i])
-            self._design_offset_local_np[i] = (*design.offset_local[:2], z_local)
-            self._design_quat_local_np[i] = design.quat_local
-            self._design_ctrl_np[i] = margin_pct_to_ctrl(design.margin_pct, y_half_m=self._world_y_half[i])
+            offset_np[i] = (*spec.offset_local[:2], z_local)
+            quat_np[i] = spec.quat_local
+            ctrl_np[i] = margin_pct_to_ctrl(spec.margin_pct, y_half_m=self._world_y_half[i])
+        self.spec = _PerWorldGraspSpec(
+            offset_local=wp.array(offset_np, dtype=wp.vec3),
+            quat_local=wp.array(quat_np, dtype=wp.quat),
+            ctrl=wp.array(ctrl_np, dtype=wp.float32),
+            offset_local_np=offset_np,
+            quat_local_np=quat_np,
+            ctrl_np=ctrl_np,
+            offset_src=wp.zeros(1, dtype=wp.vec3),
+            quat_src=wp.zeros(1, dtype=wp.quat),
+            ctrl_src=wp.zeros(1, dtype=wp.float32),
+        )
 
-        # GPU design inputs
-        self._design_offset_local = wp.array(self._design_offset_local_np, dtype=wp.vec3)
-        self._design_quat_local = wp.array(self._design_quat_local_np, dtype=wp.quat)
-        self._design_ctrl = wp.array(self._design_ctrl_np, dtype=wp.float32)
-
-        # Single-slot upload sources reused on every Apply call (no per-Apply allocation).
-        self._single_offset_local_src = wp.zeros(1, dtype=wp.vec3)
-        self._single_quat_local_src = wp.zeros(1, dtype=wp.quat)
-        self._single_ctrl_src = wp.zeros(1, dtype=wp.float32)
-
-        # GPU runtime SoA outputs
+        # GPU runtime SoA outputs of compute_grasp_targets.
         self.grasp_pos = wp.zeros(self.world_count, dtype=wp.vec3)
         self.grasp_rot = wp.zeros(self.world_count, dtype=wp.quat)
         self.grasp_ctrl = wp.zeros(self.world_count, dtype=wp.float32)
@@ -910,9 +909,9 @@ class Example:
                 self.model.body_world_start,
                 self.object_body_offset,
                 self._world_half_size_array,
-                self._design_offset_local,
-                self._design_quat_local,
-                self._design_ctrl,
+                self.spec.offset_local,
+                self.spec.quat_local,
+                self.spec.ctrl,
                 self.base_ee_rot,
             ],
             outputs=[self.grasp_pos, self.grasp_rot, self.grasp_ctrl],
@@ -1181,21 +1180,21 @@ class Example:
         # GUI readback staging cache (populated by stage_gui; read downstream).
         self._cached_gui = np.zeros(_GUI_STAGE_SIZE, dtype=np.float32)
         self._gui_read_interval = 10
-        # Per-shape GUI edit buffer. Seeded from the actual per-world design buffer
+        # Per-shape GUI edit buffer. Seeded from the actual per-world spec arrays
         # so the slider reflects what the simulation is currently using -- particularly
         # offset_local.z, which _setup_state_machine baked from derive_offset_local_z and
-        # is non-zero even though the GRASP_DESIGNS placeholder is (0, 0, 0).
+        # is non-zero even though the GRASP_SPECS placeholder is (0, 0, 0).
         self._gui_grasp_edits: dict[ObjectShape, dict] = {}
-        for shape, design in GRASP_DESIGNS.items():
+        for shape, spec in GRASP_SPECS.items():
             mask = self._shape_mask.get(shape)
             if mask is None or len(mask) == 0:
-                seed_offset = list(design.offset_local)
+                seed_offset = list(spec.offset_local)
             else:
-                seed_offset = self._design_offset_local_np[int(mask[0])].tolist()
+                seed_offset = self.spec.offset_local_np[int(mask[0])].tolist()
             self._gui_grasp_edits[shape] = {
                 "offset_local": seed_offset,
-                "euler_deg": list(_quat_to_euler_zyx_deg(design.quat_local)),
-                "margin_pct": design.margin_pct,
+                "euler_deg": list(_quat_to_euler_zyx_deg(spec.quat_local)),
+                "margin_pct": spec.margin_pct,
             }
         self._gui_lift_mm = int(round(self.lift_distance_m * 1000.0))
         self._gui_broadcast_apply = False
@@ -1368,17 +1367,17 @@ class Example:
         imgui.text(f"Frame: {self.episode_steps}  t={self.sim_time:.2f}s")
 
     def _apply_grasp_edits(self, w: int, broadcast: bool) -> None:
-        """Commit the GUI edit buffer for world w's shape to GRASP_DESIGNS and the GPU."""
+        """Commit the GUI edit buffer for world w's shape to GRASP_SPECS and the GPU."""
         shape = self.world_shapes[w]
         edits = self._gui_grasp_edits[shape]
 
-        # 1. Mutate GRASP_DESIGNS (single entry per shape).
-        new_design = GraspDesign(
+        # 1. Mutate GRASP_SPECS (single entry per shape).
+        new_spec = GraspSpec(
             offset_local=wp.vec3(*edits["offset_local"]),
             quat_local=_euler_zyx_deg_to_quat(wp.vec3(*edits["euler_deg"])),
             margin_pct=edits["margin_pct"],
         )
-        GRASP_DESIGNS[shape] = new_design
+        GRASP_SPECS[shape] = new_spec
 
         # 2. Update global lift.
         self.lift_distance_m = self._gui_lift_mm / 1000.0
@@ -1389,61 +1388,60 @@ class Example:
         affected = self._shape_mask[shape] if broadcast else np.array([w], dtype=np.int32)
         for idx in affected:
             idx_int = int(idx)
-            self._design_offset_local_np[idx_int] = new_design.offset_local
-            self._design_quat_local_np[idx_int] = new_design.quat_local
-            self._design_ctrl_np[idx_int] = margin_pct_to_ctrl(
-                new_design.margin_pct, y_half_m=self._world_y_half[idx_int]
-            )
+            self.spec.offset_local_np[idx_int] = new_spec.offset_local
+            self.spec.quat_local_np[idx_int] = new_spec.quat_local
+            self.spec.ctrl_np[idx_int] = margin_pct_to_ctrl(new_spec.margin_pct, y_half_m=self._world_y_half[idx_int])
 
         # 4. Upload mutated CPU mirrors back to GPU and relaunch the grasp-target kernel.
         self._upload_and_relaunch_grasp_targets(slot=None if broadcast else w)
 
     def _upload_and_relaunch_grasp_targets(self, slot: int | None) -> None:
-        """Push design buffers (CPU mirror -> GPU) and recompute grasp targets.
+        """Push spec buffers (CPU mirror -> GPU) and recompute grasp targets.
 
         ``slot=None`` rebuilds every world via a full-array assign + dim=world_count launch.
         ``slot=i`` patches just world ``i`` with a 1-element copy + dim=1 launch.
         """
+        s = self.spec
         common_inputs = [
             self.state_0.body_q,
             self.model.body_com,
             self.model.body_world_start,
             self.object_body_offset,
             self._world_half_size_array,
-            self._design_offset_local,
-            self._design_quat_local,
-            self._design_ctrl,
+            s.offset_local,
+            s.quat_local,
+            s.ctrl,
             self.base_ee_rot,
         ]
         outputs = [self.grasp_pos, self.grasp_rot, self.grasp_ctrl]
         if slot is None:
-            self._design_offset_local.assign(self._design_offset_local_np)
-            self._design_quat_local.assign(self._design_quat_local_np)
-            self._design_ctrl.assign(self._design_ctrl_np)
+            s.offset_local.assign(s.offset_local_np)
+            s.quat_local.assign(s.quat_local_np)
+            s.ctrl.assign(s.ctrl_np)
             wp.launch(compute_grasp_targets, dim=self.world_count, inputs=common_inputs, outputs=outputs)
         else:
-            self._single_offset_local_src.assign(self._design_offset_local_np[slot : slot + 1])
-            self._single_quat_local_src.assign(self._design_quat_local_np[slot : slot + 1])
-            self._single_ctrl_src.assign(self._design_ctrl_np[slot : slot + 1])
-            wp.copy(self._design_offset_local, self._single_offset_local_src, dest_offset=slot, count=1)
-            wp.copy(self._design_quat_local, self._single_quat_local_src, dest_offset=slot, count=1)
-            wp.copy(self._design_ctrl, self._single_ctrl_src, dest_offset=slot, count=1)
+            s.offset_src.assign(s.offset_local_np[slot : slot + 1])
+            s.quat_src.assign(s.quat_local_np[slot : slot + 1])
+            s.ctrl_src.assign(s.ctrl_np[slot : slot + 1])
+            wp.copy(s.offset_local, s.offset_src, dest_offset=slot, count=1)
+            wp.copy(s.quat_local, s.quat_src, dest_offset=slot, count=1)
+            wp.copy(s.ctrl, s.ctrl_src, dest_offset=slot, count=1)
             wp.launch(compute_grasp_targets_slot, dim=1, inputs=[slot, *common_inputs], outputs=outputs)
 
     def _print_current_poses(self) -> None:
-        """Dump GRASP_DESIGNS and self.lift_distance_m as a pasteable Python literal."""
-        print("# --- Current grasp designs (paste over GRASP_DESIGNS and self.lift_distance_m) ---")
-        print("GRASP_DESIGNS = {")
+        """Dump GRASP_SPECS and self.lift_distance_m as a pasteable Python literal."""
+        print("# --- Current grasp specs (paste over GRASP_SPECS and self.lift_distance_m) ---")
+        print("GRASP_SPECS = {")
         for shape in ObjectShape:
-            if shape not in GRASP_DESIGNS:
+            if shape not in GRASP_SPECS:
                 continue
-            d = GRASP_DESIGNS[shape]
+            d = GRASP_SPECS[shape]
             # Iterate the wp.vec3 / wp.quat to get plain Python floats so the
             # repr is pasteable (`0.5` rather than `np.float32(0.5)`).
             o_str = ", ".join(repr(x) for x in d.offset_local)
             q_str = ", ".join(repr(x) for x in d.quat_local)
             print(
-                f"    ObjectShape.{shape.name:<12}: GraspDesign("
+                f"    ObjectShape.{shape.name:<12}: GraspSpec("
                 f"offset_local=wp.vec3({o_str}), "
                 f"quat_local=wp.quat({q_str}), "
                 f"margin_pct={d.margin_pct!r}),"
@@ -1681,6 +1679,27 @@ class Example:
 # ----------------------------------------------------------------------------
 # Utility helpers
 # ----------------------------------------------------------------------------
+
+
+@dataclass
+class _PerWorldGraspSpec:
+    """Per-world materialization of ``GRASP_SPECS`` as parallel CPU/GPU SoA arrays.
+
+    The CPU mirrors (``*_np``) are mutated by the GUI Apply path and then assigned
+    to the matching GPU arrays via ``.assign()``. ``*_src`` are 1-element staging
+    buffers reused by the single-slot Apply path so the per-frame Apply costs no
+    new allocations.
+    """
+
+    offset_local: wp.array[wp.vec3]
+    quat_local: wp.array[wp.quat]
+    ctrl: wp.array[wp.float32]
+    offset_local_np: np.ndarray
+    quat_local_np: np.ndarray
+    ctrl_np: np.ndarray
+    offset_src: wp.array[wp.vec3]
+    quat_src: wp.array[wp.quat]
+    ctrl_src: wp.array[wp.float32]
 
 
 def zero_init(shape, dtype: type = wp.float32):
@@ -1982,18 +2001,18 @@ def compute_grasp_targets(
     body_world_start: wp.array[wp.int32],
     object_body_offset: wp.int32,
     world_hs: wp.array[wp.float32],
-    design_offset_local: wp.array[wp.vec3],
-    design_quat_local: wp.array[wp.quat],
-    design_ctrl: wp.array[wp.float32],
+    spec_offset_local: wp.array[wp.vec3],
+    spec_quat_local: wp.array[wp.quat],
+    spec_ctrl: wp.array[wp.float32],
     base_ee_rot: wp.quat,
     # outputs
     grasp_pos: wp.array[wp.vec3],
     grasp_rot: wp.array[wp.quat],
     grasp_ctrl: wp.array[wp.float32],
 ):
-    """Compute world-frame grasp target from per-shape COM-frame design.
+    """Compute world-frame grasp target from per-shape COM-frame spec.
 
-    Rotation composition: ``body_q.q * base_ee_rot * design_quat_local[w]``.
+    Rotation composition: ``body_q.q * base_ee_rot * spec_quat_local[w]``.
     """
     w = wp.tid()
     obj_global = body_world_start[w] + object_body_offset
@@ -2005,12 +2024,12 @@ def compute_grasp_targets(
     com_world = body_tr + wp.quat_rotate(body_q_rot, com_local)
 
     hs_w = world_hs[w]
-    offset_local = design_offset_local[w] * hs_w
+    offset_local = spec_offset_local[w] * hs_w
     offset_world = wp.quat_rotate(body_q_rot, offset_local)
 
     grasp_pos[w] = com_world + offset_world
-    grasp_rot[w] = body_q_rot * base_ee_rot * design_quat_local[w]
-    grasp_ctrl[w] = design_ctrl[w]
+    grasp_rot[w] = body_q_rot * base_ee_rot * spec_quat_local[w]
+    grasp_ctrl[w] = spec_ctrl[w]
 
 
 @wp.kernel(enable_backward=False)
@@ -2021,9 +2040,9 @@ def compute_grasp_targets_slot(
     body_world_start: wp.array[wp.int32],
     object_body_offset: wp.int32,
     world_hs: wp.array[wp.float32],
-    design_offset_local: wp.array[wp.vec3],
-    design_quat_local: wp.array[wp.quat],
-    design_ctrl: wp.array[wp.float32],
+    spec_offset_local: wp.array[wp.vec3],
+    spec_quat_local: wp.array[wp.quat],
+    spec_ctrl: wp.array[wp.float32],
     base_ee_rot: wp.quat,
     # outputs (only slot world_id is written)
     grasp_pos: wp.array[wp.vec3],
@@ -2039,10 +2058,10 @@ def compute_grasp_targets_slot(
     com_local = body_com[obj_global]
     com_world = body_tr + wp.quat_rotate(body_q_rot, com_local)
     hs_w = world_hs[w]
-    offset_world = wp.quat_rotate(body_q_rot, design_offset_local[w] * hs_w)
+    offset_world = wp.quat_rotate(body_q_rot, spec_offset_local[w] * hs_w)
     grasp_pos[w] = com_world + offset_world
-    grasp_rot[w] = body_q_rot * base_ee_rot * design_quat_local[w]
-    grasp_ctrl[w] = design_ctrl[w]
+    grasp_rot[w] = body_q_rot * base_ee_rot * spec_quat_local[w]
+    grasp_ctrl[w] = spec_ctrl[w]
 
 
 # ----------------------------------------------------------------------------
