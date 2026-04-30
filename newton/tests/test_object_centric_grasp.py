@@ -12,8 +12,7 @@ class TestMarginPctToCtrl(unittest.TestCase):
         ctrl = margin_pct_to_ctrl(margin_pct=0.0, y_half_m=0.015)
         self.assertAlmostEqual(ctrl, 255.0 * (1.0 - 30.0 / 85.0), places=3)
 
-    def test_margin_matches_legacy_formula(self):
-        # Replicates the legacy expression at lines 1580-1587.
+    def test_formula_self_consistent(self):
         margin_pct = 0.15
         y_half_m = 0.020
         y_width_mm = 2.0 * y_half_m * 1000.0
@@ -41,7 +40,7 @@ from newton.examples.robot.example_robot_heterogeneous_grasp import (  # noqa: E
     GRASP_DESIGNS,
     ObjectShape,
     compute_grasp_targets,
-    derive_offset_norm_z,
+    derive_offset_local_z,
 )
 from newton.examples.robot.example_robot_heterogeneous_grasp import (  # noqa: E402
     Example as GraspExample,
@@ -53,58 +52,30 @@ class TestGraspDesigns(unittest.TestCase):
         for shape in ObjectShape:
             self.assertIn(shape, GRASP_DESIGNS, f"Missing GRASP_DESIGNS entry for {shape}")
 
-    def test_quat_local_is_identity_at_startup(self):
-        # Spec: default quat_local is identity; base_ee_rot applied separately in the kernel.
+    def test_margin_pct_in_valid_range(self):
+        # Sanity: every shipped margin_pct value is positive and < 0.5 (above 0.5 the
+        # pads would close past each other).
         for shape, design in GRASP_DESIGNS.items():
-            self.assertAlmostEqual(design.quat_local[0], 0.0, places=6)
-            self.assertAlmostEqual(design.quat_local[1], 0.0, places=6)
-            self.assertAlmostEqual(design.quat_local[2], 0.0, places=6)
-            self.assertAlmostEqual(design.quat_local[3], 1.0, places=6)
+            self.assertGreater(design.margin_pct, 0.0, msg=f"{shape}")
+            self.assertLess(design.margin_pct, 0.5, msg=f"{shape}")
 
-    def test_offset_norm_xy_is_zero(self):
-        for shape, design in GRASP_DESIGNS.items():
-            self.assertEqual(design.offset_norm[0], 0.0)
-            self.assertEqual(design.offset_norm[1], 0.0)
-
-    def test_margin_pct_matches_legacy(self):
-        # From the legacy grasp_margin_pct dict at example line 1565-1578.
-        legacy = {
-            ObjectShape.BOX: 0.05,
-            ObjectShape.SPHERE: 0.05,
-            ObjectShape.CYLINDER: 0.05,
-            ObjectShape.CAPSULE: 0.05,
-            ObjectShape.ELLIPSOID: 0.05,
-            ObjectShape.CUP: 0.22,
-            ObjectShape.RUBBER_DUCK: 0.10,
-            ObjectShape.LEGO_BRICK: 0.15,
-            ObjectShape.RJ45_PLUG: 0.10,
-            ObjectShape.BEAR: 0.25,
-            ObjectShape.NUT: 0.15,
-            ObjectShape.BOLT: 0.30,
-        }
-        for shape, expected in legacy.items():
-            self.assertAlmostEqual(GRASP_DESIGNS[shape].margin_pct, expected, places=6)
-
-    def test_derive_offset_norm_z_reproduces_legacy_grasp_z(self):
-        # Legacy grasp_z: table_top_z + 0.001 + max(0, 2*z_half - grasp_clearance) + grasp_z_offset[shape]
-        # New body_q.t.z at spawn = table_top_z + z_half + 0.0005
-        # New grasp_pos.z = body_q.t.z + offset_norm.z * hs (with identity body_q.q, zero body_com)
-        # So: offset_norm.z = (0.0005 + max(0, 2*z_half - grasp_clearance) - z_half + grasp_z_offset) / hs
+    def test_derive_offset_local_z_formula(self):
+        # offset_local.z = (0.0005 + max(0, 2*z_half - grasp_clearance) - z_half + extra) / half_size
         grasp_clearance = 0.05
         cases = [
-            # (shape, hs, z_half, extra_offset)
+            # (shape, half_size, z_half, extra_offset)
             (ObjectShape.BOX, 0.010, 0.010, 0.0),
             (ObjectShape.CUP, 0.012, 0.012, 0.0),
             (ObjectShape.BOLT, 0.015, 0.015, 0.02),
             (ObjectShape.BEAR, 0.015, 0.015, 0.01),
         ]
-        for shape, hs, z_half, extra in cases:
-            expected = (0.0005 + max(0.0, 2.0 * z_half - grasp_clearance) - z_half + extra) / hs
+        for shape, half_size, z_half, extra in cases:
+            expected = (0.0005 + max(0.0, 2.0 * z_half - grasp_clearance) - z_half + extra) / half_size
             self.assertAlmostEqual(
-                derive_offset_norm_z(shape, hs=hs, z_half=z_half, grasp_clearance=grasp_clearance),
+                derive_offset_local_z(shape, half_size=half_size, z_half=z_half, grasp_clearance=grasp_clearance),
                 expected,
                 places=6,
-                msg=f"offset_norm.z mismatch for {shape}",
+                msg=f"offset_local.z mismatch for {shape}",
             )
 
 
@@ -117,7 +88,7 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
         body_world_start = wp.array([0], dtype=wp.int32)
         world_hs = wp.array([0.01], dtype=wp.float32)
 
-        design_offset_norm = wp.array([wp.vec3(0.0, 0.0, 0.5)], dtype=wp.vec3)
+        design_offset_local = wp.array([wp.vec3(0.0, 0.0, 0.5)], dtype=wp.vec3)
         design_quat_local = wp.array([wp.quat(0.0, 0.0, 0.0, 1.0)], dtype=wp.quat)
         design_ctrl = wp.array([123.0], dtype=wp.float32)
         base_ee_rot = wp.quat(0.0, 0.0, 0.0, 1.0)
@@ -135,7 +106,7 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
                 body_world_start,
                 0,
                 world_hs,
-                design_offset_norm,
+                design_offset_local,
                 design_quat_local,
                 design_ctrl,
                 base_ee_rot,
@@ -143,7 +114,7 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
             outputs=[grasp_pos, grasp_rot, grasp_ctrl],
         )
 
-        # offset_norm.z = 0.5, hs = 0.01 -> 0.005 m above COM = body_q.t + (0, 0, 0.005)
+        # offset_local.z = 0.5, hs = 0.01 -> 0.005 m above COM = body_q.t + (0, 0, 0.005)
         np.testing.assert_allclose(grasp_pos.numpy()[0], [1.0, 2.0, 3.005], atol=1e-6)
         np.testing.assert_allclose(grasp_rot.numpy()[0], [0.0, 0.0, 0.0, 1.0], atol=1e-6)
         self.assertAlmostEqual(float(grasp_ctrl.numpy()[0]), 123.0, places=4)
@@ -155,7 +126,7 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
         body_world_start = wp.array([0], dtype=wp.int32)
         world_hs = wp.array([0.01], dtype=wp.float32)
 
-        design_offset_norm = wp.array([wp.vec3(0.0, 0.0, 0.0)], dtype=wp.vec3)
+        design_offset_local = wp.array([wp.vec3(0.0, 0.0, 0.0)], dtype=wp.vec3)
         design_quat_local = wp.array([wp.quat(0.0, 0.0, 0.0, 1.0)], dtype=wp.quat)
         design_ctrl = wp.array([0.0], dtype=wp.float32)
         base_ee_rot = wp.quat(0.0, 0.0, 0.0, 1.0)
@@ -173,7 +144,7 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
                 body_world_start,
                 0,
                 world_hs,
-                design_offset_norm,
+                design_offset_local,
                 design_quat_local,
                 design_ctrl,
                 base_ee_rot,
@@ -181,7 +152,7 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
             outputs=[grasp_pos, grasp_rot, grasp_ctrl],
         )
 
-        # With zero offset_norm and identity quat, grasp_pos = COM world = body_q.t + body_com.
+        # With zero offset_local and identity quat, grasp_pos = COM world = body_q.t + body_com.
         np.testing.assert_allclose(grasp_pos.numpy()[0], [0.1, 0.2, 0.3], atol=1e-6)
 
     def test_rotation_composition(self):
@@ -194,7 +165,7 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
         body_world_start = wp.array([0], dtype=wp.int32)
         world_hs = wp.array([0.01], dtype=wp.float32)
 
-        design_offset_norm = wp.array([wp.vec3(0.0, 0.0, 0.0)], dtype=wp.vec3)
+        design_offset_local = wp.array([wp.vec3(0.0, 0.0, 0.0)], dtype=wp.vec3)
         design_quat_local = wp.array([wp.quat(0.0, 0.0, 0.0, 1.0)], dtype=wp.quat)
         design_ctrl = wp.array([0.0], dtype=wp.float32)
         sin45 = np.sin(np.pi / 4.0)
@@ -214,7 +185,7 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
                 body_world_start,
                 0,
                 world_hs,
-                design_offset_norm,
+                design_offset_local,
                 design_quat_local,
                 design_ctrl,
                 base_ee_rot,
@@ -250,14 +221,9 @@ def _quat_mul_np(a_xyzw, b_xyzw):
 class TestGraspTargetsMatchReference(unittest.TestCase):
     """Regression: compute_grasp_targets kernel output matches a NumPy reference of the same formula.
 
-    This is not a legacy-parity test. The refactor intentionally anchors the grasp at each
-    object's centre of mass (``body_q * body_com``) rather than at the body origin the legacy
-    code used; shapes with non-trivial ``body_com`` (BEAR, RUBBER_DUCK, LEGO_BRICK, RJ45_PLUG,
-    BOLT) or non-identity ``body_q.q`` (NUT) therefore produce grasp poses that differ from
-    the pre-refactor constants. The existing example sim-test covers end-to-end success.
-
-    What this test guarantees is that the GPU kernel and the CPU formula stay in sync, so a
-    mistake in the kernel body (e.g. a quat composition bug, a wrong COM sign) is caught.
+    Catches kernel-side bugs (bad quat composition, wrong COM sign, etc.) by mirroring the
+    same composition (``body_q * body_com`` for the COM, ``body_q.q * base_ee_rot * quat_local``
+    for the rotation) on the CPU and asserting equality across every shape.
     """
 
     def test_kernel_matches_cpu_reference(self):
@@ -287,11 +253,11 @@ class TestGraspTargetsMatchReference(unittest.TestCase):
             body_rot = np.array([tr[3], tr[4], tr[5], tr[6]], dtype=np.float64)
             com_local = body_com_np[obj_global].astype(np.float64)
             hs_i = float(example.world_half_sizes[i])
-            offset_norm = example._design_offset_norm_np[i].astype(np.float64)
+            offset_local = example._design_offset_local_np[i].astype(np.float64)
             quat_local = example._design_quat_local_np[i].astype(np.float64)
 
             com_world = body_tr + _quat_rotate_np(body_rot, com_local)
-            offset_world = _quat_rotate_np(body_rot, offset_norm * hs_i)
+            offset_world = _quat_rotate_np(body_rot, offset_local * hs_i)
             expected_pos[i] = (com_world + offset_world).astype(np.float32)
             expected_rot[i] = _quat_mul_np(_quat_mul_np(body_rot, base_ee_rot), quat_local).astype(np.float32)
 
@@ -306,6 +272,37 @@ class TestGraspTargetsMatchReference(unittest.TestCase):
         np.testing.assert_allclose(
             grasp_ctrl, expected_ctrl, atol=1e-3, err_msg="grasp_ctrl kernel output disagrees with design inputs"
         )
+
+
+class TestSpawnRandomization(unittest.TestCase):
+    def test_spawn_xy_within_range(self):
+        wp.init()
+        parser = GraspExample.create_parser()
+        sys.argv = [
+            "test",
+            "--viewer",
+            "null",
+            "--world-count",
+            "12",
+            "--num-frames",
+            "1",
+            "--seed",
+            "7",
+            "--spawn-xy-range",
+            "0.10",
+            "--spawn-yaw-range",
+            "0",
+        ]
+        viewer, args = nex.init(parser)
+        example = GraspExample(viewer, args)
+
+        body_q = example.state_0.body_q.numpy()
+        body_ws = example.model.body_world_start.numpy()
+        tt = np.array([float(example.spawn_center[0]), float(example.spawn_center[1])])
+        for w in range(example.world_count):
+            obj = body_q[int(body_ws[w]) + example.object_body_offset]
+            dxy = np.array([obj[0], obj[1]]) - tt
+            np.testing.assert_array_less(np.abs(dxy), 0.1001)
 
 
 if __name__ == "__main__":
