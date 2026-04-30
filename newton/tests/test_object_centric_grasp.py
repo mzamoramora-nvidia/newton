@@ -37,7 +37,7 @@ import warp as wp  # noqa: E402
 
 import newton.examples as nex  # noqa: E402
 from newton.examples.robot.example_robot_heterogeneous_grasp import (  # noqa: E402
-    GRASP_DESIGNS,
+    GRASP_SPECS,
     ObjectShape,
     compute_grasp_targets,
     derive_offset_local_z,
@@ -47,17 +47,17 @@ from newton.examples.robot.example_robot_heterogeneous_grasp import (  # noqa: E
 )
 
 
-class TestGraspDesigns(unittest.TestCase):
+class TestGraspSpecs(unittest.TestCase):
     def test_every_shape_has_an_entry(self):
         for shape in ObjectShape:
-            self.assertIn(shape, GRASP_DESIGNS, f"Missing GRASP_DESIGNS entry for {shape}")
+            self.assertIn(shape, GRASP_SPECS, f"Missing GRASP_SPECS entry for {shape}")
 
     def test_margin_pct_in_valid_range(self):
         # Sanity: every shipped margin_pct value is positive and < 0.5 (above 0.5 the
         # pads would close past each other).
-        for shape, design in GRASP_DESIGNS.items():
-            self.assertGreater(design.margin_pct, 0.0, msg=f"{shape}")
-            self.assertLess(design.margin_pct, 0.5, msg=f"{shape}")
+        for shape, spec in GRASP_SPECS.items():
+            self.assertGreater(spec.margin_pct, 0.0, msg=f"{shape}")
+            self.assertLess(spec.margin_pct, 0.5, msg=f"{shape}")
 
     def test_derive_offset_local_z_formula(self):
         # offset_local.z = (0.0005 + max(0, 2*z_half - grasp_clearance) - z_half + extra) / half_size
@@ -88,9 +88,9 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
         body_world_start = wp.array([0], dtype=wp.int32)
         world_hs = wp.array([0.01], dtype=wp.float32)
 
-        design_offset_local = wp.array([wp.vec3(0.0, 0.0, 0.5)], dtype=wp.vec3)
-        design_quat_local = wp.array([wp.quat(0.0, 0.0, 0.0, 1.0)], dtype=wp.quat)
-        design_ctrl = wp.array([123.0], dtype=wp.float32)
+        spec_offset_local = wp.array([wp.vec3(0.0, 0.0, 0.5)], dtype=wp.vec3)
+        spec_quat_local = wp.array([wp.quat(0.0, 0.0, 0.0, 1.0)], dtype=wp.quat)
+        spec_ctrl = wp.array([123.0], dtype=wp.float32)
         base_ee_rot = wp.quat(0.0, 0.0, 0.0, 1.0)
 
         grasp_pos = wp.zeros(1, dtype=wp.vec3)
@@ -106,9 +106,9 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
                 body_world_start,
                 0,
                 world_hs,
-                design_offset_local,
-                design_quat_local,
-                design_ctrl,
+                spec_offset_local,
+                spec_quat_local,
+                spec_ctrl,
                 base_ee_rot,
             ],
             outputs=[grasp_pos, grasp_rot, grasp_ctrl],
@@ -126,9 +126,9 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
         body_world_start = wp.array([0], dtype=wp.int32)
         world_hs = wp.array([0.01], dtype=wp.float32)
 
-        design_offset_local = wp.array([wp.vec3(0.0, 0.0, 0.0)], dtype=wp.vec3)
-        design_quat_local = wp.array([wp.quat(0.0, 0.0, 0.0, 1.0)], dtype=wp.quat)
-        design_ctrl = wp.array([0.0], dtype=wp.float32)
+        spec_offset_local = wp.array([wp.vec3(0.0, 0.0, 0.0)], dtype=wp.vec3)
+        spec_quat_local = wp.array([wp.quat(0.0, 0.0, 0.0, 1.0)], dtype=wp.quat)
+        spec_ctrl = wp.array([0.0], dtype=wp.float32)
         base_ee_rot = wp.quat(0.0, 0.0, 0.0, 1.0)
 
         grasp_pos = wp.zeros(1, dtype=wp.vec3)
@@ -144,9 +144,9 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
                 body_world_start,
                 0,
                 world_hs,
-                design_offset_local,
-                design_quat_local,
-                design_ctrl,
+                spec_offset_local,
+                spec_quat_local,
+                spec_ctrl,
                 base_ee_rot,
             ],
             outputs=[grasp_pos, grasp_rot, grasp_ctrl],
@@ -165,9 +165,9 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
         body_world_start = wp.array([0], dtype=wp.int32)
         world_hs = wp.array([0.01], dtype=wp.float32)
 
-        design_offset_local = wp.array([wp.vec3(0.0, 0.0, 0.0)], dtype=wp.vec3)
-        design_quat_local = wp.array([wp.quat(0.0, 0.0, 0.0, 1.0)], dtype=wp.quat)
-        design_ctrl = wp.array([0.0], dtype=wp.float32)
+        spec_offset_local = wp.array([wp.vec3(0.0, 0.0, 0.0)], dtype=wp.vec3)
+        spec_quat_local = wp.array([wp.quat(0.0, 0.0, 0.0, 1.0)], dtype=wp.quat)
+        spec_ctrl = wp.array([0.0], dtype=wp.float32)
         sin45 = np.sin(np.pi / 4.0)
         cos45 = np.cos(np.pi / 4.0)
         base_ee_rot = wp.quat(0.0, sin45, 0.0, cos45)
@@ -185,9 +185,9 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
                 body_world_start,
                 0,
                 world_hs,
-                design_offset_local,
-                design_quat_local,
-                design_ctrl,
+                spec_offset_local,
+                spec_quat_local,
+                spec_ctrl,
                 base_ee_rot,
             ],
             outputs=[grasp_pos, grasp_rot, grasp_ctrl],
@@ -253,15 +253,15 @@ class TestGraspTargetsMatchReference(unittest.TestCase):
             body_rot = np.array([tr[3], tr[4], tr[5], tr[6]], dtype=np.float64)
             com_local = body_com_np[obj_global].astype(np.float64)
             hs_i = float(example.world_half_sizes[i])
-            offset_local = example._design_offset_local_np[i].astype(np.float64)
-            quat_local = example._design_quat_local_np[i].astype(np.float64)
+            offset_local = example.spec.offset_local_np[i].astype(np.float64)
+            quat_local = example.spec.quat_local_np[i].astype(np.float64)
 
             com_world = body_tr + _quat_rotate_np(body_rot, com_local)
             offset_world = _quat_rotate_np(body_rot, offset_local * hs_i)
             expected_pos[i] = (com_world + offset_world).astype(np.float32)
             expected_rot[i] = _quat_mul_np(_quat_mul_np(body_rot, base_ee_rot), quat_local).astype(np.float32)
 
-        expected_ctrl = example._design_ctrl_np.astype(np.float32)
+        expected_ctrl = example.spec.ctrl_np.astype(np.float32)
 
         np.testing.assert_allclose(
             grasp_pos, expected_pos, atol=1e-5, err_msg="grasp_pos kernel output disagrees with CPU reference"
@@ -270,7 +270,7 @@ class TestGraspTargetsMatchReference(unittest.TestCase):
             grasp_rot, expected_rot, atol=1e-5, err_msg="grasp_rot kernel output disagrees with CPU reference"
         )
         np.testing.assert_allclose(
-            grasp_ctrl, expected_ctrl, atol=1e-3, err_msg="grasp_ctrl kernel output disagrees with design inputs"
+            grasp_ctrl, expected_ctrl, atol=1e-3, err_msg="grasp_ctrl kernel output disagrees with spec inputs"
         )
 
 
