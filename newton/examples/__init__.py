@@ -239,7 +239,11 @@ class _ExampleBrowser:
         return example, type(example)
 
     def reset(self, example_class):
-        """Reset the current example by re-creating it. Returns the new example or None."""
+        """Reset the current example by re-creating it. Returns the new example or None.
+
+        The caller must drop its reference to the old example before calling
+        this method.
+        """
         self._reset_requested = False
         self.viewer.clear_model()
         try:
@@ -280,6 +284,8 @@ def run(example, args):
             continue
 
         if browser is not None and browser._reset_requested:
+            example_class = type(example)
+            example = None
             example = browser.reset(example_class)
             continue
 
