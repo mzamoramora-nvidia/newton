@@ -284,6 +284,8 @@ def run(example, args):
             continue
 
         if browser is not None and browser._reset_requested:
+            # Drop our reference so the old example is freed before reset()
+            # builds the replacement; otherwise both coexist in VRAM.
             example = None
             example = browser.reset(example_class)
             continue
