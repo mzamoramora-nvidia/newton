@@ -284,7 +284,6 @@ def run(example, args):
             continue
 
         if browser is not None and browser._reset_requested:
-            example_class = type(example)
             example = None
             example = browser.reset(example_class)
             continue
