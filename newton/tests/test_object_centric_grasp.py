@@ -1464,5 +1464,67 @@ class GraspProbe:
         }
 
 
+class TestHeterogeneousGraspRegression(unittest.TestCase):
+    """End-to-end regression for the heterogeneous-grasp example.
+
+    Builds the example with a GraspProbe attached, steps a fixed number of
+    frames, then asserts on aggregate success / NaN rates. Mirrors the
+    ``do_rendering=False`` class-attribute pattern from ``test_robot_composer``,
+    ``test_cloth``, etc.; flipping it (e.g., in a developer subclass) routes
+    through the GL viewer and prints the full summary tables.
+    """
+
+    do_rendering = False
+    world_count = 12
+    # State-machine durations sum to 5.5 s -> 550 frames at 100 Hz; 700 frames
+    # gives enough headroom past the HOLD phase for the lift metric to settle.
+    num_frames = 700
+    max_nan_rate = 0.25
+
+    def _run(self, collision_mode: str) -> dict:
+        wp.init()
+        parser = GraspExample.create_parser()
+        sys.argv = [
+            "test",
+            "--viewer",
+            "gl" if self.do_rendering else "null",
+            "--world-count",
+            str(self.world_count),
+            "--num-frames",
+            str(self.num_frames),
+            "--collision-mode",
+            collision_mode,
+        ]
+        viewer, args = nex.init(parser)
+        probe = GraspProbe(
+            world_count=self.world_count,
+            task_state_count=int(TaskType.DONE),
+            hold_state=int(TaskType.HOLD),
+        )
+        example = GraspExample(viewer, args, probe=probe)
+        for _ in range(self.num_frames):
+            example.step()
+            if self.do_rendering:
+                example.render()
+        result = probe.on_finish(example)
+        if self.do_rendering:
+            probe.print_summary(result)
+        return result
+
+    def test_mujoco_baseline(self):
+        # MuJoCo native contacts struggle with the harder shapes (BOLT, NUT,
+        # RJ45_PLUG, BEAR) -- demonstrating that gap is part of why the example
+        # exists. Threshold reflects the observed 5/12 successes; tightening
+        # it should follow a real improvement, not a tuning shuffle.
+        r = self._run("mujoco")
+        self.assertGreaterEqual(r["success_rate"], 0.40, msg=f"mujoco regression: {r['success_rate']:.1%}")
+        self.assertLessEqual(r["nan_rate"], self.max_nan_rate, msg=f"mujoco NaN rate: {r['nan_rate']:.1%}")
+
+    def test_newton_default_baseline(self):
+        r = self._run("newton_default")
+        self.assertGreaterEqual(r["success_rate"], 0.50, msg=f"newton_default regression: {r['success_rate']:.1%}")
+        self.assertLessEqual(r["nan_rate"], self.max_nan_rate, msg=f"newton_default NaN rate: {r['nan_rate']:.1%}")
+
+
 if __name__ == "__main__":
     unittest.main()
