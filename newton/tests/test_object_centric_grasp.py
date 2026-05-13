@@ -1475,7 +1475,9 @@ class TestHeterogeneousGraspRegression(unittest.TestCase):
     """
 
     do_rendering = False
-    world_count = 12
+    # 12 object shapes round-robin into worlds; 24 = each shape appears twice so
+    # the success_rate is a per-shape average instead of a single-roll lottery.
+    world_count = 24
     # State-machine durations sum to 5.5 s -> 550 frames at 100 Hz; 700 frames
     # gives enough headroom past the HOLD phase for the lift metric to settle.
     num_frames = 700
@@ -1511,19 +1513,29 @@ class TestHeterogeneousGraspRegression(unittest.TestCase):
             probe.print_summary(result)
         return result
 
+    def _assert_baseline(self, mode: str, min_success_rate: float) -> None:
+        r = self._run(mode)
+        self.assertGreaterEqual(r["success_rate"], min_success_rate, msg=f"{mode} regression: {r['success_rate']:.1%}")
+        self.assertLessEqual(r["nan_rate"], self.max_nan_rate, msg=f"{mode} NaN rate: {r['nan_rate']:.1%}")
+
     def test_mujoco_baseline(self):
-        # MuJoCo native contacts struggle with the harder shapes (BOLT, NUT,
-        # RJ45_PLUG, BEAR) -- demonstrating that gap is part of why the example
-        # exists. Threshold reflects the observed 5/12 successes; tightening
-        # it should follow a real improvement, not a tuning shuffle.
-        r = self._run("mujoco")
-        self.assertGreaterEqual(r["success_rate"], 0.40, msg=f"mujoco regression: {r['success_rate']:.1%}")
-        self.assertLessEqual(r["nan_rate"], self.max_nan_rate, msg=f"mujoco NaN rate: {r['nan_rate']:.1%}")
+        # MuJoCo native contacts struggle with BEAR and BOLT (0/2 each at
+        # baseline). Demonstrating that gap is part of why the example exists.
+        # 0.50 leaves an ~8 pp margin below the measured 14/24 = 58%.
+        self._assert_baseline("mujoco", min_success_rate=0.50)
 
     def test_newton_default_baseline(self):
-        r = self._run("newton_default")
-        self.assertGreaterEqual(r["success_rate"], 0.50, msg=f"newton_default regression: {r['success_rate']:.1%}")
-        self.assertLessEqual(r["nan_rate"], self.max_nan_rate, msg=f"newton_default NaN rate: {r['nan_rate']:.1%}")
+        # Baseline 22/24 = 92% (only RJ45_PLUG and RUBBER_DUCK miss).
+        self._assert_baseline("newton_default", min_success_rate=0.80)
+
+    def test_newton_sdf_baseline(self):
+        # Baseline 24/24 = 100%. 0.90 protects against one or two stochastic flips.
+        self._assert_baseline("newton_sdf", min_success_rate=0.90)
+
+    def test_newton_hydroelastic_baseline(self):
+        # Baseline 22/24 = 92%. Hydroelastic is the headline mode the
+        # example exists to demo; this test catches regressions on that path.
+        self._assert_baseline("newton_hydroelastic", min_success_rate=0.80)
 
 
 if __name__ == "__main__":

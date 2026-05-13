@@ -30,7 +30,10 @@ except ModuleNotFoundError:  # pragma: no cover
 class HeterogeneousGraspBenchmark:
     """Per-step time + episode success rate for the heterogeneous-grasp example."""
 
-    params = ([12, 64], ["mujoco", "newton_default"])
+    # 24 = each of the 12 shapes appears twice; 64 stresses the contact /
+    # constraint solver. All four collision modes are exercised so a
+    # regression in any of them surfaces.
+    params = ([24, 64], ["mujoco", "newton_default", "newton_sdf", "newton_hydroelastic"])
     param_names = ["world_count", "collision_mode"]
     timeout = 600
     repeat = 2
