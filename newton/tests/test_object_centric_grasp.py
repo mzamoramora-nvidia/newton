@@ -322,6 +322,7 @@ class TestSpawnRandomization(unittest.TestCase):
 from newton import Contacts  # noqa: E402
 from newton.examples.robot.example_robot_heterogeneous_grasp import (  # noqa: E402
     _GUI_STAGE_SIZE,
+    _ROBOTIQ_TCP_OFFSET_M,
     SHAPE_NAMES,
     TASK_NAMES,
     CollisionMode,
@@ -329,6 +330,7 @@ from newton.examples.robot.example_robot_heterogeneous_grasp import (  # noqa: E
     _euler_zyx_deg_to_quat,
     _print_table,
     _quat_to_euler_zyx_deg,
+    alloc_line_buffers,
     full_init,
     zero_init,
 )
@@ -552,6 +554,189 @@ def _seed_object_z_init_kernel(
     object_z_init[w] = wp.transform_get_translation(body_q[obj_global])[2]
 
 
+# ----------------------------------------------------------------------------
+# Warp kernels: frame visualization
+#
+# Six per-channel triad/spawn-region kernels plus two wp.func helpers. The
+# probe owns the line buffers and toggles; on_render dispatches them per
+# frame when the matching toggle is set.
+# ----------------------------------------------------------------------------
+
+
+@wp.func
+def _write_triad(
+    base: wp.int32,
+    origin: wp.vec3,
+    rot: wp.quat,
+    axis_length: wp.float32,
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    ex = wp.quat_rotate(rot, wp.vec3(axis_length, 0.0, 0.0))
+    ey = wp.quat_rotate(rot, wp.vec3(0.0, axis_length, 0.0))
+    ez = wp.quat_rotate(rot, wp.vec3(0.0, 0.0, axis_length))
+    line_begin[base + 0] = origin
+    line_end[base + 0] = origin + ex
+    line_begin[base + 1] = origin
+    line_end[base + 1] = origin + ey
+    line_begin[base + 2] = origin
+    line_end[base + 2] = origin + ez
+
+
+@wp.func
+def _zero_triad(
+    base: wp.int32,
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    zero = wp.vec3(0.0, 0.0, 0.0)
+    line_begin[base + 0] = zero
+    line_end[base + 0] = zero
+    line_begin[base + 1] = zero
+    line_end[base + 1] = zero
+    line_begin[base + 2] = zero
+    line_end[base + 2] = zero
+
+
+@wp.kernel(enable_backward=False)
+def compute_object_frame_lines(
+    body_q: wp.array[wp.transform],
+    body_world_start: wp.array[wp.int32],
+    object_body_offset: wp.int32,
+    world_offsets: wp.array[wp.vec3],
+    visible_worlds_mask: wp.array[wp.int32],
+    axis_length: wp.float32,
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    w = wp.tid()
+    base = w * 3
+    if visible_worlds_mask and visible_worlds_mask[w] == 0:
+        _zero_triad(base, line_begin, line_end)
+        return
+    x_wb = body_q[body_world_start[w] + object_body_offset]
+    origin = wp.transform_get_translation(x_wb) + world_offsets[w]
+    _write_triad(base, origin, wp.transform_get_rotation(x_wb), axis_length, line_begin, line_end)
+
+
+@wp.kernel(enable_backward=False)
+def compute_object_com_frame_lines(
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    body_world_start: wp.array[wp.int32],
+    object_body_offset: wp.int32,
+    world_offsets: wp.array[wp.vec3],
+    visible_worlds_mask: wp.array[wp.int32],
+    axis_length: wp.float32,
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    w = wp.tid()
+    base = w * 3
+    if visible_worlds_mask and visible_worlds_mask[w] == 0:
+        _zero_triad(base, line_begin, line_end)
+        return
+    obj_global = body_world_start[w] + object_body_offset
+    x_wb = body_q[obj_global]
+    rot = wp.transform_get_rotation(x_wb)
+    com_w = wp.transform_get_translation(x_wb) + wp.quat_rotate(rot, body_com[obj_global]) + world_offsets[w]
+    _write_triad(base, com_w, rot, axis_length, line_begin, line_end)
+
+
+@wp.kernel(enable_backward=False)
+def compute_ee_base_frame_lines(
+    body_q: wp.array[wp.transform],
+    body_world_start: wp.array[wp.int32],
+    ee_body_offset: wp.int32,
+    world_offsets: wp.array[wp.vec3],
+    visible_worlds_mask: wp.array[wp.int32],
+    axis_length: wp.float32,
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    w = wp.tid()
+    base = w * 3
+    if visible_worlds_mask and visible_worlds_mask[w] == 0:
+        _zero_triad(base, line_begin, line_end)
+        return
+    x_wb = body_q[body_world_start[w] + ee_body_offset]
+    origin = wp.transform_get_translation(x_wb) + world_offsets[w]
+    _write_triad(base, origin, wp.transform_get_rotation(x_wb), axis_length, line_begin, line_end)
+
+
+@wp.kernel(enable_backward=False)
+def compute_tcp_frame_lines(
+    body_q: wp.array[wp.transform],
+    body_world_start: wp.array[wp.int32],
+    ee_body_offset: wp.int32,
+    tcp_offset: wp.float32,
+    world_offsets: wp.array[wp.vec3],
+    visible_worlds_mask: wp.array[wp.int32],
+    axis_length: wp.float32,
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    w = wp.tid()
+    base = w * 3
+    if visible_worlds_mask and visible_worlds_mask[w] == 0:
+        _zero_triad(base, line_begin, line_end)
+        return
+    x_wb = body_q[body_world_start[w] + ee_body_offset]
+    rot = wp.transform_get_rotation(x_wb)
+    tcp_local = wp.vec3(0.0, 0.0, tcp_offset)
+    origin = wp.transform_get_translation(x_wb) + wp.quat_rotate(rot, tcp_local) + world_offsets[w]
+    _write_triad(base, origin, rot, axis_length, line_begin, line_end)
+
+
+@wp.kernel(enable_backward=False)
+def compute_world_frame_lines(
+    world_offsets: wp.array[wp.vec3],
+    visible_worlds_mask: wp.array[wp.int32],
+    axis_length: wp.float32,
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    w = wp.tid()
+    base = w * 3
+    if visible_worlds_mask and visible_worlds_mask[w] == 0:
+        _zero_triad(base, line_begin, line_end)
+        return
+    _write_triad(base, world_offsets[w], wp.quat_identity(), axis_length, line_begin, line_end)
+
+
+@wp.kernel(enable_backward=False)
+def compute_spawn_region_lines(
+    world_offsets: wp.array[wp.vec3],
+    visible_worlds_mask: wp.array[wp.int32],
+    region_center: wp.vec3,
+    half_x: wp.float32,
+    half_y: wp.float32,
+    line_begin: wp.array[wp.vec3],
+    line_end: wp.array[wp.vec3],
+):
+    w = wp.tid()
+    base = w * 4
+    if visible_worlds_mask and visible_worlds_mask[w] == 0:
+        zero = wp.vec3(0.0, 0.0, 0.0)
+        for i in range(4):
+            line_begin[base + i] = zero
+            line_end[base + i] = zero
+        return
+    c = region_center + world_offsets[w]
+    p_mm = wp.vec3(c[0] - half_x, c[1] - half_y, c[2])
+    p_pm = wp.vec3(c[0] + half_x, c[1] - half_y, c[2])
+    p_pp = wp.vec3(c[0] + half_x, c[1] + half_y, c[2])
+    p_mp = wp.vec3(c[0] - half_x, c[1] + half_y, c[2])
+    line_begin[base + 0] = p_mm
+    line_end[base + 0] = p_pm
+    line_begin[base + 1] = p_pm
+    line_end[base + 1] = p_pp
+    line_begin[base + 2] = p_pp
+    line_end[base + 2] = p_mp
+    line_begin[base + 3] = p_mp
+    line_end[base + 3] = p_mm
+
+
 class GraspProbe:
     """GPU-resident per-world + per-state metrics for the heterogeneous-grasp example.
 
@@ -669,6 +854,155 @@ class GraspProbe:
                 "margin_pct": spec.margin_pct,
             }
 
+        # Debug-frame overlay state. The probe owns the line buffers, the
+        # render-channel toggles, and the selected_world / show_isosurface
+        # toggles that the panel mutates.
+        self.selected_world = 0
+        self.show_isosurface = False
+        self.show_object_frames = False
+        self.show_object_com_frames = False
+        self.show_ee_base_frames = False
+        self.show_tcp_frames = False
+        self.show_world_frames = False
+        self.show_spawn_region = False
+        n3 = 3 * self.world_count
+        n4 = 4 * self.world_count
+        self._object_frame_begin, self._object_frame_end = alloc_line_buffers(n3)
+        self._object_com_frame_begin, self._object_com_frame_end = alloc_line_buffers(n3)
+        self._ee_base_frame_begin, self._ee_base_frame_end = alloc_line_buffers(n3)
+        self._tcp_frame_begin, self._tcp_frame_end = alloc_line_buffers(n3)
+        self._world_frame_begin, self._world_frame_end = alloc_line_buffers(n3)
+        self._spawn_region_begin, self._spawn_region_end = alloc_line_buffers(n4)
+        self._spawn_region_colors = wp.array(
+            np.tile(np.array([1.0, 0.85, 0.0], dtype=np.float32), (n4, 1)),
+            dtype=wp.vec3,
+        )
+        # Per-axis colors: red (X), green (Y), blue (Z), tiled per-world.
+        # Shared across all five frame channels.
+        colors_np = np.tile(
+            np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32),
+            (self.world_count, 1),
+        )
+        self._frame_colors = wp.array(colors_np, dtype=wp.vec3)
+        self._zero_world_offsets = wp.zeros(self.world_count, dtype=wp.vec3)
+        if hasattr(example.viewer, "renderer"):
+            example.viewer.show_hydro_contact_surface = self.show_isosurface
+
+    def on_render(self, example) -> None:
+        """Draw the debug-frame triads / spawn-region square via log_lines.
+
+        Only runs when the viewer exposes log_lines (GL viewer). Each channel
+        either launches its compute_*_frame_lines kernel (when the matching
+        toggle is on) or pushes a None tuple so the viewer drops the previous
+        frame's stale geometry.
+        """
+        if not hasattr(example.viewer, "log_lines"):
+            return
+
+        viewer_offsets = getattr(example.viewer, "world_offsets", None)
+        world_offsets = viewer_offsets if viewer_offsets is not None else self._zero_world_offsets
+        visible = getattr(example.viewer, "_visible_worlds_mask", None)
+        axis_len = 0.05
+        body_q = example.state_0.body_q
+        body_world_start = example.model.body_world_start
+
+        self._draw_frame_channel(
+            example,
+            enabled=self.show_object_frames,
+            log_path="/frames/object",
+            kernel=compute_object_frame_lines,
+            kernel_inputs=[
+                body_q,
+                body_world_start,
+                self.object_body_offset,
+                world_offsets,
+                visible,
+                axis_len,
+            ],
+            begin=self._object_frame_begin,
+            end=self._object_frame_end,
+            colors=self._frame_colors,
+        )
+        self._draw_frame_channel(
+            example,
+            enabled=self.show_object_com_frames,
+            log_path="/frames/object_com",
+            kernel=compute_object_com_frame_lines,
+            kernel_inputs=[
+                body_q,
+                example.model.body_com,
+                body_world_start,
+                self.object_body_offset,
+                world_offsets,
+                visible,
+                axis_len,
+            ],
+            begin=self._object_com_frame_begin,
+            end=self._object_com_frame_end,
+            colors=self._frame_colors,
+        )
+        self._draw_frame_channel(
+            example,
+            enabled=self.show_ee_base_frames,
+            log_path="/frames/ee_base",
+            kernel=compute_ee_base_frame_lines,
+            kernel_inputs=[body_q, body_world_start, example.ee_base_body_idx, world_offsets, visible, axis_len],
+            begin=self._ee_base_frame_begin,
+            end=self._ee_base_frame_end,
+            colors=self._frame_colors,
+        )
+        self._draw_frame_channel(
+            example,
+            enabled=self.show_tcp_frames,
+            log_path="/frames/tcp",
+            kernel=compute_tcp_frame_lines,
+            kernel_inputs=[
+                body_q,
+                body_world_start,
+                example.ee_base_body_idx,
+                _ROBOTIQ_TCP_OFFSET_M,
+                world_offsets,
+                visible,
+                axis_len,
+            ],
+            begin=self._tcp_frame_begin,
+            end=self._tcp_frame_end,
+            colors=self._frame_colors,
+        )
+        self._draw_frame_channel(
+            example,
+            enabled=self.show_world_frames,
+            log_path="/frames/world",
+            kernel=compute_world_frame_lines,
+            kernel_inputs=[world_offsets, visible, 0.20],
+            begin=self._world_frame_begin,
+            end=self._world_frame_end,
+            colors=self._frame_colors,
+        )
+        self._draw_frame_channel(
+            example,
+            enabled=self.show_spawn_region,
+            log_path="/frames/spawn_region",
+            kernel=compute_spawn_region_lines,
+            kernel_inputs=[
+                world_offsets,
+                visible,
+                example.spawn_center,
+                example.spawn_xy_range,
+                example.spawn_xy_range,
+            ],
+            begin=self._spawn_region_begin,
+            end=self._spawn_region_end,
+            colors=self._spawn_region_colors,
+        )
+
+    def _draw_frame_channel(self, example, *, enabled, log_path, kernel, kernel_inputs, begin, end, colors) -> None:
+        if enabled:
+            wp.launch(kernel, dim=self.world_count, inputs=kernel_inputs, outputs=[begin, end])
+            example.viewer.log_lines(log_path, begin, end, colors)
+        else:
+            example.viewer.log_lines(log_path, None, None, None)
+
     def on_gui_render(self, example, imgui) -> None:
         """Full tuning panel -- world selector, per-world live metrics,
         per-shape grasp-spec sliders, and frame-overlay toggles."""
@@ -681,13 +1015,13 @@ class GraspProbe:
         if self._gui_shape_filter >= 0:
             filter_shape = shape_keys[self._gui_shape_filter]
             candidates = example._shape_mask[filter_shape]
-            if len(candidates) > 0 and example.selected_world not in candidates:
-                example.selected_world = int(candidates[0])
+            if len(candidates) > 0 and self.selected_world not in candidates:
+                self.selected_world = int(candidates[0])
 
-        changed, val = imgui.slider_int("World", example.selected_world, 0, example.world_count - 1)
+        changed, val = imgui.slider_int("World", self.selected_world, 0, example.world_count - 1)
         if changed:
-            example.selected_world = max(0, min(example.world_count - 1, val))
-        w = example.selected_world
+            self.selected_world = max(0, min(example.world_count - 1, val))
+        w = self.selected_world
 
         imgui.separator()
 
@@ -703,7 +1037,7 @@ class GraspProbe:
 
         if (example.episode_steps % self._gui_read_interval) == 0:
             self._cached_gui = self.stage_gui(
-                example.selected_world,
+                self.selected_world,
                 example.state_0,
                 example.model.body_world_start,
                 example.task_idx,
@@ -813,16 +1147,16 @@ class GraspProbe:
             self._print_current_poses(example)
 
         imgui.separator()
-        _, example.show_object_frames = imgui.checkbox("Show object frames", example.show_object_frames)
-        _, example.show_object_com_frames = imgui.checkbox("Show object COM frames", example.show_object_com_frames)
-        _, example.show_ee_base_frames = imgui.checkbox("Show EE base frames", example.show_ee_base_frames)
-        _, example.show_tcp_frames = imgui.checkbox("Show TCP frames", example.show_tcp_frames)
-        _, example.show_world_frames = imgui.checkbox("Show world frames", example.show_world_frames)
-        _, example.show_spawn_region = imgui.checkbox("Show spawn region", example.show_spawn_region)
+        _, self.show_object_frames = imgui.checkbox("Show object frames", self.show_object_frames)
+        _, self.show_object_com_frames = imgui.checkbox("Show object COM frames", self.show_object_com_frames)
+        _, self.show_ee_base_frames = imgui.checkbox("Show EE base frames", self.show_ee_base_frames)
+        _, self.show_tcp_frames = imgui.checkbox("Show TCP frames", self.show_tcp_frames)
+        _, self.show_world_frames = imgui.checkbox("Show world frames", self.show_world_frames)
+        _, self.show_spawn_region = imgui.checkbox("Show spawn region", self.show_spawn_region)
         if example.collision_mode == CollisionMode.NEWTON_HYDROELASTIC and hasattr(example.viewer, "renderer"):
-            changed, example.show_isosurface = imgui.checkbox("Show Isosurface", example.show_isosurface)
+            changed, self.show_isosurface = imgui.checkbox("Show Isosurface", self.show_isosurface)
             if changed:
-                example.viewer.show_hydro_contact_surface = example.show_isosurface
+                example.viewer.show_hydro_contact_surface = self.show_isosurface
         imgui.text(f"Frame: {example.episode_steps}  t={example.sim_time:.2f}s")
 
     def _print_current_poses(self, example) -> None:
