@@ -26,9 +26,7 @@ import newton.ik as ik
 import newton.usd
 import newton.utils
 import newton.viewer
-from newton import Contacts
 from newton.geometry import HydroelasticSDF
-from newton.sensors import SensorContact
 
 _NUT_BOLT_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"
 _NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
@@ -200,6 +198,11 @@ class Example:
         self._setup_collision_sdf(scene)
         self.model = scene.finalize()
 
+        # Request the ``force`` contact attribute up-front so the collision
+        # pipeline / MuJoCo Contacts buffer carries it regardless of whether
+        # a GraspProbe (which adds SensorContact instances) is attached.
+        self.model.request_contact_attributes("force")
+
         # Contact budget: 2000 per world (matching example_hydro_robotiq_gripper)
         self.rigid_contact_max = 2_000 * self.world_count
         print(
@@ -238,10 +241,8 @@ class Example:
                     ctrl_np[w, j] = init_q[q_start + j]
             wp.copy(ctrl, wp.array(ctrl_np.flatten(), dtype=wp.float32))
 
-        self._setup_contact_sensor()
         self._create_collision_pipeline()
         self._create_solver()
-        self._create_sensor_contacts()
 
         self.viewer.set_model(self.model)
         self.viewer.set_camera(wp.vec3(0.5, 0.5, 0.5), -15, -140)
@@ -534,13 +535,6 @@ class Example:
             np.float32
         )
 
-        if self.verbose:
-            for i in range(n):
-                print(
-                    f"  World {i:3d}: shape={SHAPE_NAMES[self.world_shapes[i]]:>12s}  "
-                    f"hs={self.world_half_sizes[i] * 1000:.1f} mm"
-                )
-
     def _load_mesh_objects(self):
         """Load mesh assets for all mesh-based shapes (only those actually needed).
 
@@ -815,16 +809,6 @@ class Example:
         # base_ee_rot as a wp.quat scalar (used by the init kernel)
         self.base_ee_rot = wp.quat(*arm_ee_rot)
 
-        if self.verbose:
-            body_com_np = self.model.body_com.numpy()
-            body_ws_np = self.model.body_world_start.numpy()
-            first_world = {shape: idx for idx, shape in reversed(list(enumerate(self.world_shapes)))}
-            print("[grasp] per-shape body_com magnitudes (body-local frame):")
-            for shape, idx in sorted(first_world.items(), key=lambda kv: kv[0].name):
-                com_norm = np.linalg.norm(body_com_np[int(body_ws_np[idx]) + self.object_body_offset])
-                flag = "  (non-zero, review offset_local)" if com_norm > 1e-4 else ""
-                print(f"  {shape.name:<12} |body_com| = {com_norm * 1000.0:8.3f} mm{flag}")
-
         self.lift_distance_m: float = 0.1  # tunable via the GUI lift slider
 
         # state_0 is fully initialised by the time _setup_state_machine runs.
@@ -1022,39 +1006,6 @@ class Example:
             njmax=nconmax_per_world,
             nconmax=nconmax_per_world,
         )
-
-    def _setup_contact_sensor(self):
-        """Create a SensorContact on object bodies with pad counterpart shapes.
-
-        Must be called BEFORE contacts objects are created so that the ``force``
-        attribute is requested on the model.
-        """
-        self.contact_sensor_pad = SensorContact(
-            self.model,
-            sensing_obj_bodies="object",
-            counterpart_shapes="*pad*",
-        )
-        self.contact_sensor_table = SensorContact(
-            self.model,
-            sensing_obj_bodies="object",
-            counterpart_shapes="table*",
-            request_contact_attributes=False,  # already requested by pad sensor
-        )
-
-    def _create_sensor_contacts(self):
-        """Create or assign the Contacts object used by the contact sensor.
-
-        For MuJoCo collision mode, a dedicated Contacts buffer is allocated from
-        the solver's maximum contact count.  For Newton modes, the collision
-        pipeline's Contacts already has the ``force`` attribute because
-        ``_setup_contact_sensor`` was called first.
-        """
-        if self.collision_mode == CollisionMode.MUJOCO:
-            self.contacts = Contacts(
-                self.solver.get_max_contact_count(),
-                0,
-                requested_attributes=self.model.get_requested_contact_attributes(),
-            )
 
     def _setup_gui(self):
         """Register the side-panel GUI callback with the viewer."""

@@ -319,14 +319,17 @@ class TestSpawnRandomization(unittest.TestCase):
 # safe and on_step has no graph-capture constraints.
 # ----------------------------------------------------------------------------
 
+from newton import Contacts  # noqa: E402
 from newton.examples.robot.example_robot_heterogeneous_grasp import (  # noqa: E402
     _GUI_STAGE_SIZE,
     SHAPE_NAMES,
+    CollisionMode,
     TaskType,
     _print_table,
     full_init,
     zero_init,
 )
+from newton.sensors import SensorContact  # noqa: E402
 
 
 @wp.kernel(enable_backward=False)
@@ -601,6 +604,36 @@ class GraspProbe:
 
     def on_init(self, example):
         self.object_body_offset = example.object_body_offset
+
+        if example.verbose:
+            self._print_verbose_diagnostics(example)
+
+        # Contact sensors. Example.__init__ already requested the ``force``
+        # contact attribute on the model, so the collision pipeline's Contacts
+        # buffer (Newton modes) already carries it; the second sensor sets
+        # request_contact_attributes=False to avoid a redundant request.
+        self.contact_sensor_pad = SensorContact(
+            example.model,
+            sensing_obj_bodies="object",
+            counterpart_shapes="*pad*",
+        )
+        self.contact_sensor_table = SensorContact(
+            example.model,
+            sensing_obj_bodies="object",
+            counterpart_shapes="table*",
+            request_contact_attributes=False,
+        )
+
+        # MuJoCo mode has no collision pipeline, so the probe allocates a
+        # dedicated Contacts buffer and hands it to the example so simulate(),
+        # render(), and on_step all share the same instance.
+        if example.collision_mode == CollisionMode.MUJOCO:
+            example.contacts = Contacts(
+                example.solver.get_max_contact_count(),
+                0,
+                requested_attributes=example.model.get_requested_contact_attributes(),
+            )
+
         wp.launch(
             _seed_object_z_init_kernel,
             dim=self.world_count,
@@ -608,13 +641,29 @@ class GraspProbe:
             outputs=[self.object_z_init],
         )
 
+    @staticmethod
+    def _print_verbose_diagnostics(example) -> None:
+        for i in range(example.world_count):
+            print(
+                f"  World {i:3d}: shape={SHAPE_NAMES[example.world_shapes[i]]:>12s}  "
+                f"hs={example.world_half_sizes[i] * 1000:.1f} mm"
+            )
+        body_com_np = example.model.body_com.numpy()
+        body_ws_np = example.model.body_world_start.numpy()
+        first_world = {shape: idx for idx, shape in reversed(list(enumerate(example.world_shapes)))}
+        print("[grasp] per-shape body_com magnitudes (body-local frame):")
+        for shape, idx in sorted(first_world.items(), key=lambda kv: kv[0].name):
+            com_norm = np.linalg.norm(body_com_np[int(body_ws_np[idx]) + example.object_body_offset])
+            flag = "  (non-zero, review offset_local)" if com_norm > 1e-4 else ""
+            print(f"  {shape.name:<12} |body_com| = {com_norm * 1000.0:8.3f} mm{flag}")
+
     def on_step(self, example):
-        # Pre-kernel: refresh contact attribute and sensor force matrices.
-        # Task 3 will move sensor ownership into the probe; for now the
-        # sensors still live on Example but the probe drives their update.
+        # Pre-kernel: refresh contact attribute and probe-owned sensor force
+        # matrices. The probe always reuses example.contacts so simulate(),
+        # render(), and the sensors see one shared buffer.
         example.solver.update_contacts(example.contacts, example.state_0)
-        example.contact_sensor_pad.update(example.state_0, example.contacts)
-        example.contact_sensor_table.update(example.state_0, example.contacts)
+        self.contact_sensor_pad.update(example.state_0, example.contacts)
+        self.contact_sensor_table.update(example.state_0, example.contacts)
 
         self.penetration_cur.zero_()
         mjw_data = example.solver.mjw_data
@@ -636,10 +685,10 @@ class GraspProbe:
             update_metrics_kernel,
             dim=self.world_count,
             inputs=[
-                example.contact_sensor_pad.force_matrix,
-                example.contact_sensor_pad.force_matrix_friction,
-                example.contact_sensor_table.force_matrix,
-                example.contact_sensor_table.force_matrix_friction,
+                self.contact_sensor_pad.force_matrix,
+                self.contact_sensor_pad.force_matrix_friction,
+                self.contact_sensor_table.force_matrix,
+                self.contact_sensor_table.force_matrix_friction,
                 example.state_0.body_q,
                 example.state_0.body_qd,
                 example.model.body_world_start,
