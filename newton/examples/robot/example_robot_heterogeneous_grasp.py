@@ -1042,30 +1042,6 @@ class Example:
         self._frame_colors = wp.array(colors_np, dtype=wp.vec3)
         # Zero-offset fallback used when the viewer doesn't expose world_offsets.
         self._zero_world_offsets = wp.zeros(self.world_count, dtype=wp.vec3)
-        # Static mass/world-start mirrors used by the per-frame GUI text.
-        self._cached_body_mass = self.model.body_mass.numpy().copy()
-        self._cached_body_world_start = self.model.body_world_start.numpy().copy()
-        # GUI readback staging cache (populated by stage_gui; read downstream).
-        self._cached_gui = np.zeros(_GUI_STAGE_SIZE, dtype=np.float32)
-        self._gui_read_interval = 10
-        # Per-shape GUI edit buffer. Seeded from the actual per-world spec arrays
-        # so the slider reflects what the simulation is currently using -- particularly
-        # offset_local.z, which _setup_state_machine baked from derive_offset_local_z and
-        # is non-zero even though the GRASP_SPECS placeholder is (0, 0, 0).
-        self._gui_grasp_edits: dict[ObjectShape, dict] = {}
-        for shape, spec in GRASP_SPECS.items():
-            mask = self._shape_mask.get(shape)
-            if mask is None or len(mask) == 0:
-                seed_offset = list(spec.offset_local)
-            else:
-                seed_offset = self.spec.offset_local_np[int(mask[0])].tolist()
-            self._gui_grasp_edits[shape] = {
-                "offset_local": seed_offset,
-                "euler_deg": list(_quat_to_euler_zyx_deg(spec.quat_local)),
-                "margin_pct": spec.margin_pct,
-            }
-        self._gui_lift_mm = int(round(self.lift_distance_m * 1000.0))
-        self._gui_broadcast_apply = False
         if hasattr(self.viewer, "renderer"):
             self.viewer.show_hydro_contact_surface = self.show_isosurface
 
@@ -1073,184 +1049,23 @@ class Example:
     # Per-step / per-frame internals
     # ------------------------------------------------------------------
 
-    def _gui_impl(self, imgui):
-        # ---- World selector: shape filter + slider ----
-        if not hasattr(self, "_gui_shape_filter"):
-            self._gui_shape_filter = -1  # -1 = All
-
-        shape_keys: list[ObjectShape] = sorted(self._shape_mask.keys(), key=lambda s: s.name)
-        shape_names = ["All"] + [s.name for s in shape_keys]
-
-        # combo_idx 0 -> "All" (filter == -1); 1..N -> shape_keys[0..N-1] (filter == 0..N-1)
-        changed, new_idx = imgui.combo("Filter by shape", self._gui_shape_filter + 1, shape_names)
-        if changed:
-            self._gui_shape_filter = new_idx - 1
-
-        if self._gui_shape_filter >= 0:
-            filter_shape = shape_keys[self._gui_shape_filter]
-            candidates = self._shape_mask[filter_shape]
-            if len(candidates) > 0 and self.selected_world not in candidates:
-                self.selected_world = int(candidates[0])
-
-        changed, val = imgui.slider_int("World", self.selected_world, 0, self.world_count - 1)
-        if changed:
-            self.selected_world = max(0, min(self.world_count - 1, val))
-        w = self.selected_world
-
-        imgui.separator()
-
-        # Object description (static metadata -- no per-frame GPU read needed).
-        shape_name = SHAPE_NAMES[self.world_shapes[w]]
-        hs_mm = self.world_half_sizes[w] * 1000.0
-        obj_global = int(self._cached_body_world_start[w]) + self.object_body_offset
-        mass = self._cached_body_mass[obj_global]
-        imgui.text(f"Shape: {shape_name}")
-        imgui.text(f"Mass:  {mass:.4f} kg")
-        imgui.text(f"Size:  {hs_mm:.1f} mm (half-size)")
-
-        imgui.separator()
-
-        # Throttled GPU->CPU sync. Pack selected-world metrics into a 24-float
-        # staging buffer via a single-thread Warp kernel; read back once.
-        if (self.episode_steps % self._gui_read_interval) == 0:
-            self._cached_gui = self.metrics.stage_gui(
-                self.selected_world,
-                self.state_0,
-                self.model.body_world_start,
-                self.task_idx,
-                self.task_timer,
-                self.task_durations,
-                self.ee_pos_target,
-                self.ee_pos_actual,
-            )
-        gui = self._cached_gui
-
-        cur_pad_f = gui[0]
-        max_pad_f = gui[1]
-        cur_pad_fr = gui[2]
-        max_pad_fr = gui[3]
-        cur_tbl_f = gui[4]
-        max_tbl_f = gui[5]
-        cur_pen_mm = gui[8] * 1000.0
-        max_pen_mm = gui[9] * 1000.0
-        avg_vel_mms = gui[10] * 1000.0
-        obj_z = gui[11]
-        init_z = gui[12]
-        max_z = gui[13]
-        task_val = int(gui[14])
-        nan_frame_val = int(gui[15])
-        cur_timer = gui[16]
-        task_dur = gui[17]
-        ee_target = (gui[18], gui[19], gui[20])
-        ee_actual = (gui[21], gui[22], gui[23])
-
-        # State machine (task name resolved from staged task index).
-        task_name = TASK_NAMES[task_val] if 0 <= task_val < len(TASK_NAMES) else "?"
-        imgui.text(f"Task:  {task_name}")
-        imgui.text(f"Timer: {cur_timer:.2f}s / {task_dur:.2f}s")
-
-        imgui.separator()
-
-        # EE position error (read from staging buffer -- no per-frame .numpy()).
-        err_x = ee_target[0] - ee_actual[0]
-        err_y = ee_target[1] - ee_actual[1]
-        err_z = ee_target[2] - ee_actual[2]
-        imgui.text(f"EE err: x={err_x * 1000:+.2f} y={err_y * 1000:+.2f} z={err_z * 1000:+.2f} mm")
-
-        imgui.separator()
-
-        # Pad (finger) forces
-        imgui.text(f"Pad F:   {cur_pad_f:.1f} N  (max: {max_pad_f:.1f} N)")
-        imgui.text(f"Pad Fr:  {cur_pad_fr:.1f} N  (max: {max_pad_fr:.1f} N)")
-        imgui.text(f"Table F: {cur_tbl_f:.1f} N  (max: {max_tbl_f:.1f} N)")
-        imgui.text(f"Penetration: {cur_pen_mm:.3f} mm  (max: {max_pen_mm:.3f} mm)")
-        imgui.text(f"Avg vel: {avg_vel_mms:.2f} mm/s")
-
-        imgui.separator()
-
-        # Object Z and lift
-        lift = obj_z - init_z
-        max_lift = max_z - init_z
-        imgui.text(f"Object Z: {obj_z:.4f} m  (init: {init_z:.4f} m)")
-        imgui.text(f"Lift: {lift * 1000:.1f} mm  (max: {max_lift * 1000:.1f} mm)")
-        if nan_frame_val >= 0:
-            imgui.text(f"NaN at frame {nan_frame_val}!")
-
-        imgui.separator()
-        # Sliders below double as text inputs: Ctrl+click (or Shift+click) on the
-        # bar swaps the slider for an editable field, so a separate input_float
-        # companion isn't needed.
-        imgui.text("Grasp Pose (current world's shape)")
+    def apply_grasp_edits(
+        self,
+        w: int,
+        *,
+        offset_local: wp.vec3,
+        quat_local: wp.quat,
+        margin_pct: float,
+        lift_distance_m: float,
+        broadcast: bool,
+    ) -> None:
+        """Commit a grasp-spec edit for world w's shape to GRASP_SPECS and
+        the GPU. Edits flow in via GraspProbe.on_gui_render."""
         shape = self.world_shapes[w]
-        edits = self._gui_grasp_edits[shape]
-
-        for i, label in enumerate(("offset.x", "offset.y", "offset.z")):
-            changed, val = imgui.slider_float(label, edits["offset_local"][i], -2.0, 2.0)
-            if changed:
-                edits["offset_local"][i] = val
-
-        for i, label in enumerate(("euler.x (deg)", "euler.y (deg)", "euler.z (deg)")):
-            changed, val = imgui.slider_float(label, edits["euler_deg"][i], -180.0, 180.0)
-            if changed:
-                edits["euler_deg"][i] = val
-
-        changed, val = imgui.slider_float("margin_pct", edits["margin_pct"], 0.0, 0.4)
-        if changed:
-            edits["margin_pct"] = val
-        derived_ctrl = margin_pct_to_ctrl(edits["margin_pct"], self._world_y_half[w])
-        imgui.text(f"  -> derived ctrl: {derived_ctrl:.2f}")
-
-        imgui.separator()
-        imgui.text("Global (all worlds)")
-        changed, val = imgui.slider_int("lift_distance (mm)", self._gui_lift_mm, 0, 300)
-        if changed:
-            self._gui_lift_mm = val
-
-        imgui.separator()
-        _, self._gui_broadcast_apply = imgui.checkbox("Apply to all worlds of this shape", self._gui_broadcast_apply)
-        # Use the GUI-staged task index (refreshed every _gui_read_interval frames)
-        # so we don't pay a per-frame GPU->CPU sync. task_val was extracted above
-        # from self._cached_gui at index 14.
-        can_apply = task_val <= int(TaskType.APPROACH)
-        if not can_apply:
-            imgui.text_disabled("Apply disabled: world has left APPROACH")
-        if can_apply and imgui.button("Apply"):
-            self.apply_grasp_edits(w, broadcast=self._gui_broadcast_apply)
-        if imgui.button("Print current poses"):
-            self._print_current_poses()
-
-        imgui.separator()
-        _, self.show_object_frames = imgui.checkbox("Show object frames", self.show_object_frames)
-        _, self.show_object_com_frames = imgui.checkbox("Show object COM frames", self.show_object_com_frames)
-        _, self.show_ee_base_frames = imgui.checkbox("Show EE base frames", self.show_ee_base_frames)
-        _, self.show_tcp_frames = imgui.checkbox("Show TCP frames", self.show_tcp_frames)
-        _, self.show_world_frames = imgui.checkbox("Show world frames", self.show_world_frames)
-        _, self.show_spawn_region = imgui.checkbox("Show spawn region", self.show_spawn_region)
-        if self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC and hasattr(self.viewer, "renderer"):
-            changed, self.show_isosurface = imgui.checkbox("Show Isosurface", self.show_isosurface)
-            if changed:
-                self.viewer.show_hydro_contact_surface = self.show_isosurface
-        imgui.text(f"Frame: {self.episode_steps}  t={self.sim_time:.2f}s")
-
-    def apply_grasp_edits(self, w: int, broadcast: bool) -> None:
-        """Commit the GUI edit buffer for world w's shape to GRASP_SPECS and the GPU."""
-        shape = self.world_shapes[w]
-        edits = self._gui_grasp_edits[shape]
-
-        # 1. Mutate GRASP_SPECS (single entry per shape).
-        new_spec = GraspSpec(
-            offset_local=wp.vec3(*edits["offset_local"]),
-            quat_local=_euler_zyx_deg_to_quat(wp.vec3(*edits["euler_deg"])),
-            margin_pct=edits["margin_pct"],
-        )
+        new_spec = GraspSpec(offset_local=offset_local, quat_local=quat_local, margin_pct=margin_pct)
         GRASP_SPECS[shape] = new_spec
+        self.lift_distance_m = lift_distance_m
 
-        # 2. Update global lift.
-        self.lift_distance_m = self._gui_lift_mm / 1000.0
-
-        # 3. Rewrite the affected CPU mirrors. The user's full 3-component
-        # offset_local is written through verbatim; derive_offset_local_z is only
-        # used as a one-shot init seed in _setup_state_machine.
         affected = self._shape_mask[shape] if broadcast else np.array([w], dtype=np.int32)
         for idx in affected:
             idx_int = int(idx)
@@ -1258,7 +1073,6 @@ class Example:
             self.spec.quat_local_np[idx_int] = new_spec.quat_local
             self.spec.ctrl_np[idx_int] = margin_pct_to_ctrl(new_spec.margin_pct, y_half_m=self._world_y_half[idx_int])
 
-        # 4. Upload mutated CPU mirrors back to GPU and relaunch the grasp-target kernel.
         self.upload_grasp_targets(slot=None if broadcast else w)
 
     def upload_grasp_targets(self, slot: int | None) -> None:
@@ -1293,27 +1107,6 @@ class Example:
             wp.copy(s.quat_local, s.quat_src, dest_offset=slot, count=1)
             wp.copy(s.ctrl, s.ctrl_src, dest_offset=slot, count=1)
             wp.launch(compute_grasp_targets_slot, dim=1, inputs=[slot, *common_inputs], outputs=outputs)
-
-    def _print_current_poses(self) -> None:
-        """Dump GRASP_SPECS and self.lift_distance_m as a pasteable Python literal."""
-        print("# --- Current grasp specs (paste over GRASP_SPECS and self.lift_distance_m) ---")
-        print("GRASP_SPECS = {")
-        for shape in ObjectShape:
-            if shape not in GRASP_SPECS:
-                continue
-            d = GRASP_SPECS[shape]
-            # Iterate the wp.vec3 / wp.quat to get plain Python floats so the
-            # repr is pasteable (`0.5` rather than `np.float32(0.5)`).
-            o_str = ", ".join(repr(x) for x in d.offset_local)
-            q_str = ", ".join(repr(x) for x in d.quat_local)
-            print(
-                f"    ObjectShape.{shape.name:<12}: GraspSpec("
-                f"offset_local=wp.vec3({o_str}), "
-                f"quat_local=wp.quat({q_str}), "
-                f"margin_pct={d.margin_pct!r}),"
-            )
-        print("}")
-        print(f"self.lift_distance_m = {self.lift_distance_m!r}")
 
     def _set_joint_targets(self):
         """Compute IK targets from state machine and solve IK each frame."""

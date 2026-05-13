@@ -323,9 +323,12 @@ from newton import Contacts  # noqa: E402
 from newton.examples.robot.example_robot_heterogeneous_grasp import (  # noqa: E402
     _GUI_STAGE_SIZE,
     SHAPE_NAMES,
+    TASK_NAMES,
     CollisionMode,
     TaskType,
+    _euler_zyx_deg_to_quat,
     _print_table,
+    _quat_to_euler_zyx_deg,
     full_init,
     zero_init,
 )
@@ -640,6 +643,206 @@ class GraspProbe:
             inputs=[example.state_0.body_q, example.model.body_world_start, self.object_body_offset],
             outputs=[self.object_z_init],
         )
+
+        # GUI panel state -- cached numpy mirrors so the per-frame side panel
+        # never round-trips to the GPU outside of the throttled stage_gui sync.
+        self._cached_body_mass = example.model.body_mass.numpy().copy()
+        self._cached_body_world_start = example.model.body_world_start.numpy().copy()
+        self._cached_gui = np.zeros(_GUI_STAGE_SIZE, dtype=np.float32)
+        self._gui_read_interval = 10
+        self._gui_shape_filter = -1  # -1 = "All"; >=0 indexes into sorted shape_keys
+        self._gui_broadcast_apply = False
+        self._gui_lift_mm = int(round(example.lift_distance_m * 1000.0))
+        # Per-shape edit buffer seeded from the spec arrays the example is
+        # currently using -- particularly offset_local.z, which the example
+        # bakes via derive_offset_local_z from a (0, 0, 0) GRASP_SPECS seed.
+        self._gui_grasp_edits: dict[ObjectShape, dict] = {}
+        for shape, spec in GRASP_SPECS.items():
+            mask = example._shape_mask.get(shape)
+            if mask is None or len(mask) == 0:
+                seed_offset = list(spec.offset_local)
+            else:
+                seed_offset = example.spec.offset_local_np[int(mask[0])].tolist()
+            self._gui_grasp_edits[shape] = {
+                "offset_local": seed_offset,
+                "euler_deg": list(_quat_to_euler_zyx_deg(spec.quat_local)),
+                "margin_pct": spec.margin_pct,
+            }
+
+    def on_gui_render(self, example, imgui) -> None:
+        """Full tuning panel -- world selector, per-world live metrics,
+        per-shape grasp-spec sliders, and frame-overlay toggles."""
+        shape_keys: list[ObjectShape] = sorted(example._shape_mask.keys(), key=lambda s: s.name)
+        shape_names = ["All"] + [s.name for s in shape_keys]
+        changed, new_idx = imgui.combo("Filter by shape", self._gui_shape_filter + 1, shape_names)
+        if changed:
+            self._gui_shape_filter = new_idx - 1
+
+        if self._gui_shape_filter >= 0:
+            filter_shape = shape_keys[self._gui_shape_filter]
+            candidates = example._shape_mask[filter_shape]
+            if len(candidates) > 0 and example.selected_world not in candidates:
+                example.selected_world = int(candidates[0])
+
+        changed, val = imgui.slider_int("World", example.selected_world, 0, example.world_count - 1)
+        if changed:
+            example.selected_world = max(0, min(example.world_count - 1, val))
+        w = example.selected_world
+
+        imgui.separator()
+
+        shape_name = SHAPE_NAMES[example.world_shapes[w]]
+        hs_mm = example.world_half_sizes[w] * 1000.0
+        obj_global = int(self._cached_body_world_start[w]) + self.object_body_offset
+        mass = self._cached_body_mass[obj_global]
+        imgui.text(f"Shape: {shape_name}")
+        imgui.text(f"Mass:  {mass:.4f} kg")
+        imgui.text(f"Size:  {hs_mm:.1f} mm (half-size)")
+
+        imgui.separator()
+
+        if (example.episode_steps % self._gui_read_interval) == 0:
+            self._cached_gui = self.stage_gui(
+                example.selected_world,
+                example.state_0,
+                example.model.body_world_start,
+                example.task_idx,
+                example.task_timer,
+                example.task_durations,
+                example.ee_pos_target,
+                example.ee_pos_actual,
+            )
+        gui = self._cached_gui
+
+        cur_pad_f = gui[0]
+        max_pad_f = gui[1]
+        cur_pad_fr = gui[2]
+        max_pad_fr = gui[3]
+        cur_tbl_f = gui[4]
+        max_tbl_f = gui[5]
+        cur_pen_mm = gui[8] * 1000.0
+        max_pen_mm = gui[9] * 1000.0
+        avg_vel_mms = gui[10] * 1000.0
+        obj_z = gui[11]
+        init_z = gui[12]
+        max_z = gui[13]
+        task_val = int(gui[14])
+        nan_frame_val = int(gui[15])
+        cur_timer = gui[16]
+        task_dur = gui[17]
+        ee_target = (gui[18], gui[19], gui[20])
+        ee_actual = (gui[21], gui[22], gui[23])
+
+        task_name = TASK_NAMES[task_val] if 0 <= task_val < len(TASK_NAMES) else "?"
+        imgui.text(f"Task:  {task_name}")
+        imgui.text(f"Timer: {cur_timer:.2f}s / {task_dur:.2f}s")
+
+        imgui.separator()
+
+        err_x = ee_target[0] - ee_actual[0]
+        err_y = ee_target[1] - ee_actual[1]
+        err_z = ee_target[2] - ee_actual[2]
+        imgui.text(f"EE err: x={err_x * 1000:+.2f} y={err_y * 1000:+.2f} z={err_z * 1000:+.2f} mm")
+
+        imgui.separator()
+
+        imgui.text(f"Pad F:   {cur_pad_f:.1f} N  (max: {max_pad_f:.1f} N)")
+        imgui.text(f"Pad Fr:  {cur_pad_fr:.1f} N  (max: {max_pad_fr:.1f} N)")
+        imgui.text(f"Table F: {cur_tbl_f:.1f} N  (max: {max_tbl_f:.1f} N)")
+        imgui.text(f"Penetration: {cur_pen_mm:.3f} mm  (max: {max_pen_mm:.3f} mm)")
+        imgui.text(f"Avg vel: {avg_vel_mms:.2f} mm/s")
+
+        imgui.separator()
+
+        lift = obj_z - init_z
+        max_lift = max_z - init_z
+        imgui.text(f"Object Z: {obj_z:.4f} m  (init: {init_z:.4f} m)")
+        imgui.text(f"Lift: {lift * 1000:.1f} mm  (max: {max_lift * 1000:.1f} mm)")
+        if nan_frame_val >= 0:
+            imgui.text(f"NaN at frame {nan_frame_val}!")
+
+        imgui.separator()
+        # Sliders below double as text inputs: Ctrl+click (or Shift+click) on
+        # the bar swaps the slider for an editable field, so a separate
+        # input_float companion isn't needed.
+        imgui.text("Grasp Pose (current world's shape)")
+        shape = example.world_shapes[w]
+        edits = self._gui_grasp_edits[shape]
+
+        for i, label in enumerate(("offset.x", "offset.y", "offset.z")):
+            changed, val = imgui.slider_float(label, edits["offset_local"][i], -2.0, 2.0)
+            if changed:
+                edits["offset_local"][i] = val
+
+        for i, label in enumerate(("euler.x (deg)", "euler.y (deg)", "euler.z (deg)")):
+            changed, val = imgui.slider_float(label, edits["euler_deg"][i], -180.0, 180.0)
+            if changed:
+                edits["euler_deg"][i] = val
+
+        changed, val = imgui.slider_float("margin_pct", edits["margin_pct"], 0.0, 0.4)
+        if changed:
+            edits["margin_pct"] = val
+        derived_ctrl = margin_pct_to_ctrl(edits["margin_pct"], example._world_y_half[w])
+        imgui.text(f"  -> derived ctrl: {derived_ctrl:.2f}")
+
+        imgui.separator()
+        imgui.text("Global (all worlds)")
+        changed, val = imgui.slider_int("lift_distance (mm)", self._gui_lift_mm, 0, 300)
+        if changed:
+            self._gui_lift_mm = val
+
+        imgui.separator()
+        _, self._gui_broadcast_apply = imgui.checkbox("Apply to all worlds of this shape", self._gui_broadcast_apply)
+        # Use the GUI-staged task index (refreshed every _gui_read_interval frames)
+        # so we don't pay a per-frame GPU->CPU sync.
+        can_apply = task_val <= int(TaskType.APPROACH)
+        if not can_apply:
+            imgui.text_disabled("Apply disabled: world has left APPROACH")
+        if can_apply and imgui.button("Apply"):
+            shape = example.world_shapes[w]
+            edits = self._gui_grasp_edits[shape]
+            example.apply_grasp_edits(
+                w,
+                offset_local=wp.vec3(*edits["offset_local"]),
+                quat_local=_euler_zyx_deg_to_quat(wp.vec3(*edits["euler_deg"])),
+                margin_pct=edits["margin_pct"],
+                lift_distance_m=self._gui_lift_mm / 1000.0,
+                broadcast=self._gui_broadcast_apply,
+            )
+        if imgui.button("Print current poses"):
+            self._print_current_poses(example)
+
+        imgui.separator()
+        _, example.show_object_frames = imgui.checkbox("Show object frames", example.show_object_frames)
+        _, example.show_object_com_frames = imgui.checkbox("Show object COM frames", example.show_object_com_frames)
+        _, example.show_ee_base_frames = imgui.checkbox("Show EE base frames", example.show_ee_base_frames)
+        _, example.show_tcp_frames = imgui.checkbox("Show TCP frames", example.show_tcp_frames)
+        _, example.show_world_frames = imgui.checkbox("Show world frames", example.show_world_frames)
+        _, example.show_spawn_region = imgui.checkbox("Show spawn region", example.show_spawn_region)
+        if example.collision_mode == CollisionMode.NEWTON_HYDROELASTIC and hasattr(example.viewer, "renderer"):
+            changed, example.show_isosurface = imgui.checkbox("Show Isosurface", example.show_isosurface)
+            if changed:
+                example.viewer.show_hydro_contact_surface = example.show_isosurface
+        imgui.text(f"Frame: {example.episode_steps}  t={example.sim_time:.2f}s")
+
+    def _print_current_poses(self, example) -> None:
+        """Dump GRASP_SPECS and example.lift_distance_m as a pasteable literal."""
+        print("# --- Current grasp specs (paste over GRASP_SPECS and self.lift_distance_m) ---")
+        print("GRASP_SPECS = {")
+        for shape in ObjectShape:
+            if shape not in GRASP_SPECS:
+                continue
+            d = GRASP_SPECS[shape]
+            o_str = ", ".join(repr(x) for x in d.offset_local)
+            q_str = ", ".join(repr(x) for x in d.quat_local)
+            print(
+                f"    ObjectShape.{shape.name:<12}: GraspSpec("
+                f"offset_local=wp.vec3({o_str}), "
+                f"quat_local=wp.quat({q_str}), "
+                f"margin_pct={d.margin_pct!r}),"
+            )
+        print("}")
+        print(f"self.lift_distance_m = {example.lift_distance_m!r}")
 
     @staticmethod
     def _print_verbose_diagnostics(example) -> None:
