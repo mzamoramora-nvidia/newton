@@ -171,7 +171,7 @@ GRASP_SPECS: dict[ObjectShape, GraspSpec] = {
 
 
 class Example:
-    def __init__(self, viewer, args):
+    def __init__(self, viewer, args, *, probe=None):
         self.test_mode = args.test
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
@@ -252,6 +252,14 @@ class Example:
         self._setup_gui()
         self.capture()
 
+        # Optional diagnostic probe. Headless test runs (and the example
+        # browser's reset path, which re-creates Example without kwargs) leave
+        # this None and fall through to the minimal info GUI + NaN-guard
+        # fallbacks installed below.
+        self.probe = probe
+        if probe is not None and hasattr(probe, "on_init"):
+            probe.on_init(self)
+
     # ------------------------------------------------------------------
     # Public API: capture / simulate / step / render / test_final / create_parser
     # ------------------------------------------------------------------
@@ -283,6 +291,8 @@ class Example:
         else:
             self.simulate()
         self._update_metrics()
+        if self.probe is not None and hasattr(self.probe, "on_step"):
+            self.probe.on_step(self)
         self.sim_time += self.frame_dt
         self.episode_steps += 1
 
@@ -301,119 +311,39 @@ class Example:
                     penetrating_only=True,
                 )
         self._render_debug_frames()
+        if self.probe is not None and hasattr(self.probe, "on_render"):
+            self.probe.on_render(self)
         self.viewer.end_frame()
 
+    def gui(self, imgui):
+        """Side-panel UI callback. Delegates to the probe when one is attached;
+        otherwise draws a minimal info panel. The full tuning UI lives on the
+        probe (see ``GraspProbe.on_gui_render`` in the tests).
+        """
+        if self.probe is not None and hasattr(self.probe, "on_gui_render"):
+            self.probe.on_gui_render(self, imgui)
+        else:
+            self._draw_minimal_info_gui(imgui)
+
+    def _draw_minimal_info_gui(self, imgui):
+        """30-line info panel for bare runs with no probe attached."""
+        imgui.text(f"Frame: {self.episode_steps}")
+        imgui.text(f"Worlds: {self.world_count}")
+        imgui.text(f"Collision mode: {self.collision_mode.name}")
+        imgui.text(f"Substeps/frame: {self.sim_substeps}")
+        imgui.text(f"Collide every: {self.collide_substeps} substep(s)")
+        imgui.text(f"Sim time: {self.sim_time:.2f} s")
+        imgui.separator()
+        imgui.text("Attach a GraspProbe (see newton.tests.test_object_centric_grasp)")
+        imgui.text("for tuning sliders, per-world metrics, and debug overlays.")
+
     def test_final(self):
-        lift_threshold_m = 0.05  # 50 mm lift required for success
-        m = self.metrics.readback_all()
-        N = self.world_count
-
-        # Vectorized per-world derived metrics. Builds the columns the report consumes
-        # without any Python-level loop.
-        body_ws = self.model.body_world_start.numpy()[:N].astype(np.int64)
-        mass = self.model.body_mass.numpy()[body_ws + self.object_body_offset]
-        shape_names = np.array([SHAPE_NAMES[s] for s in self.world_shapes])
-        half_size_mm = np.asarray(self.world_half_sizes, dtype=np.float32) * 1000.0
-        has_nan = m["world_nan_frame"] >= 0
-        nan_frame = m["world_nan_frame"]
-        lift_mm = np.where(has_nan, 0.0, m["object_z_max"] - m["object_z_init"]) * 1000.0
-        hs, he = m["object_z_hold_start"], m["object_z_hold_end"]
-        slip_mm = np.where(np.isnan(hs) | np.isnan(he), 0.0, hs - he) * 1000.0
-        pen_mm = m["penetration_max"] * 1000.0
-        pad_f, pad_fr = m["pad_force_max"], m["pad_friction_max"]
-        tbl_f = m["table_force_max"]
-        avg_vel_mmps = m["object_vel_sum"] / np.maximum(1, m["object_vel_count"]) * 1000.0
-        success = (lift_mm > lift_threshold_m * 1000.0) & ~has_nan
-
-        # --- Per-world results table ---
-        per_world_cols = [
-            ("W", lambda i: f"{i:d}"),
-            ("Shape", lambda i: shape_names[i]),
-            ("Mass(kg)", lambda i: f"{mass[i]:.4f}"),
-            ("HS(mm)", lambda i: f"{half_size_mm[i]:.1f}"),
-            ("OK", lambda i: "YES" if success[i] else "NO"),
-            ("Lift(mm)", lambda i: f"{lift_mm[i]:.1f}"),
-            ("Slip(mm)", lambda i: f"{slip_mm[i]:.1f}"),
-            ("Pen(mm)", lambda i: f"{pen_mm[i]:.2f}"),
-            ("PadF(N)", lambda i: f"{pad_f[i]:.1f}"),
-            ("PadFr(N)", lambda i: f"{pad_fr[i]:.1f}"),
-            ("TblF(N)", lambda i: f"{tbl_f[i]:.1f}"),
-            ("Vel(mm/s)", lambda i: f"{avg_vel_mmps[i]:.2f}"),
-            ("NaN", lambda i: str(int(nan_frame[i])) if has_nan[i] else "-"),
-        ]
-        _print_table(
-            f"HETEROGENEOUS GRASP TEST REPORT  (collision_mode={self.collision_mode.name})",
-            per_world_cols,
-            range(N),
-        )
-
-        # --- Per-shape aggregation ---
-        shapes_present = [s for s in ObjectShape if (shape_names == s.name).any()]
-        per_shape_cols = [
-            ("Shape", lambda s: s.name),
-            ("Count", lambda s: f"{int((shape_names == s.name).sum())}"),
-            ("Success", lambda s: f"{int(success[shape_names == s.name].sum())}/{int((shape_names == s.name).sum())}"),
-            ("Lift(mm)", lambda s: f"{float(np.mean(lift_mm[shape_names == s.name])):.1f}"),
-            ("Slip(mm)", lambda s: f"{float(np.mean(slip_mm[shape_names == s.name])):.1f}"),
-            ("PadF(N)", lambda s: f"{float(np.mean(pad_f[shape_names == s.name])):.1f}"),
-            ("TblF(N)", lambda s: f"{float(np.mean(tbl_f[shape_names == s.name])):.1f}"),
-            ("Vel(mm/s)", lambda s: f"{float(np.mean(avg_vel_mmps[shape_names == s.name])):.2f}"),
-        ]
-        _print_table("PER-SHAPE AGGREGATION", per_shape_cols, shapes_present, separator="-")
-
-        # --- Aggregate statistics ---
-        n_success = int(success.sum())
-        nan_world_count = int(has_nan.sum())
-        success_rate = n_success / N if N > 0 else 0.0
-        print("\n" + "-" * 80)
-        print("  AGGREGATE STATISTICS")
-        print("-" * 80)
-        print(f"  Success rate:       {n_success}/{N} = {success_rate:.1%}")
-        print(f"  NaN worlds:         {nan_world_count}/{N}")
-        print(f"  Penetration:        mean {pen_mm.mean():.3f} mm  /  max {pen_mm.max():.3f} mm")
-        print(f"  Slippage:           mean {slip_mm.mean():.3f} mm  /  max {slip_mm.max():.3f} mm")
-        print(f"  Pad force (max):    mean {pad_f.mean():.1f} N  /  peak {pad_f.max():.1f} N")
-        print(f"  Table force (max):  mean {tbl_f.mean():.1f} N  /  peak {tbl_f.max():.1f} N")
-        print(f"  Avg object velocity: {avg_vel_mmps.mean():.2f} mm/s")
-
-        # --- Per-state breakdown (one table per task that any world entered) ---
-        state_count_arr = m["state_count"]
-        state_counts_safe = np.maximum(1, state_count_arr)
-        state_pad_avg = m["state_pad_force_sum"] / state_counts_safe
-        state_tbl_avg = m["state_table_force_sum"] / state_counts_safe
-        state_pen_avg = m["state_pen_sum"] / state_counts_safe
-        state_vel_avg = m["state_vel_sum"] / state_counts_safe
-        state_pad_max = m["state_pad_force_max"]
-        state_tbl_max = m["state_table_force_max"]
-        state_pen_max = m["state_pen_max"]
-        for task in TaskType:
-            t = int(task)
-            if task == TaskType.DONE or state_count_arr[:, t].sum() == 0:
-                continue
-            active = [i for i in range(N) if state_count_arr[i, t] > 0]
-            cols = [
-                ("W", lambda i: f"{i:d}"),
-                ("Shape", lambda i: shape_names[i]),
-                ("AvgPadF(N)", lambda i, t=t: f"{state_pad_avg[i, t]:.1f}"),
-                ("MaxPadF(N)", lambda i, t=t: f"{state_pad_max[i, t]:.1f}"),
-                ("AvgTblF(N)", lambda i, t=t: f"{state_tbl_avg[i, t]:.1f}"),
-                ("MaxTblF(N)", lambda i, t=t: f"{state_tbl_max[i, t]:.1f}"),
-                ("AvgPen(mm)", lambda i, t=t: f"{state_pen_avg[i, t]:.2f}"),
-                ("MaxPen(mm)", lambda i, t=t: f"{state_pen_max[i, t]:.2f}"),
-                ("AvgVel(mm/s)", lambda i, t=t: f"{state_vel_avg[i, t]:.2f}"),
-            ]
-            _print_table(f"PER-STATE BREAKDOWN: {task.name}", cols, active, separator="-")
-
-        # --- CI assertions ---
-        nan_ratio = nan_world_count / N if N > 0 else 0.0
-        nan_worlds = [int(i) for i in np.where(has_nan)[0]]
-        failed_worlds = [int(i) for i in np.where(~success)[0]]
-        assert nan_ratio <= 0.25, (
-            f"NaN detected in {nan_world_count}/{N} world(s) ({nan_ratio:.0%}), exceeds 25% tolerance: {nan_worlds}"
-        )
-        assert success_rate >= 0.50, (
-            f"Success rate {success_rate:.1%} is below 50% threshold (failed worlds: {failed_worlds})"
-        )
+        if self.probe is not None and hasattr(self.probe, "on_finish"):
+            self.probe.on_finish(self)
+            return
+        body_q_np = self.state_0.body_q.numpy()
+        nan_bodies = int(np.isnan(body_q_np).any(axis=-1).sum())
+        assert nan_bodies == 0, f"NaN detected in {nan_bodies} body transform(s)"
 
     @staticmethod
     def create_parser():
@@ -1200,8 +1130,6 @@ class Example:
         self._gui_broadcast_apply = False
         if hasattr(self.viewer, "renderer"):
             self.viewer.show_hydro_contact_surface = self.show_isosurface
-        if hasattr(self.viewer, "register_ui_callback"):
-            self.viewer.register_ui_callback(self._gui_impl, position="side")
 
     # ------------------------------------------------------------------
     # Per-step / per-frame internals
@@ -1349,7 +1277,7 @@ class Example:
         if not can_apply:
             imgui.text_disabled("Apply disabled: world has left APPROACH")
         if can_apply and imgui.button("Apply"):
-            self._apply_grasp_edits(w, broadcast=self._gui_broadcast_apply)
+            self.apply_grasp_edits(w, broadcast=self._gui_broadcast_apply)
         if imgui.button("Print current poses"):
             self._print_current_poses()
 
@@ -1366,7 +1294,7 @@ class Example:
                 self.viewer.show_hydro_contact_surface = self.show_isosurface
         imgui.text(f"Frame: {self.episode_steps}  t={self.sim_time:.2f}s")
 
-    def _apply_grasp_edits(self, w: int, broadcast: bool) -> None:
+    def apply_grasp_edits(self, w: int, broadcast: bool) -> None:
         """Commit the GUI edit buffer for world w's shape to GRASP_SPECS and the GPU."""
         shape = self.world_shapes[w]
         edits = self._gui_grasp_edits[shape]
@@ -1393,9 +1321,9 @@ class Example:
             self.spec.ctrl_np[idx_int] = margin_pct_to_ctrl(new_spec.margin_pct, y_half_m=self._world_y_half[idx_int])
 
         # 4. Upload mutated CPU mirrors back to GPU and relaunch the grasp-target kernel.
-        self._upload_and_relaunch_grasp_targets(slot=None if broadcast else w)
+        self.upload_grasp_targets(slot=None if broadcast else w)
 
-    def _upload_and_relaunch_grasp_targets(self, slot: int | None) -> None:
+    def upload_grasp_targets(self, slot: int | None) -> None:
         """Push spec buffers (CPU mirror -> GPU) and recompute grasp targets.
 
         ``slot=None`` rebuilds every world via a full-array assign + dim=world_count launch.
