@@ -34,8 +34,6 @@
 #
 #   # Just the kernel / spec unit tests (no full example build):
 #   python -m newton.tests -k "TestGraspSpecs or TestComputeGraspTargetsKernel or TestSpawnRandomization or TestGraspTargetsMatchReference or TestMarginPctToCtrl"
-#
-# See also docs/superpowers/heterogeneous-grasp-verification-commands.md.
 ###########################################################################
 
 import os

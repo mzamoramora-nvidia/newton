@@ -34,9 +34,8 @@
 #   python -m newton.examples robot_heterogeneous_grasp --test --viewer null --quiet
 #
 # For the full tuning panel + debug-frame overlays + summary tables, attach
-# a GraspProbe (see TestHeterogeneousGraspRegression). See also
-# docs/superpowers/heterogeneous-grasp-verification-commands.md for the
-# regression-test and benchmark commands.
+# a GraspProbe (see TestHeterogeneousGraspRegression in
+# newton/tests/test_object_centric_grasp.py).
 #
 ###########################################################################
 

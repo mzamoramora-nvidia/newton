@@ -16,8 +16,6 @@ Run commands:
 
     # Direct invocation -- skips ASV entirely, useful for smoke / debugging:
     python asv/benchmarks/simulation/bench_heterogeneous_grasp.py
-
-See also docs/superpowers/heterogeneous-grasp-verification-commands.md.
 """
 
 import sys
