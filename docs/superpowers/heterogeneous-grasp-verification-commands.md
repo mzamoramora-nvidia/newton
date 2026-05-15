@@ -48,22 +48,10 @@ uv run -m newton.examples.robot.example_robot_heterogeneous_grasp --collision-mo
 
 ## Headless regression tests (probe attached, asserts on success_rate)
 
-All regression tests (4 base + 4 primitives subclass, ~8 min):
+All regression tests (4 modes, ~3 min):
 
 ```bash
 uv run --extra dev -m newton.tests -k TestHeterogeneousGraspRegression
-```
-
-Full-catalog base class only (4 tests, ~3 min):
-
-```bash
-uv run --extra dev -m newton.tests -k "TestHeterogeneousGraspRegression and not Primitives"
-```
-
-Primitives-only subclass (5 shapes × 2 worlds, fast):
-
-```bash
-uv run --extra dev -m newton.tests -k TestHeterogeneousGraspRegressionPrimitives
 ```
 
 Single collision mode (any of mujoco / newton_default / newton_sdf / newton_hydroelastic):

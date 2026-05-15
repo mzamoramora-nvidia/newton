@@ -11,8 +11,6 @@
 #     state, contact sensors, tuning-panel GUI, and debug-frame overlays.
 #   - TestHeterogeneousGraspRegression: end-to-end regression over all four
 #     collision modes (mujoco, newton_default, newton_sdf, newton_hydroelastic).
-#   - TestHeterogeneousGraspRegressionPrimitives: same harness narrowed to
-#     OBJECT_CATALOG_PRIMITIVES (5 shapes, no mesh-asset downloads).
 #
 # Run commands:
 #
@@ -21,9 +19,6 @@
 #
 #   # Single collision mode:
 #   python -m newton.tests -k test_newton_hydroelastic_baseline
-#
-#   # Primitives-only subset (fast smoke, no asset downloads):
-#   python -m newton.tests -k TestHeterogeneousGraspRegressionPrimitives
 #
 #   # GL viewer: rich tuning panel, debug-frame overlays, summary tables.
 #   # Direct-file form (--render flag stripped before unittest.main):
@@ -74,7 +69,6 @@ import warp as wp  # noqa: E402
 import newton.examples as nex  # noqa: E402
 from newton.examples.robot.example_robot_heterogeneous_grasp import (  # noqa: E402
     GRASP_SPECS,
-    OBJECT_CATALOG_PRIMITIVES,
     ObjectShape,
     compute_grasp_targets,
     derive_offset_local_z,
@@ -1505,9 +1499,6 @@ class TestHeterogeneousGraspRegression(unittest.TestCase):
     # gives enough headroom past the HOLD phase for the lift metric to settle.
     num_frames = 700
     max_nan_rate = 0.25
-    # None = full 12-shape catalog. Subclasses can narrow this (e.g. the
-    # primitives-only smoke test) by overriding to an ObjectShape list.
-    objects: "list | None" = None
 
     def _run(self, collision_mode: str) -> dict:
         wp.init()
@@ -1529,7 +1520,7 @@ class TestHeterogeneousGraspRegression(unittest.TestCase):
             task_state_count=int(TaskType.DONE),
             hold_state=int(TaskType.HOLD),
         )
-        example = GraspExample(viewer, args, probe=probe, objects=self.objects)
+        example = GraspExample(viewer, args, probe=probe)
         for _ in range(self.num_frames):
             example.step()
             if self.do_rendering:
@@ -1562,20 +1553,6 @@ class TestHeterogeneousGraspRegression(unittest.TestCase):
         # Baseline 22/24 = 92%. Hydroelastic is the headline mode the
         # example exists to demo; this test catches regressions on that path.
         self._assert_baseline("newton_hydroelastic", min_success_rate=0.80)
-
-
-class TestHeterogeneousGraspRegressionPrimitives(TestHeterogeneousGraspRegression):
-    """Fast smoke variant: only the 5 primitive shapes (no mesh-asset downloads).
-
-    Same assertion structure as the base class -- catches regressions on the
-    fast / asset-light path. Useful when the full 12-shape catalog can't run
-    (offline / asset cache cold).
-    """
-
-    # 10 worlds = each of the 5 primitives appears twice, matching the
-    # per-shape-average pattern of the full-catalog regression.
-    world_count = 10
-    objects: "list | None" = OBJECT_CATALOG_PRIMITIVES
 
 
 if __name__ == "__main__":
