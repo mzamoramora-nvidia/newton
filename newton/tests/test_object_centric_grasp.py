@@ -233,37 +233,17 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
         np.testing.assert_allclose(grasp_rot.numpy()[0], [0.0, sin45, 0.0, cos45], atol=1e-6)
 
 
-def _quat_rotate_np(q_xyzw, v):
-    """Rotate vector v by quaternion q (xyzw convention, double precision)."""
-    x, y, z, w = q_xyzw
-    t = 2.0 * np.cross([x, y, z], v)
-    return np.asarray(v, dtype=np.float64) + w * t + np.cross([x, y, z], t)
-
-
-def _quat_mul_np(a_xyzw, b_xyzw):
-    """Hamilton product of two quaternions (xyzw convention)."""
-    ax, ay, az, aw = a_xyzw
-    bx, by, bz, bw = b_xyzw
-    return np.array(
-        [
-            aw * bx + ax * bw + ay * bz - az * by,
-            aw * by - ax * bz + ay * bw + az * bx,
-            aw * bz + ax * by - ay * bx + az * bw,
-            aw * bw - ax * bx - ay * by - az * bz,
-        ],
-        dtype=np.float64,
-    )
-
-
 class TestGraspTargetsMatchReference(unittest.TestCase):
-    """Regression: compute_grasp_targets kernel output matches a NumPy reference of the same formula.
+    """Regression: compute_grasp_targets kernel output matches a host-side
+    reference built from the same composition.
 
-    Catches kernel-side bugs (bad quat composition, wrong COM sign, etc.) by mirroring the
-    same composition (``body_q * body_com`` for the COM, ``body_q.q * base_ee_rot * quat_local``
-    for the rotation) on the CPU and asserting equality across every shape.
+    The reference uses ``wp.quat_rotate`` and ``wp.quat`` multiplication on
+    the host -- not a hand-rolled numpy implementation -- so the test
+    validates *our* composition order (COM offset, base_ee_rot baking,
+    quat_local stacking) without re-testing Warp's quaternion math.
     """
 
-    def test_kernel_matches_cpu_reference(self):
+    def test_kernel_matches_host_reference(self):
         wp.init()
         parser = GraspExample.create_parser()
         sys.argv = ["test", "--viewer", "null", "--world-count", "12", "--num-frames", "1"]
@@ -279,32 +259,34 @@ class TestGraspTargetsMatchReference(unittest.TestCase):
         body_q_np = example.state_0.body_q.numpy()
         body_com_np = example.model.body_com.numpy()
         body_ws_np = example.model.body_world_start.numpy()
-        base_ee_rot = np.array([float(example.base_ee_rot[i]) for i in range(4)], dtype=np.float64)
+        base_ee_rot = example.base_ee_rot
 
         expected_pos = np.zeros((wc, 3), dtype=np.float32)
         expected_rot = np.zeros((wc, 4), dtype=np.float32)
         for i in range(wc):
             obj_global = int(body_ws_np[i]) + example.object_body_offset
             tr = body_q_np[obj_global]
-            body_tr = np.array([tr[0], tr[1], tr[2]], dtype=np.float64)
-            body_rot = np.array([tr[3], tr[4], tr[5], tr[6]], dtype=np.float64)
-            com_local = body_com_np[obj_global].astype(np.float64)
+            body_tr = wp.vec3(float(tr[0]), float(tr[1]), float(tr[2]))
+            body_rot = wp.quat(float(tr[3]), float(tr[4]), float(tr[5]), float(tr[6]))
+            com_local = wp.vec3(*(float(x) for x in body_com_np[obj_global]))
             hs_i = float(example.world_half_sizes[i])
-            offset_local = example.spec.offset_local_np[i].astype(np.float64)
-            quat_local = example.spec.quat_local_np[i].astype(np.float64)
+            offset_local = wp.vec3(*(float(x) for x in example.spec.offset_local_np[i]))
+            quat_local = wp.quat(*(float(x) for x in example.spec.quat_local_np[i]))
 
-            com_world = body_tr + _quat_rotate_np(body_rot, com_local)
-            offset_world = _quat_rotate_np(body_rot, offset_local * hs_i)
-            expected_pos[i] = (com_world + offset_world).astype(np.float32)
-            expected_rot[i] = _quat_mul_np(_quat_mul_np(body_rot, base_ee_rot), quat_local).astype(np.float32)
+            com_world = body_tr + wp.quat_rotate(body_rot, com_local)
+            offset_world = wp.quat_rotate(body_rot, offset_local * hs_i)
+            pos = com_world + offset_world
+            rot = body_rot * base_ee_rot * quat_local
+            expected_pos[i] = [pos[0], pos[1], pos[2]]
+            expected_rot[i] = [rot[0], rot[1], rot[2], rot[3]]
 
         expected_ctrl = example.spec.ctrl_np.astype(np.float32)
 
         np.testing.assert_allclose(
-            grasp_pos, expected_pos, atol=1e-5, err_msg="grasp_pos kernel output disagrees with CPU reference"
+            grasp_pos, expected_pos, atol=1e-5, err_msg="grasp_pos kernel output disagrees with host reference"
         )
         np.testing.assert_allclose(
-            grasp_rot, expected_rot, atol=1e-5, err_msg="grasp_rot kernel output disagrees with CPU reference"
+            grasp_rot, expected_rot, atol=1e-5, err_msg="grasp_rot kernel output disagrees with host reference"
         )
         np.testing.assert_allclose(
             grasp_ctrl, expected_ctrl, atol=1e-3, err_msg="grasp_ctrl kernel output disagrees with spec inputs"
