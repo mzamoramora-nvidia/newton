@@ -6,9 +6,37 @@
 #
 # Demonstrates heterogeneous grasping environments: each world contains a
 # different object (shape, mass, size), all grasped and lifted by a Franka
-# Panda + Robotiq 2F-85 gripper. Supports 4 collision pipelines.
+# Panda + Robotiq 2F-85 gripper. Supports 4 collision pipelines: MuJoCo
+# native contacts, Newton default, Newton SDF, and Newton hydroelastic.
 #
-# Command: python -m newton.examples robot_heterogeneous_grasp
+# IMPORTANT: in MuJoCo collision mode every world must contain the same
+# body topology, so every object is built as a mesh (primitives are
+# converted via _PRIMITIVE_MESH_FACTORIES). The example uses
+# separate_worlds=True; mixed primitive/mesh geom types across worlds
+# would break that contract.
+#
+# A bare run shows a minimal info panel only. Tuning sliders, per-world
+# metrics, debug-frame overlays, and success/lift statistics live on the
+# attached GraspProbe in newton/tests/test_object_centric_grasp.py.
+#
+# Run commands (default mode is newton_hydroelastic):
+#
+#   # Interactive GL viewer with the default 24 worlds:
+#   python -m newton.examples robot_heterogeneous_grasp
+#
+#   # Pick a collision mode:
+#   python -m newton.examples robot_heterogeneous_grasp --collision-mode mujoco
+#   python -m newton.examples robot_heterogeneous_grasp --collision-mode newton_default
+#   python -m newton.examples robot_heterogeneous_grasp --collision-mode newton_sdf
+#   python -m newton.examples robot_heterogeneous_grasp --collision-mode newton_hydroelastic
+#
+#   # Headless CI smoke (no probe; runs the NaN-guard fallback in test_final):
+#   python -m newton.examples robot_heterogeneous_grasp --test --viewer null --quiet
+#
+# For the full tuning panel + debug-frame overlays + summary tables, attach
+# a GraspProbe (see TestHeterogeneousGraspRegression). See also
+# docs/superpowers/heterogeneous-grasp-verification-commands.md for the
+# regression-test and benchmark commands.
 #
 ###########################################################################
 

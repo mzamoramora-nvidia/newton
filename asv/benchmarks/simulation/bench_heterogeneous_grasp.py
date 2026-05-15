@@ -7,6 +7,17 @@ Drives the example through GraspProbe (the same probe the unittest uses) to
 expose both per-step wallclock and the end-of-episode success rate. The
 class-level ``params`` grid covers world counts and collision modes; ASV
 runs ``setup`` once per cell.
+
+Run commands:
+
+    # Quick local run on the latest commit (single iteration, no virtualenv
+    # caching across commits):
+    asv run --launch-method spawn --quick HEAD^!
+
+    # Direct invocation -- skips ASV entirely, useful for smoke / debugging:
+    python asv/benchmarks/simulation/bench_heterogeneous_grasp.py
+
+See also docs/superpowers/heterogeneous-grasp-verification-commands.md.
 """
 
 import sys

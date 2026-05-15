@@ -1,6 +1,43 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+###########################################################################
+# Tests + GraspProbe for the heterogeneous-grasp example.
+#
+# This file hosts:
+#   - Kernel / spec unit tests (compute_grasp_targets, GRASP_SPECS, ...).
+#   - GraspProbe: the diagnostic surface that example_robot_heterogeneous_grasp
+#     attaches via Example(viewer, args, probe=probe). It owns the metric
+#     state, contact sensors, tuning-panel GUI, and debug-frame overlays.
+#   - TestHeterogeneousGraspRegression: end-to-end regression over all four
+#     collision modes (mujoco, newton_default, newton_sdf, newton_hydroelastic).
+#   - TestHeterogeneousGraspRegressionPrimitives: same harness narrowed to
+#     OBJECT_CATALOG_PRIMITIVES (5 shapes, no mesh-asset downloads).
+#
+# Run commands:
+#
+#   # Headless (CI default): all regression tests, all four collision modes.
+#   python -m newton.tests -k TestHeterogeneousGraspRegression
+#
+#   # Single collision mode:
+#   python -m newton.tests -k test_newton_hydroelastic_baseline
+#
+#   # Primitives-only subset (fast smoke, no asset downloads):
+#   python -m newton.tests -k TestHeterogeneousGraspRegressionPrimitives
+#
+#   # GL viewer: rich tuning panel, debug-frame overlays, summary tables.
+#   # Direct-file form (--render flag stripped before unittest.main):
+#   python newton/tests/test_object_centric_grasp.py --render \
+#     TestHeterogeneousGraspRegression.test_newton_hydroelastic_baseline
+#   # Discovery form (env var, works with -m newton.tests -k <filter>):
+#   GRASP_TEST_RENDER=1 python -m newton.tests -k test_newton_hydroelastic_baseline
+#
+#   # Just the kernel / spec unit tests (no full example build):
+#   python -m newton.tests -k "TestGraspSpecs or TestComputeGraspTargetsKernel or TestSpawnRandomization or TestGraspTargetsMatchReference or TestMarginPctToCtrl"
+#
+# See also docs/superpowers/heterogeneous-grasp-verification-commands.md.
+###########################################################################
+
 import os
 import unittest
 
