@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import unittest
 
 from newton.examples.robot.example_robot_heterogeneous_grasp import margin_pct_to_ctrl
@@ -1475,7 +1476,11 @@ class TestHeterogeneousGraspRegression(unittest.TestCase):
     through the GL viewer and prints the full summary tables.
     """
 
-    do_rendering = False
+    # Set GRASP_TEST_RENDER=1 to route through ViewerGL: fires probe.on_render
+    # (debug-frame triads, spawn-region) and probe.on_gui_render (tuning panel)
+    # every frame and prints the summary tables at the end. CI leaves the env
+    # var unset, so do_rendering stays False.
+    do_rendering = os.environ.get("GRASP_TEST_RENDER", "0") == "1"
     # 12 object shapes round-robin into worlds; 24 = each shape appears twice so
     # the success_rate is a per-shape average instead of a single-roll lottery.
     world_count = 24
