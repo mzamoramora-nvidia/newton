@@ -13,6 +13,7 @@
 ###########################################################################
 
 import copy
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from enum import IntEnum
 
@@ -101,6 +102,180 @@ class CollisionMode(IntEnum):
     NEWTON_HYDROELASTIC = 3
 
 
+@dataclass(frozen=True)
+class _CollisionModeSetup:
+    """Per-mode dispatch table. Groups what used to be three separate cascades
+    inside Example._create_solver / _create_collision_pipeline /
+    _setup_collision_sdf into one record per collision mode.
+
+    ``use_mujoco_contacts`` toggles the solver's internal contact detection.
+    ``build_collision_pipeline`` returns the pipeline instance (or None for
+    MuJoCo, which manages contacts internally).
+    ``prepare_scene`` runs on the ModelBuilder before finalize and is None
+    for modes that don't need SDF / hydroelastic prep.
+    """
+
+    use_mujoco_contacts: bool
+    build_collision_pipeline: "Callable[[Example], newton.CollisionPipeline | None]"
+    prepare_scene: "Callable[[Example, newton.ModelBuilder], None] | None" = None
+
+
+def _build_pipeline_none(example) -> None:
+    return None
+
+
+def _build_pipeline_default(example):
+    return newton.CollisionPipeline(
+        example.model,
+        rigid_contact_max=example.rigid_contact_max,
+        broad_phase="nxn",
+    )
+
+
+def _build_pipeline_sdf(example):
+    return newton.CollisionPipeline(
+        example.model,
+        rigid_contact_max=example.rigid_contact_max,
+        broad_phase="explicit",
+        reduce_contacts=True,
+    )
+
+
+def _build_pipeline_hydroelastic(example):
+    return newton.CollisionPipeline(
+        example.model,
+        rigid_contact_max=example.rigid_contact_max,
+        broad_phase="explicit",
+        reduce_contacts=True,
+        sdf_hydroelastic_config=HydroelasticSDF.Config(
+            output_contact_surface=hasattr(example.viewer, "renderer"),
+            buffer_fraction=1.0,
+            buffer_mult_iso=2,
+            buffer_mult_contact=2,
+            anchor_contact=True,
+        ),
+    )
+
+
+def _build_collision_sdfs(example, builder) -> None:
+    """Pass 1 of SDF prep: build an SDF on every collision shape, converting
+    boxes to meshes as needed. Shared by NEWTON_SDF and NEWTON_HYDROELASTIC.
+    """
+    sdf_narrow_band = (-0.0015, 0.0015)
+    for shape_idx in range(builder.shape_count):
+        if not (builder.shape_flags[shape_idx] & newton.ShapeFlags.COLLIDE_SHAPES):
+            continue
+
+        label = builder.shape_label[shape_idx] if shape_idx < len(builder.shape_label) else ""
+        is_object = "object" in label
+        is_table = "table" in label
+        if is_object:
+            sdf_max_res = 96
+        elif is_table:
+            # 0.85 m table / ~5 mm voxel target, rounded up to a multiple of 8 (tile-aligned).
+            sdf_max_res = 176
+        else:
+            sdf_max_res = 64
+        sdf_margin = 0.0002 if is_object else example.shape_cfg.gap
+
+        if builder.shape_type[shape_idx] == newton.GeoType.BOX:
+            hx, hy, hz = builder.shape_scale[shape_idx]
+            mesh = newton.Mesh.create_box(
+                hx,
+                hy,
+                hz,
+                duplicate_vertices=True,
+                compute_normals=False,
+                compute_uvs=False,
+                compute_inertia=True,
+            )
+            mesh.build_sdf(max_resolution=sdf_max_res, narrow_band_range=sdf_narrow_band, margin=sdf_margin)
+            builder.shape_type[shape_idx] = newton.GeoType.MESH
+            builder.shape_source[shape_idx] = mesh
+            builder.shape_scale[shape_idx] = (1.0, 1.0, 1.0)
+
+        elif builder.shape_type[shape_idx] == newton.GeoType.MESH:
+            mesh = builder.shape_source[shape_idx]
+            if mesh is None:
+                continue
+            scale = np.asarray(builder.shape_scale[shape_idx], dtype=np.float32)
+            if not np.allclose(scale, 1.0):
+                mesh = mesh.copy(vertices=mesh.vertices * scale, recompute_inertia=True)
+                builder.shape_source[shape_idx] = mesh
+                builder.shape_scale[shape_idx] = (1.0, 1.0, 1.0)
+                if mesh.sdf is not None:
+                    mesh.clear_sdf()
+                mesh.build_sdf(max_resolution=sdf_max_res, narrow_band_range=sdf_narrow_band, margin=sdf_margin)
+            elif mesh.sdf is None:
+                mesh.build_sdf(max_resolution=sdf_max_res, narrow_band_range=sdf_narrow_band, margin=sdf_margin)
+
+
+def _tag_hydroelastic_shapes(example, builder) -> None:
+    """Pass 2 of SDF prep, hydroelastic-only: tag fingertip pads, object
+    shapes, and the table with HYDROELASTIC so the contact-surface path has
+    at least one pair to draw."""
+    fingertip_names = {
+        "left_pad1",
+        "left_pad2",
+        "right_pad1",
+        "right_pad2",
+        "left_follower_geom_1",
+        "right_follower_geom_0",
+    }
+
+    hydro_count = 0
+    for shape_idx, label in enumerate(builder.shape_label):
+        short = label.split("/")[-1] if label else ""
+        is_fingertip = short in fingertip_names
+        is_object = "object" in short
+        is_table = "table" in short
+
+        if is_fingertip or is_object or is_table:
+            cfg = example.shape_cfg
+            builder.shape_gap[shape_idx] = cfg.gap
+            builder.shape_material_mu[shape_idx] = cfg.mu
+            builder.shape_material_mu_torsional[shape_idx] = cfg.mu_torsional
+            builder.shape_material_mu_rolling[shape_idx] = cfg.mu_rolling
+            builder.shape_material_kh[shape_idx] = _TABLE_KH_PA if is_table else example.kh
+            builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
+            if is_fingertip:
+                builder.shape_flags[shape_idx] &= ~newton.ShapeFlags.VISIBLE
+            hydro_count += 1
+
+    print(f"[SDF setup] Marked {hydro_count} shapes as HYDROELASTIC")
+
+
+def _prepare_scene_sdf(example, builder) -> None:
+    _build_collision_sdfs(example, builder)
+
+
+def _prepare_scene_hydroelastic(example, builder) -> None:
+    _build_collision_sdfs(example, builder)
+    _tag_hydroelastic_shapes(example, builder)
+
+
+_COLLISION_MODE_SETUPS: "dict[CollisionMode, _CollisionModeSetup]" = {
+    CollisionMode.MUJOCO: _CollisionModeSetup(
+        use_mujoco_contacts=True,
+        build_collision_pipeline=_build_pipeline_none,
+    ),
+    CollisionMode.NEWTON_DEFAULT: _CollisionModeSetup(
+        use_mujoco_contacts=False,
+        build_collision_pipeline=_build_pipeline_default,
+    ),
+    CollisionMode.NEWTON_SDF: _CollisionModeSetup(
+        use_mujoco_contacts=False,
+        build_collision_pipeline=_build_pipeline_sdf,
+        prepare_scene=_prepare_scene_sdf,
+    ),
+    CollisionMode.NEWTON_HYDROELASTIC: _CollisionModeSetup(
+        use_mujoco_contacts=False,
+        build_collision_pipeline=_build_pipeline_hydroelastic,
+        prepare_scene=_prepare_scene_hydroelastic,
+    ),
+}
+
+
 class TaskType(IntEnum):
     APPROACH = 0
     CLOSE_GRIPPER = 1
@@ -180,6 +355,10 @@ class Example:
         self.world_count = args.world_count
         self.seed = args.seed
         self.collision_mode = CollisionMode[args.collision_mode.upper()]
+        # Per-mode dispatch: pipeline factory + scene-preparation hook +
+        # use_mujoco_contacts toggle. Looked up once at construction so the
+        # three _create_* / _setup_* methods below stay 1-2 lines each.
+        self._collision = _COLLISION_MODE_SETUPS[self.collision_mode]
         self.kh = args.kh
         self.verbose = args.verbose
         self.spawn_xy_range = args.spawn_xy_range
@@ -850,153 +1029,24 @@ class Example:
         self.body_count_total = self.model.body_count
 
     def _setup_collision_sdf(self, builder):
-        """Build SDFs on all collision shapes; mark fingertips, objects, and table hydroelastic.
-
-        Operates on the scene builder BEFORE finalize(), following the same
-        pattern as ``example_hydro_robotiq_gripper``:
-        Pass 1 - SDF on every collision shape (BOX -> MESH + SDF build).
-        Pass 2 - HYDROELASTIC flag on fingertip pads, object shapes, and the table
-        (so the contact-surface visualization always has at least one pair to draw).
-        """
-        if self.collision_mode not in (CollisionMode.NEWTON_SDF, CollisionMode.NEWTON_HYDROELASTIC):
-            return
-
-        sdf_narrow_band = (-0.0015, 0.0015)
-        hydroelastic_enabled = self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC
-
-        # ---- Pass 1: build SDF on every collision shape ----
-        # Object shapes get higher resolution (96) for better contact quality;
-        # robot links, gripper, and table use 64.
-        for shape_idx in range(builder.shape_count):
-            if not (builder.shape_flags[shape_idx] & newton.ShapeFlags.COLLIDE_SHAPES):
-                continue
-
-            label = builder.shape_label[shape_idx] if shape_idx < len(builder.shape_label) else ""
-            is_object = "object" in label
-            is_table = "table" in label
-            if is_object:
-                sdf_max_res = 96
-            elif is_table:
-                # 0.85 m table / ~5 mm voxel target, rounded up to a multiple of 8 (tile-aligned).
-                sdf_max_res = 176
-            else:
-                sdf_max_res = 64
-            # Object meshes get a smaller margin to avoid inflating thin features
-            sdf_margin = 0.0002 if is_object else self.shape_cfg.gap
-
-            if builder.shape_type[shape_idx] == newton.GeoType.BOX:
-                # Convert BOX to MESH + SDF (needed for pad shapes from MJCF)
-                hx, hy, hz = builder.shape_scale[shape_idx]
-                mesh = newton.Mesh.create_box(
-                    hx,
-                    hy,
-                    hz,
-                    duplicate_vertices=True,
-                    compute_normals=False,
-                    compute_uvs=False,
-                    compute_inertia=True,
-                )
-                mesh.build_sdf(max_resolution=sdf_max_res, narrow_band_range=sdf_narrow_band, margin=sdf_margin)
-                builder.shape_type[shape_idx] = newton.GeoType.MESH
-                builder.shape_source[shape_idx] = mesh
-                builder.shape_scale[shape_idx] = (1.0, 1.0, 1.0)
-
-            elif builder.shape_type[shape_idx] == newton.GeoType.MESH:
-                mesh = builder.shape_source[shape_idx]
-                if mesh is None:
-                    continue
-                scale = np.asarray(builder.shape_scale[shape_idx], dtype=np.float32)
-                if not np.allclose(scale, 1.0):
-                    # Bake scale into vertices and rebuild SDF (required for hydroelastic)
-                    mesh = mesh.copy(vertices=mesh.vertices * scale, recompute_inertia=True)
-                    builder.shape_source[shape_idx] = mesh
-                    builder.shape_scale[shape_idx] = (1.0, 1.0, 1.0)
-                    if mesh.sdf is not None:
-                        mesh.clear_sdf()
-                    mesh.build_sdf(max_resolution=sdf_max_res, narrow_band_range=sdf_narrow_band, margin=sdf_margin)
-                elif mesh.sdf is None:
-                    mesh.build_sdf(max_resolution=sdf_max_res, narrow_band_range=sdf_narrow_band, margin=sdf_margin)
-
-        # ---- Pass 2: fingertip, object, and table shapes get hydroelastic flag ----
-        if hydroelastic_enabled:
-            fingertip_names = {
-                "left_pad1",
-                "left_pad2",
-                "right_pad1",
-                "right_pad2",
-                "left_follower_geom_1",
-                "right_follower_geom_0",
-            }
-
-            hydro_count = 0
-            for shape_idx, label in enumerate(builder.shape_label):
-                short = label.split("/")[-1] if label else ""
-                is_fingertip = short in fingertip_names
-                is_object = "object" in short
-                is_table = "table" in short
-
-                if is_fingertip or is_object or is_table:
-                    cfg = self.shape_cfg
-                    builder.shape_gap[shape_idx] = cfg.gap
-                    builder.shape_material_mu[shape_idx] = cfg.mu
-                    builder.shape_material_mu_torsional[shape_idx] = cfg.mu_torsional
-                    builder.shape_material_mu_rolling[shape_idx] = cfg.mu_rolling
-                    if is_table:
-                        builder.shape_material_kh[shape_idx] = _TABLE_KH_PA
-                    else:
-                        builder.shape_material_kh[shape_idx] = self.kh
-                    builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
-                    if is_fingertip:
-                        builder.shape_flags[shape_idx] &= ~newton.ShapeFlags.VISIBLE
-                    hydro_count += 1
-
-            print(f"[SDF setup] Marked {hydro_count} shapes as HYDROELASTIC")
+        """Run the mode's scene-preparation hook (build SDFs, tag hydroelastic
+        shapes, etc.). No-op for modes without a hook."""
+        if self._collision.prepare_scene is not None:
+            self._collision.prepare_scene(self, builder)
 
     def _create_collision_pipeline(self):
-        """Create collision pipeline based on collision mode."""
-        if self.collision_mode == CollisionMode.MUJOCO:
-            self.collision_pipeline = None
-            self.contacts = None
-        elif self.collision_mode == CollisionMode.NEWTON_DEFAULT:
-            self.collision_pipeline = newton.CollisionPipeline(
-                self.model,
-                rigid_contact_max=self.rigid_contact_max,
-                broad_phase="nxn",
-            )
-            self.contacts = self.collision_pipeline.contacts()
-        elif self.collision_mode == CollisionMode.NEWTON_SDF:
-            self.collision_pipeline = newton.CollisionPipeline(
-                self.model,
-                rigid_contact_max=self.rigid_contact_max,
-                broad_phase="explicit",
-                reduce_contacts=True,
-            )
-            self.contacts = self.collision_pipeline.contacts()
-        elif self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC:
-            self.collision_pipeline = newton.CollisionPipeline(
-                self.model,
-                rigid_contact_max=self.rigid_contact_max,
-                broad_phase="explicit",
-                reduce_contacts=True,
-                sdf_hydroelastic_config=HydroelasticSDF.Config(
-                    output_contact_surface=hasattr(self.viewer, "renderer"),
-                    buffer_fraction=1.0,
-                    buffer_mult_iso=2,
-                    buffer_mult_contact=2,
-                    anchor_contact=True,
-                ),
-            )
-            self.contacts = self.collision_pipeline.contacts()
-        else:
-            raise ValueError(f"Unknown collision mode: {self.collision_mode}")
+        """Instantiate the collision pipeline via the mode's factory and adopt
+        its Contacts buffer (or None for MuJoCo, which manages contacts internally)."""
+        self.collision_pipeline = self._collision.build_collision_pipeline(self)
+        self.contacts = self.collision_pipeline.contacts() if self.collision_pipeline is not None else None
 
     def _create_solver(self):
-        """Create the MuJoCo solver."""
-        use_mujoco_contacts = self.collision_mode == CollisionMode.MUJOCO
+        """Create the MuJoCo solver. The only per-mode knob is whether the
+        solver does its own contact detection (use_mujoco_contacts)."""
         nconmax_per_world = self.rigid_contact_max // self.world_count
         self.solver = newton.solvers.SolverMuJoCo(
             self.model,
-            use_mujoco_contacts=use_mujoco_contacts,
+            use_mujoco_contacts=self._collision.use_mujoco_contacts,
             solver="newton",
             integrator="implicitfast",
             cone="elliptic",
