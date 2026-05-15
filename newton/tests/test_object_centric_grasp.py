@@ -1562,4 +1562,10 @@ class TestHeterogeneousGraspRegressionPrimitives(TestHeterogeneousGraspRegressio
 
 
 if __name__ == "__main__":
+    # ``--render`` (or ``-r``) flips do_rendering on the regression class so
+    # the test routes through ViewerGL. Strip it from sys.argv before
+    # delegating to unittest.main so unittest doesn't see an unknown flag.
+    if "--render" in sys.argv or "-r" in sys.argv:
+        TestHeterogeneousGraspRegression.do_rendering = True
+        sys.argv = [a for a in sys.argv if a not in ("--render", "-r")]
     unittest.main()

@@ -74,13 +74,23 @@ uv run --extra dev -m newton.tests -k test_newton_hydroelastic_baseline
 
 ## GL regression test (rich tuning panel + debug frames + summary tables)
 
-Set `GRASP_TEST_RENDER=1` to route the regression test through ViewerGL:
+Two ways to flip `do_rendering=True` and route through ViewerGL.
+
+**Direct-file form with `--render` flag** — cleanest for a single test:
+
+```bash
+uv run python newton/tests/test_object_centric_grasp.py --render TestHeterogeneousGraspRegression.test_newton_hydroelastic_baseline
+```
+
+Swap the trailing argument for any of `test_mujoco_baseline`, `test_newton_default_baseline`, or `test_newton_sdf_baseline`. Drop the trailing arg entirely to run all four base tests.
+
+**Env-var form with `-m newton.tests` discovery** — needed when going through the parallel runner (which rejects unknown CLI flags):
 
 ```bash
 GRASP_TEST_RENDER=1 uv run --extra dev -m newton.tests -k test_newton_hydroelastic_baseline
 ```
 
-Swap the `-k` filter for any of `test_mujoco_baseline`, `test_newton_default_baseline`, or `test_newton_sdf_baseline`. The env var also works with the primitives subclass and with broader filters like `-k TestHeterogeneousGraspRegression`.
+The env var also works with the primitives subclass and with broader filters like `-k TestHeterogeneousGraspRegression`.
 
 What this exercises:
 
