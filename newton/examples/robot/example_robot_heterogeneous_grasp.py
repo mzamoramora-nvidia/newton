@@ -82,6 +82,19 @@ class ObjectShape(IntEnum):
 SHAPE_NAMES = [s.name for s in ObjectShape]
 NUM_SHAPES = len(ObjectShape)
 
+# Default object catalog: round-robin through every shape. Tests/benchmarks
+# can narrow this by passing ``objects=[...]`` to ``Example.__init__``.
+OBJECT_CATALOG_DEFAULT: list[ObjectShape] = list(ObjectShape)
+
+# Primitives-only subset for fast smoke runs (no mesh-asset downloads).
+OBJECT_CATALOG_PRIMITIVES: list[ObjectShape] = [
+    ObjectShape.BOX,
+    ObjectShape.SPHERE,
+    ObjectShape.CYLINDER,
+    ObjectShape.CAPSULE,
+    ObjectShape.ELLIPSOID,
+]
+
 _MESH_SHAPES = frozenset(
     {
         ObjectShape.CUP,
@@ -344,7 +357,7 @@ GRASP_SPECS: dict[ObjectShape, GraspSpec] = {
 
 
 class Example:
-    def __init__(self, viewer, args, *, probe=None):
+    def __init__(self, viewer, args, *, probe=None, objects: "list[ObjectShape] | None" = None):
         self.test_mode = args.test
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
@@ -365,6 +378,10 @@ class Example:
         self.spawn_yaw_range_rad = args.spawn_yaw_range * wp.pi / 180.0
         self.viewer = viewer
         self.episode_steps = 0
+        # Object catalog to round-robin across worlds. ``None`` picks the full
+        # 12-shape default catalog; tests/benchmarks can pass a narrower list
+        # (e.g. ``OBJECT_CATALOG_PRIMITIVES``) to skip mesh-asset downloads.
+        self.objects: list[ObjectShape] = list(objects) if objects is not None else list(OBJECT_CATALOG_DEFAULT)
 
         self._generate_world_params()
         robot_builder, arm_only_builder = self._build_robot()
@@ -695,8 +712,8 @@ class Example:
         rng = np.random.default_rng(self.seed)
         n = self.world_count
 
-        # Round-robin shape assignment across all ObjectShape values
-        self.world_shapes = [ObjectShape(i % NUM_SHAPES) for i in range(n)]
+        # Round-robin shape assignment across the injected object catalog.
+        self.world_shapes = [self.objects[i % len(self.objects)] for i in range(n)]
 
         # Fixed density (1000 kg/m^3 ~= water): mass scales with shape volume and size,
         # so we don't have to combine an unrealistic density with the per-world size jitter.
