@@ -261,10 +261,8 @@ class Example:
             self.graph_ik = capture.graph
 
     def simulate(self):
-        self.state_0.clear_forces()
-        self.state_1.clear_forces()
-
         for i in range(self.sim_substeps):
+            self.state_0.clear_forces()
             if self.collision_pipeline and i % self.collide_substeps == 0:
                 self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
