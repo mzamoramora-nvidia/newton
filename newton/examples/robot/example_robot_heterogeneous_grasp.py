@@ -230,7 +230,10 @@ class Example:
         self._create_solver()
 
         self.viewer.set_model(self.model)
-        self.viewer.set_camera(wp.vec3(0.5, 0.5, 0.5), -15, -140)
+        # Position the camera at the +X+Y corner of the grid so the high-index
+        # mesh-shape worlds (set above in _generate_world_params) sit in the
+        # front rows of the view.
+        self.viewer.set_camera(wp.vec3(7.0, 3.0, 2.2), -20.0, -150.0)
         self.viewer.set_world_offsets(wp.vec3(1.5, 1.5, 0.0))
         if isinstance(self.viewer, newton.viewer.ViewerGL):
             self.viewer._paused = True
@@ -436,11 +439,13 @@ class Example:
         rng = np.random.default_rng(self.seed)
         n = self.world_count
 
-        # Round-robin shape assignment across all ObjectShape values, with mesh
-        # shapes ordered first so the more interesting objects render in the
-        # front rows of the viewer grid.
-        mesh_first = [s for s in ObjectShape if s in _MESH_SHAPES] + [s for s in ObjectShape if s not in _MESH_SHAPES]
-        self.world_shapes = [mesh_first[i % NUM_SHAPES] for i in range(n)]
+        # Round-robin shape assignment. Primitives go to the low indices
+        # (back of the viewer grid relative to the default camera) and mesh
+        # shapes go to the high indices (front rows).
+        primitives_first = [s for s in ObjectShape if s not in _MESH_SHAPES] + [
+            s for s in ObjectShape if s in _MESH_SHAPES
+        ]
+        self.world_shapes = [primitives_first[i % NUM_SHAPES] for i in range(n)]
 
         # Fixed density (1000 kg/m^3 ~= water): mass scales with shape volume and size,
         # so we don't have to combine an unrealistic density with the per-world size
