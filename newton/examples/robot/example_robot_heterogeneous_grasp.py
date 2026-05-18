@@ -32,14 +32,14 @@ _NUT_BOLT_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"
 _NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
 _NUT_BOLT_ASSEMBLY = "m20_loose"
 
-_LEGO_PITCH = 0.008
-_LEGO_BRICK_HEIGHT = 0.0096
-_LEGO_STUD_RADIUS = 0.0024
-_LEGO_STUD_HEIGHT = 0.0017
-_LEGO_WALL_THICKNESS = 0.0012
-_LEGO_TOP_THICKNESS = 0.001
-_LEGO_TUBE_OUTER_RADIUS = 0.003255
-_LEGO_CYLINDER_SEGMENTS = 24
+_BRICK_PITCH = 0.008
+_BRICK_HEIGHT = 0.0096
+_BRICK_STUD_RADIUS = 0.0024
+_BRICK_STUD_HEIGHT = 0.0017
+_BRICK_WALL_THICKNESS = 0.0012
+_BRICK_TOP_THICKNESS = 0.001
+_BRICK_TUBE_OUTER_RADIUS = 0.003255
+_BRICK_CYLINDER_SEGMENTS = 24
 
 # Table dimensions. The table is centered at table_pos and extends along all
 # three axes by these half-extents. _TABLE_HALF_X is large enough to support
@@ -71,7 +71,7 @@ class ObjectShape(IntEnum):
     ELLIPSOID = 4
     CUP = 5
     RUBBER_DUCK = 6
-    LEGO_BRICK = 7
+    BRICK = 7
     RJ45_PLUG = 8
     BEAR = 9
     NUT = 10
@@ -85,7 +85,7 @@ _MESH_SHAPES = frozenset(
     {
         ObjectShape.CUP,
         ObjectShape.RUBBER_DUCK,
-        ObjectShape.LEGO_BRICK,
+        ObjectShape.BRICK,
         ObjectShape.RJ45_PLUG,
         ObjectShape.BEAR,
         ObjectShape.NUT,
@@ -153,7 +153,7 @@ GRASP_SPECS: dict[ObjectShape, GraspSpec] = {
     ObjectShape.ELLIPSOID: GraspSpec(margin_pct=0.05),
     ObjectShape.CUP: GraspSpec(margin_pct=0.22),
     ObjectShape.RUBBER_DUCK: GraspSpec(margin_pct=0.10),
-    ObjectShape.LEGO_BRICK: GraspSpec(margin_pct=0.15),
+    ObjectShape.BRICK: GraspSpec(margin_pct=0.15),
     ObjectShape.RJ45_PLUG: GraspSpec(
         offset_local=wp.vec3(0.0, 0.30, 0.0),
         quat_local=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 90.0 * wp.pi / 180.0),
@@ -513,8 +513,8 @@ class Example:
             duck_path = newton.utils.download_asset("manipulation_objects/rubber_duck")
             self.mesh_objects[ObjectShape.RUBBER_DUCK] = _load_mesh_asset_no_sdf(duck_path, "/root/Model/SurfaceMesh")
 
-        if ObjectShape.LEGO_BRICK in needed:
-            self.mesh_objects[ObjectShape.LEGO_BRICK] = _lego_make_brick_mesh(4, 2)
+        if ObjectShape.BRICK in needed:
+            self.mesh_objects[ObjectShape.BRICK] = _make_brick_mesh(4, 2)
 
         if ObjectShape.RJ45_PLUG in needed:
             rj45_path = newton.examples.get_asset("rj45_plug.usd")
@@ -573,19 +573,19 @@ class Example:
             label=f"object_shape_{shape.name.lower()}",
         )
 
-        # The LEGO brick gets explicit floor + four wall colliders inside its hollow shell;
+        # The brick gets explicit floor + four wall colliders inside its hollow shell;
         # other shapes get five tiny placeholder boxes so every world has identical body
         # topology (required by MuJoCo's separate_worlds=True mode).
         collider_cfg = replace(self.shape_cfg, density=0.0, is_visible=False)
-        if shape == ObjectShape.LEGO_BRICK:
+        if shape == ObjectShape.BRICK:
             sf = uniform_scale
             inset = 0.0001 * sf
-            ox = _LEGO_PITCH * 2 * sf
-            oy = _LEGO_PITCH * sf
-            center_z = (_LEGO_BRICK_HEIGHT + _LEGO_STUD_HEIGHT) / 2.0 * sf
-            box_hz = 0.5 * _LEGO_BRICK_HEIGHT * sf - inset
-            box_cz = 0.5 * _LEGO_BRICK_HEIGHT * sf - center_z
-            wt = _LEGO_WALL_THICKNESS * sf
+            ox = _BRICK_PITCH * 2 * sf
+            oy = _BRICK_PITCH * sf
+            center_z = (_BRICK_HEIGHT + _BRICK_STUD_HEIGHT) / 2.0 * sf
+            box_hz = 0.5 * _BRICK_HEIGHT * sf - inset
+            box_cz = 0.5 * _BRICK_HEIGHT * sf - center_z
+            wt = _BRICK_WALL_THICKNESS * sf
             wall_hx = 0.5 * wt - inset
             wall_hy = 0.5 * wt - inset
             specs = [
@@ -1368,10 +1368,10 @@ def _load_mesh_asset_no_sdf(asset_path, prim_path):
     return mesh
 
 
-# ---- LEGO brick mesh generation ----
+# ---- Brick mesh generation ----
 
 
-def _lego_cylinder_mesh(radius, height, segments, cx=0.0, cy=0.0, cz=0.0, bottom_cap=True):
+def _brick_cylinder_mesh(radius, height, segments, cx=0.0, cy=0.0, cz=0.0, bottom_cap=True):
     n = segments
     angles = np.linspace(0, 2 * np.pi, n, endpoint=False)
     cos_a, sin_a = np.cos(angles), np.sin(angles)
@@ -1409,7 +1409,7 @@ def _lego_cylinder_mesh(radius, height, segments, cx=0.0, cy=0.0, cz=0.0, bottom
     return np.vstack(verts), np.array(faces, dtype=np.int32)
 
 
-def _lego_combine_meshes(mesh_list):
+def _brick_combine_meshes(mesh_list):
     all_v, all_f, off = [], [], 0
     for v, f in mesh_list:
         all_v.append(v)
@@ -1418,13 +1418,13 @@ def _lego_combine_meshes(mesh_list):
     return np.vstack(all_v).astype(np.float32), np.vstack(all_f).astype(np.int32)
 
 
-def _lego_make_shell_mesh(nx, ny):
-    ox = nx * _LEGO_PITCH / 2.0
-    oy = ny * _LEGO_PITCH / 2.0
-    inx = ox - _LEGO_WALL_THICKNESS
-    iny = oy - _LEGO_WALL_THICKNESS
-    H = _LEGO_BRICK_HEIGHT
-    T = _LEGO_TOP_THICKNESS
+def _make_brick_shell_mesh(nx, ny):
+    ox = nx * _BRICK_PITCH / 2.0
+    oy = ny * _BRICK_PITCH / 2.0
+    inx = ox - _BRICK_WALL_THICKNESS
+    iny = oy - _BRICK_WALL_THICKNESS
+    H = _BRICK_HEIGHT
+    T = _BRICK_TOP_THICKNESS
     v = np.array(
         [
             [-ox, -oy, 0],
@@ -1482,32 +1482,32 @@ def _lego_make_shell_mesh(nx, ny):
     return v, f
 
 
-def _lego_make_brick_mesh(nx=4, ny=2):
-    shell_v, shell_f = _lego_make_shell_mesh(nx, ny)
-    seg = _LEGO_CYLINDER_SEGMENTS
+def _make_brick_mesh(nx=4, ny=2):
+    shell_v, shell_f = _make_brick_shell_mesh(nx, ny)
+    seg = _BRICK_CYLINDER_SEGMENTS
     stud_meshes = []
     for i in range(nx):
         for j in range(ny):
-            sx = (i - (nx - 1) / 2.0) * _LEGO_PITCH
-            sy = (j - (ny - 1) / 2.0) * _LEGO_PITCH
+            sx = (i - (nx - 1) / 2.0) * _BRICK_PITCH
+            sy = (j - (ny - 1) / 2.0) * _BRICK_PITCH
             stud_meshes.append(
-                _lego_cylinder_mesh(
-                    _LEGO_STUD_RADIUS,
-                    _LEGO_STUD_HEIGHT,
+                _brick_cylinder_mesh(
+                    _BRICK_STUD_RADIUS,
+                    _BRICK_STUD_HEIGHT,
                     seg,
                     cx=sx,
                     cy=sy,
-                    cz=_LEGO_BRICK_HEIGHT,
+                    cz=_BRICK_HEIGHT,
                     bottom_cap=False,
                 )
             )
     tube_meshes = []
     if ny == 2:
-        tube_height = _LEGO_BRICK_HEIGHT - _LEGO_TOP_THICKNESS
+        tube_height = _BRICK_HEIGHT - _BRICK_TOP_THICKNESS
         for i in range(nx - 1):
-            tx = (i - (nx - 2) / 2.0) * _LEGO_PITCH
-            tube_meshes.append(_lego_cylinder_mesh(_LEGO_TUBE_OUTER_RADIUS, tube_height, seg, cx=tx, cy=0.0, cz=0.0))
-    v, f = _lego_combine_meshes([(shell_v, shell_f), *stud_meshes, *tube_meshes])
+            tx = (i - (nx - 2) / 2.0) * _BRICK_PITCH
+            tube_meshes.append(_brick_cylinder_mesh(_BRICK_TUBE_OUTER_RADIUS, tube_height, seg, cx=tx, cy=0.0, cz=0.0))
+    v, f = _brick_combine_meshes([(shell_v, shell_f), *stud_meshes, *tube_meshes])
     center = (v.min(axis=0) + v.max(axis=0)) / 2.0
     v -= center
     return newton.Mesh(v, f.flatten())
