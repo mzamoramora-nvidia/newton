@@ -106,8 +106,10 @@ NUM_TASKS = len(TaskType)
 TASK_NAMES = [t.name for t in TaskType]
 
 
-# Default clearance between the spawn point and the EE's initial Z target.
-_GRASP_CLEARANCE = 0.05
+# Default depth (m) the EE seed sits below the object's top -- i.e. how far
+# the fingers extend past the top surface to grip the body. Clamped against
+# the table for thin objects in derive_offset_local_z.
+_GRASP_DEPTH_FROM_TOP = 0.05
 
 
 @dataclass(frozen=True)
@@ -118,42 +120,48 @@ class GraspSpec:
     makes the spec scale-invariant -- the same spec drives the gripper to
     the same relative pose regardless of object size. The kernel multiplies
     by ``half_size`` to recover meters. ``quat_local`` rotates the EE target
-    around the body, on top of the shared ``base_ee_rot``. ``z_extra`` lifts
-    the seed Z target by a fixed amount for tall / awkward shapes that need
-    more headroom than the default clearance.
+    around the body, on top of the shared ``base_ee_rot``.
+
+    ``grip_overclose_fraction`` controls the gripper closure: each pad closes
+    past the object surface by this fraction of the object's full Y-width.
+    A value of 0 just touches the surface; 0.05 squeezes 5% of the width
+    deeper per side.
+
+    ``z_extra`` lifts the seed Z target by a fixed amount of world meters
+    for tall / awkward shapes that need more headroom than the default.
 
     Composed at runtime as:
         grasp_pos_world = com_world + body_q.q * (offset_local * half_size)
         grasp_rot_world = body_q.q * base_ee_rot * quat_local
-        grasp_ctrl      = margin_pct_to_ctrl(margin_pct, y_half)
+        grasp_ctrl      = grip_overclose_to_ctrl(grip_overclose_fraction, y_half)
     """
 
     offset_local: wp.vec3 = field(default_factory=lambda: wp.vec3(0.0, 0.0, 0.0))
     quat_local: wp.quat = field(default_factory=wp.quat_identity)
-    margin_pct: float = 0.05
+    grip_overclose_fraction: float = 0.05
     z_extra: float = 0.0
 
 
 GRASP_SPECS: dict[ObjectShape, GraspSpec] = {
-    ObjectShape.BOX: GraspSpec(margin_pct=0.05),
-    ObjectShape.SPHERE: GraspSpec(margin_pct=0.05),
-    ObjectShape.CYLINDER: GraspSpec(margin_pct=0.05),
-    ObjectShape.CAPSULE: GraspSpec(margin_pct=0.05),
-    ObjectShape.ELLIPSOID: GraspSpec(margin_pct=0.05),
-    ObjectShape.CUP: GraspSpec(margin_pct=0.22),
-    ObjectShape.RUBBER_DUCK: GraspSpec(margin_pct=0.10),
-    ObjectShape.BRICK: GraspSpec(margin_pct=0.15),
+    ObjectShape.BOX: GraspSpec(grip_overclose_fraction=0.05),
+    ObjectShape.SPHERE: GraspSpec(grip_overclose_fraction=0.05),
+    ObjectShape.CYLINDER: GraspSpec(grip_overclose_fraction=0.05),
+    ObjectShape.CAPSULE: GraspSpec(grip_overclose_fraction=0.05),
+    ObjectShape.ELLIPSOID: GraspSpec(grip_overclose_fraction=0.05),
+    ObjectShape.CUP: GraspSpec(grip_overclose_fraction=0.22),
+    ObjectShape.RUBBER_DUCK: GraspSpec(grip_overclose_fraction=0.10),
+    ObjectShape.BRICK: GraspSpec(grip_overclose_fraction=0.15),
     ObjectShape.RJ45_PLUG: GraspSpec(
         offset_local=wp.vec3(0.0, 0.30, 0.0),
         quat_local=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 90.0 * wp.pi / 180.0),
-        margin_pct=0.10,
+        grip_overclose_fraction=0.10,
     ),
-    ObjectShape.BEAR: GraspSpec(margin_pct=0.25, z_extra=0.01),
+    ObjectShape.BEAR: GraspSpec(grip_overclose_fraction=0.25, z_extra=0.01),
     ObjectShape.NUT: GraspSpec(
         quat_local=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 30.0 * wp.pi / 180.0),
-        margin_pct=0.15,
+        grip_overclose_fraction=0.15,
     ),
-    ObjectShape.BOLT: GraspSpec(margin_pct=0.30, z_extra=0.02),
+    ObjectShape.BOLT: GraspSpec(grip_overclose_fraction=0.30, z_extra=0.02),
 }
 
 
@@ -180,8 +188,8 @@ class Example:
         robot_builder, arm_only_builder = self._build_robot()
         self.model_arm_only = arm_only_builder.finalize()
         self._load_mesh_objects()
-        self._world_z_half = np.full(self.world_count, -1.0)
-        self._world_y_half = np.full(self.world_count, -1.0)
+        self._world_z_half = np.zeros(self.world_count, dtype=np.float32)
+        self._world_y_half = np.zeros(self.world_count, dtype=np.float32)
         scene = self._build_scene(robot_builder)
         self._setup_collision_sdf(scene)
         self.model = scene.finalize()
@@ -729,7 +737,7 @@ class Example:
             )
             offset_np[i] = (*spec.offset_local[:2], z_local)
             quat_np[i] = spec.quat_local
-            ctrl_np[i] = margin_pct_to_ctrl(spec.margin_pct, y_half_m=self._world_y_half[i])
+            ctrl_np[i] = grip_overclose_to_ctrl(spec.grip_overclose_fraction, y_half_m=self._world_y_half[i])
         self.spec = _PerWorldGraspSpec(
             offset_local=wp.array(offset_np, dtype=wp.vec3),
             quat_local=wp.array(quat_np, dtype=wp.quat),
@@ -1056,26 +1064,57 @@ class _PerWorldGraspSpec:
     ctrl_np: np.ndarray
 
 
-def margin_pct_to_ctrl(margin_pct: float, y_half_m: float, stroke_mm: float = 85.0) -> float:
-    """Convert per-shape margin_pct (fraction of object y-width) to Robotiq [0, 255] control.
+def grip_overclose_to_ctrl(grip_overclose_fraction: float, y_half_m: float, stroke_mm: float = 85.0) -> float:
+    """Convert a per-shape grip overclose fraction to a Robotiq [0, 255] control value.
 
-    ``ctrl = 255 * (1 - (y_width - 2*margin) / stroke)``, clamped to ``[0, 255]``.
-    Default stroke is the Robotiq 2F-85 full opening (85 mm).
+    ``grip_overclose_fraction`` is how far each pad closes past the object
+    surface, expressed as a fraction of the object's full Y-width. The
+    resulting opening between the pads is ``y_width * (1 - 2 * fraction)``,
+    and ``ctrl`` is the corresponding closure level on the Robotiq 2F-85
+    (0 = fully open, 255 = fully closed). Default stroke is the 2F-85 full
+    opening (85 mm). Output is clamped to ``[0, 255]``.
     """
     y_width_mm = 2.0 * y_half_m * 1000.0
-    margin_mm = margin_pct * y_width_mm
-    ctrl = 255.0 * (1.0 - (y_width_mm - 2.0 * margin_mm) / stroke_mm)
+    overclose_mm = grip_overclose_fraction * y_width_mm
+    pad_opening_mm = y_width_mm - 2.0 * overclose_mm
+    ctrl = 255.0 * (1.0 - pad_opening_mm / stroke_mm)
     return min(255.0, max(0.0, ctrl))
 
 
 def derive_offset_local_z(
     half_size: float,
     z_half: float,
-    grasp_clearance: float = _GRASP_CLEARANCE,
+    grasp_depth: float = _GRASP_DEPTH_FROM_TOP,
     z_extra: float = 0.0,
 ) -> float:
-    """Seed offset_local.z (in half-size units) so the EE starts above the object."""
-    return (_GRASP_FLOOR_OFFSET_M + max(0.0, 2.0 * z_half - grasp_clearance) - z_half + z_extra) / half_size
+    """Seed ``offset_local.z`` (in half-size units) for the per-world grasp pose.
+
+    Geometry::
+
+        EE seed         <- grasp_pos_z = obj_center_z + offset_local.z * half_size
+        ────────  obj_top
+                 \\
+                  ) z_half
+                 /
+        obj_center
+                 \\
+                  ) z_half
+                 /
+        ────────  obj_bottom
+        ░░░░░░░░░░░░  table_top
+            └ floor_gap = _GRASP_FLOOR_OFFSET_M
+
+    The EE seed is placed at ``obj_top - grasp_depth`` (i.e. the fingers
+    reach ``grasp_depth`` past the top surface) when the object is at least
+    ``grasp_depth`` tall; otherwise it clamps to the table top so the
+    gripper doesn't dip below it. ``z_extra`` adds a fixed world-meter lift
+    for shapes that need extra headroom.
+
+    Returns a value in half-size units; the kernel multiplies by
+    ``half_size`` to recover meters.
+    """
+    z_offset_from_center_m = _GRASP_FLOOR_OFFSET_M + max(0.0, 2.0 * z_half - grasp_depth) - z_half + z_extra
+    return z_offset_from_center_m / half_size
 
 
 # Builders for the primitive (non-mesh-asset) object shapes. Each entry takes the

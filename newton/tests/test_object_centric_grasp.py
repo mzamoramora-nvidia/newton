@@ -3,31 +3,31 @@
 
 import unittest
 
-from newton.examples.robot.example_robot_heterogeneous_grasp import margin_pct_to_ctrl
+from newton.examples.robot.example_robot_heterogeneous_grasp import grip_overclose_to_ctrl
 
 
-class TestMarginPctToCtrl(unittest.TestCase):
-    def test_zero_margin_tight_grasp_is_high_ctrl(self):
-        # 30 mm object, 0% margin -> ctrl = 255 * (1 - 30/85) ~= 164.85
-        ctrl = margin_pct_to_ctrl(margin_pct=0.0, y_half_m=0.015)
+class TestGripOvercloseToCtrl(unittest.TestCase):
+    def test_zero_overclose_just_touches_surface(self):
+        # 30 mm object, 0 overclose -> ctrl = 255 * (1 - 30/85) ~= 164.85
+        ctrl = grip_overclose_to_ctrl(grip_overclose_fraction=0.0, y_half_m=0.015)
         self.assertAlmostEqual(ctrl, 255.0 * (1.0 - 30.0 / 85.0), places=3)
 
     def test_formula_self_consistent(self):
-        margin_pct = 0.15
+        overclose = 0.15
         y_half_m = 0.020
         y_width_mm = 2.0 * y_half_m * 1000.0
-        margin_mm = margin_pct * y_width_mm
-        expected = min(255.0, max(0.0, 255.0 * (1.0 - (y_width_mm - 2.0 * margin_mm) / 85.0)))
-        self.assertAlmostEqual(margin_pct_to_ctrl(margin_pct, y_half_m), expected, places=5)
+        overclose_mm = overclose * y_width_mm
+        expected = min(255.0, max(0.0, 255.0 * (1.0 - (y_width_mm - 2.0 * overclose_mm) / 85.0)))
+        self.assertAlmostEqual(grip_overclose_to_ctrl(overclose, y_half_m), expected, places=5)
 
     def test_clamped_low(self):
-        # Object wider than full stroke (y_width_mm=100 > stroke_mm=85) with 0 margin
+        # Object wider than full stroke (y_width_mm=100 > stroke_mm=85) with 0 overclose
         # -> raw ctrl < 0, clamped to 0.0 (pads wide open).
-        self.assertEqual(margin_pct_to_ctrl(margin_pct=0.0, y_half_m=0.050), 0.0)
+        self.assertEqual(grip_overclose_to_ctrl(grip_overclose_fraction=0.0, y_half_m=0.050), 0.0)
 
     def test_clamped_high(self):
-        # margin_pct=0.5 -> margin_mm == y_half_mm -> net width = 0 -> ctrl = 255, clamped high.
-        self.assertEqual(margin_pct_to_ctrl(margin_pct=0.5, y_half_m=0.020), 255.0)
+        # overclose=0.5 -> overclose_mm == y_half_mm -> net width = 0 -> ctrl = 255, clamped high.
+        self.assertEqual(grip_overclose_to_ctrl(grip_overclose_fraction=0.5, y_half_m=0.020), 255.0)
 
 
 import sys  # noqa: E402
@@ -52,16 +52,16 @@ class TestGraspSpecs(unittest.TestCase):
         for shape in ObjectShape:
             self.assertIn(shape, GRASP_SPECS, f"Missing GRASP_SPECS entry for {shape}")
 
-    def test_margin_pct_in_valid_range(self):
-        # Sanity: every shipped margin_pct value is positive and < 0.5 (above 0.5 the
-        # pads would close past each other).
+    def test_grip_overclose_fraction_in_valid_range(self):
+        # Sanity: every shipped grip_overclose_fraction is positive and < 0.5
+        # (above 0.5 the pads would close past each other).
         for shape, spec in GRASP_SPECS.items():
-            self.assertGreater(spec.margin_pct, 0.0, msg=f"{shape}")
-            self.assertLess(spec.margin_pct, 0.5, msg=f"{shape}")
+            self.assertGreater(spec.grip_overclose_fraction, 0.0, msg=f"{shape}")
+            self.assertLess(spec.grip_overclose_fraction, 0.5, msg=f"{shape}")
 
     def test_derive_offset_local_z_formula(self):
-        # offset_local.z = (0.0005 + max(0, 2*z_half - grasp_clearance) - z_half + z_extra) / half_size
-        grasp_clearance = 0.05
+        # offset_local.z = (0.0005 + max(0, 2*z_half - grasp_depth) - z_half + z_extra) / half_size
+        grasp_depth = 0.05
         cases = [
             # (half_size, z_half, z_extra)
             (0.010, 0.010, 0.0),
@@ -70,11 +70,9 @@ class TestGraspSpecs(unittest.TestCase):
             (0.015, 0.015, 0.01),
         ]
         for half_size, z_half, z_extra in cases:
-            expected = (0.0005 + max(0.0, 2.0 * z_half - grasp_clearance) - z_half + z_extra) / half_size
+            expected = (0.0005 + max(0.0, 2.0 * z_half - grasp_depth) - z_half + z_extra) / half_size
             self.assertAlmostEqual(
-                derive_offset_local_z(
-                    half_size=half_size, z_half=z_half, grasp_clearance=grasp_clearance, z_extra=z_extra
-                ),
+                derive_offset_local_z(half_size=half_size, z_half=z_half, grasp_depth=grasp_depth, z_extra=z_extra),
                 expected,
                 places=6,
                 msg=f"offset_local.z mismatch for z_extra={z_extra}",
