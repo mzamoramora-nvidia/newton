@@ -804,8 +804,11 @@ class Example:
         table (so the contact-surface visualization always has at least one
         pair to draw). Only applied in NEWTON_HYDROELASTIC mode.
         """
-        # +/- 3 mm, wider than the max pad-into-surface squeeze.
-        sdf_narrow_band = (-0.003, 0.003)
+        # Default +/- 3 mm narrow band, wider than the max pad-into-surface
+        # squeeze. The table uses a larger band because its lower SDF
+        # resolution gives a voxel size of ~5 mm.
+        sdf_narrow_band_default = (-0.003, 0.003)
+        sdf_narrow_band_table = (-0.015, 0.015)
         hydroelastic_enabled = self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC
 
         # ---- Pass 1: build SDF on every collision shape ----
@@ -827,6 +830,7 @@ class Example:
                 sdf_max_res = 64
             # Object meshes get a smaller margin to avoid inflating thin features
             sdf_margin = 0.0002 if is_object else self.shape_cfg.gap
+            sdf_narrow_band = sdf_narrow_band_table if is_table else sdf_narrow_band_default
 
             if builder.shape_type[shape_idx] == newton.GeoType.BOX:
                 # Convert BOX to MESH + SDF (needed for pad shapes from MJCF)
