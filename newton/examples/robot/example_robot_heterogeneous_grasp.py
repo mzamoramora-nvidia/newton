@@ -58,6 +58,19 @@ _TABLE_KH_PA = 1e10
 # Vertical clearance between the spawn point and the object's lowest extent.
 _GRASP_FLOOR_OFFSET_M = 0.0005
 
+# Per-world spawn-pose randomization. Both ranges are uniform [-r, +r]; the
+# seed (CLI arg) controls determinism.
+_SPAWN_XY_RANGE_M = 0.10
+_SPAWN_YAW_RANGE_DEG = 30.0
+
+# Hydroelastic stiffness applied to object meshes and gripper pads. [Pa]
+_HYDROELASTIC_KH_PA = 2e11
+
+# Simulation rate: sim_dt = frame_dt / _SUBSTEPS_PER_FRAME. Collision pipeline
+# runs every _COLLIDE_EVERY_N_SUBSTEPS substeps.
+_SUBSTEPS_PER_FRAME = 16
+_COLLIDE_EVERY_N_SUBSTEPS = 4
+
 
 class ObjectShape(IntEnum):
     BOX = 0
@@ -177,16 +190,13 @@ class Example:
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = args.substeps
-        self.collide_substeps = args.collide_substeps
+        self.sim_substeps = _SUBSTEPS_PER_FRAME
+        self.collide_substeps = _COLLIDE_EVERY_N_SUBSTEPS
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.world_count = args.world_count
         self.seed = args.seed
         self.collision_mode = CollisionMode[args.collision_mode.upper()]
-        self.kh = args.kh
         self.verbose = args.verbose
-        self.spawn_xy_range = args.spawn_xy_range
-        self.spawn_yaw_range_rad = args.spawn_yaw_range * wp.pi / 180.0
         self.viewer = viewer
         self.episode_steps = 0
 
@@ -309,21 +319,6 @@ class Example:
         parser.add_argument(
             "--verbose", action="store_true", help="Print per-world shape / body-COM diagnostics at startup."
         )
-        parser.add_argument(
-            "--spawn-xy-range",
-            type=float,
-            default=0.10,
-            help="Half-range (m) of the uniform XY spawn-position randomization on the table. 0 disables.",
-        )
-        parser.add_argument(
-            "--spawn-yaw-range",
-            type=float,
-            default=30.0,
-            help="Half-range (deg) of the uniform Z-rotation spawn randomization. 0 disables.",
-        )
-        parser.add_argument("--kh", type=float, default=2e11, help="Hydroelastic stiffness [Pa]")
-        parser.add_argument("--substeps", type=int, default=16, help="Simulation substeps per frame")
-        parser.add_argument("--collide-substeps", type=int, default=4, help="Collide every N substeps")
         return parser
 
     # ------------------------------------------------------------------
@@ -348,7 +343,7 @@ class Example:
         self._download_assets()
 
         self.shape_cfg = newton.ModelBuilder.ShapeConfig(
-            kh=self.kh,
+            kh=_HYDROELASTIC_KH_PA,
             gap=0.0005,
             mu=1.0,
             mu_torsional=0.0,
@@ -474,10 +469,9 @@ class Example:
         # Per-world spawn pose randomization: XY offset on the table and Z-yaw rotation.
         # Both draws are uniform in [-range, +range]; ranges of 0 collapse to deterministic
         # spawns at the table center with the per-shape default orientation.
-        self._world_spawn_xy = rng.uniform(-self.spawn_xy_range, self.spawn_xy_range, size=(n, 2)).astype(np.float32)
-        self._world_spawn_yaw = rng.uniform(-self.spawn_yaw_range_rad, self.spawn_yaw_range_rad, size=n).astype(
-            np.float32
-        )
+        spawn_yaw_range_rad = _SPAWN_YAW_RANGE_DEG * wp.pi / 180.0
+        self._world_spawn_xy = rng.uniform(-_SPAWN_XY_RANGE_M, _SPAWN_XY_RANGE_M, size=(n, 2)).astype(np.float32)
+        self._world_spawn_yaw = rng.uniform(-spawn_yaw_range_rad, spawn_yaw_range_rad, size=n).astype(np.float32)
 
         if self.verbose:
             for i in range(n):
@@ -897,7 +891,7 @@ class Example:
                     if is_table:
                         builder.shape_material_kh[shape_idx] = _TABLE_KH_PA
                     else:
-                        builder.shape_material_kh[shape_idx] = self.kh
+                        builder.shape_material_kh[shape_idx] = _HYDROELASTIC_KH_PA
                     builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
                     if is_fingertip:
                         builder.shape_flags[shape_idx] &= ~newton.ShapeFlags.VISIBLE
