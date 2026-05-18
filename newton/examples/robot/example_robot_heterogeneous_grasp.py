@@ -224,23 +224,7 @@ class Example:
         self.joint_targets_2d = wp.zeros(self.joint_target_shape, dtype=wp.float32)
         self.graph_ik = None
 
-        # Direct-control path for the MJCF general actuators.
-        ctrl = self.control.mujoco.ctrl
-        actuator_count = ctrl.shape[0] // self.world_count
-        self.mujoco_ctrl_2d = ctrl.reshape((self.world_count, actuator_count))
-        self.gripper_actuator_idx = self.arm_dof_count  # gripper actuator follows the 7 arm actuators
-        print(f"MuJoCo ctrl: {actuator_count} actuators/world, gripper at idx {self.gripper_actuator_idx}")
-
-        # Seed ctrl with the initial arm joint positions so the arm holds its pose
-        # on frame 0 before IK starts driving it.
-        init_q = self.model.joint_q.numpy()
-        ctrl_np = ctrl.numpy().reshape(self.world_count, actuator_count)
-        dofs_per_world = self.model.joint_coord_count // self.world_count
-        for w in range(self.world_count):
-            q_start = w * dofs_per_world
-            for j in range(self.arm_dof_count):
-                ctrl_np[w, j] = init_q[q_start + j]
-        wp.copy(ctrl, wp.array(ctrl_np.flatten(), dtype=wp.float32))
+        self._setup_mujoco_ctrl()
 
         self._create_collision_pipeline()
         self._create_solver()
@@ -940,6 +924,26 @@ class Example:
             njmax=nconmax_per_world,
             nconmax=nconmax_per_world,
         )
+
+    def _setup_mujoco_ctrl(self):
+        """Set up the direct-control path for the MJCF general actuators.
+
+        Reshapes the flat ctrl array into a (world_count, actuator_count) view,
+        records the gripper actuator slot, and seeds the arm columns with the
+        initial arm joint positions so the arm holds its pose on frame 0
+        before IK starts driving it.
+        """
+        ctrl = self.control.mujoco.ctrl
+        actuator_count = ctrl.shape[0] // self.world_count
+        self.mujoco_ctrl_2d = ctrl.reshape((self.world_count, actuator_count))
+        self.gripper_actuator_idx = self.arm_dof_count  # gripper actuator follows the 7 arm actuators
+        print(f"MuJoCo ctrl: {actuator_count} actuators/world, gripper at idx {self.gripper_actuator_idx}")
+
+        dofs_per_world = self.model.joint_coord_count // self.world_count
+        init_q_2d = self.model.joint_q.numpy().reshape(self.world_count, dofs_per_world)
+        ctrl_np = ctrl.numpy().reshape(self.world_count, actuator_count)
+        ctrl_np[:, : self.arm_dof_count] = init_q_2d[:, : self.arm_dof_count]
+        wp.copy(ctrl, wp.array(ctrl_np.flatten(), dtype=wp.float32))
 
     def _set_joint_targets(self):
         """Compute IK targets from state machine and solve IK each frame."""
