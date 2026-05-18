@@ -225,24 +225,22 @@ class Example:
         self.graph_ik = None
 
         # Direct-control path for the MJCF general actuators.
-        self.has_mujoco_ctrl = hasattr(self.control, "mujoco") and self.control.mujoco is not None
-        if self.has_mujoco_ctrl:
-            ctrl = self.control.mujoco.ctrl
-            actuator_count = ctrl.shape[0] // self.world_count
-            self.mujoco_ctrl_2d = ctrl.reshape((self.world_count, actuator_count))
-            self.gripper_actuator_idx = self.arm_dof_count  # gripper actuator follows the 7 arm actuators
-            print(f"MuJoCo ctrl: {actuator_count} actuators/world, gripper at idx {self.gripper_actuator_idx}")
+        ctrl = self.control.mujoco.ctrl
+        actuator_count = ctrl.shape[0] // self.world_count
+        self.mujoco_ctrl_2d = ctrl.reshape((self.world_count, actuator_count))
+        self.gripper_actuator_idx = self.arm_dof_count  # gripper actuator follows the 7 arm actuators
+        print(f"MuJoCo ctrl: {actuator_count} actuators/world, gripper at idx {self.gripper_actuator_idx}")
 
-            # Seed ctrl with the initial arm joint positions so the arm holds its pose
-            # on frame 0 before IK starts driving it.
-            init_q = self.model.joint_q.numpy()
-            ctrl_np = ctrl.numpy().reshape(self.world_count, actuator_count)
-            dofs_per_world = self.model.joint_coord_count // self.world_count
-            for w in range(self.world_count):
-                q_start = w * dofs_per_world
-                for j in range(self.arm_dof_count):
-                    ctrl_np[w, j] = init_q[q_start + j]
-            wp.copy(ctrl, wp.array(ctrl_np.flatten(), dtype=wp.float32))
+        # Seed ctrl with the initial arm joint positions so the arm holds its pose
+        # on frame 0 before IK starts driving it.
+        init_q = self.model.joint_q.numpy()
+        ctrl_np = ctrl.numpy().reshape(self.world_count, actuator_count)
+        dofs_per_world = self.model.joint_coord_count // self.world_count
+        for w in range(self.world_count):
+            q_start = w * dofs_per_world
+            for j in range(self.arm_dof_count):
+                ctrl_np[w, j] = init_q[q_start + j]
+        wp.copy(ctrl, wp.array(ctrl_np.flatten(), dtype=wp.float32))
 
         self._create_collision_pipeline()
         self._create_solver()
@@ -995,18 +993,17 @@ class Example:
         wp.copy(self.control.joint_target_pos, self.joint_targets_2d.flatten())
 
         # Write arm + gripper to mujoco ctrl (CTRL_DIRECT for all MJCF general actuators)
-        if self.has_mujoco_ctrl:
-            wp.launch(
-                write_mujoco_ctrl_kernel,
-                dim=self.world_count,
-                inputs=[
-                    self.joint_q_ik,
-                    self.gripper_target,
-                    self.mujoco_ctrl_2d,
-                    self.arm_dof_count,
-                    self.gripper_actuator_idx,
-                ],
-            )
+        wp.launch(
+            write_mujoco_ctrl_kernel,
+            dim=self.world_count,
+            inputs=[
+                self.joint_q_ik,
+                self.gripper_target,
+                self.mujoco_ctrl_2d,
+                self.arm_dof_count,
+                self.gripper_actuator_idx,
+            ],
+        )
 
         # 5. Extract actual EE positions from simulation state
         wp.launch(
