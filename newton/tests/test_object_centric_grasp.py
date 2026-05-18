@@ -271,10 +271,6 @@ class TestSpawnRandomization(unittest.TestCase):
             "1",
             "--seed",
             "7",
-            "--spawn-xy-range",
-            "0.10",
-            "--spawn-yaw-range",
-            "0",
         ]
         viewer, args = nex.init(parser)
         example = GraspExample(viewer, args)
