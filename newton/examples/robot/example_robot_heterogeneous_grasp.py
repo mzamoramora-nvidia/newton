@@ -968,15 +968,18 @@ class Example:
         """Lay worlds out on a ``cols``-wide grid with uniform XY spacing.
 
         Bypasses the viewer's auto-square grid (``ceil(N**0.5)`` columns) so
-        we get a wider, shallower layout for the multi-world view.
+        we get a wider, shallower layout for the multi-world view. The default
+        camera looks down -X, so ``cols`` is the screen-width axis (Y) and
+        ``rows`` is the depth axis (X): cols=6 with 24 worlds produces a
+        6-wide x 4-deep grid in the view.
         """
         rows = (self.world_count + cols - 1) // cols
         offsets = np.zeros((self.world_count, 3), dtype=np.float32)
         for i in range(self.world_count):
             row = i // cols
             col = i % cols
-            offsets[i, 0] = (col - (cols - 1) / 2.0) * spacing
-            offsets[i, 1] = (row - (rows - 1) / 2.0) * spacing
+            offsets[i, 0] = (row - (rows - 1) / 2.0) * spacing  # depth (along camera view)
+            offsets[i, 1] = (col - (cols - 1) / 2.0) * spacing  # width (perpendicular to camera)
         self.viewer.world_offsets = wp.array(offsets, dtype=wp.vec3, device=self.viewer.device)
         if hasattr(self.viewer, "picking") and self.viewer.picking is not None:
             self.viewer.picking.world_offsets = self.viewer.world_offsets
