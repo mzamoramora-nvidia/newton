@@ -31,8 +31,8 @@ class TestHeterogeneousGraspLift(unittest.TestCase):
     NUM_FRAMES = 700
     SEED = 42
     COLLISION_MODE = "newton_hydroelastic"
-    LIFT_THRESHOLD_M = 0.03  # measured above the table top
-    MIN_SUCCESS_RATE = 0.50
+    LIFT_THRESHOLD_M = 0.10  # measured above the table top
+    MIN_SUCCESS_RATE = 0.80
 
     def test_most_worlds_lift_object(self):
         wp.init()
