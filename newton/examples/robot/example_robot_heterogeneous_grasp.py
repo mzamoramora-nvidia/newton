@@ -439,13 +439,13 @@ class Example:
         rng = np.random.default_rng(self.seed)
         n = self.world_count
 
-        # Round-robin shape assignment. Primitives go to the low indices
-        # (back of the viewer grid relative to the default camera) and mesh
-        # shapes go to the high indices (front rows).
-        primitives_first = [s for s in ObjectShape if s not in _MESH_SHAPES] + [
-            s for s in ObjectShape if s in _MESH_SHAPES
-        ]
-        self.world_shapes = [primitives_first[i % NUM_SHAPES] for i in range(n)]
+        # Round-robin shape assignment, then stable-sort so primitives occupy
+        # the low indices (back rows of the viewer grid) and mesh shapes occupy
+        # the high indices (front rows). The 5x5 grid for 24 worlds doesn't
+        # tile 12 shapes cleanly; bucketing instead of interleaving keeps the
+        # front rows free of primitives.
+        round_robin = [ObjectShape(i % NUM_SHAPES) for i in range(n)]
+        self.world_shapes = sorted(round_robin, key=lambda s: s in _MESH_SHAPES)
 
         # Fixed density (1000 kg/m^3 ~= water): mass scales with shape volume and size,
         # so we don't have to combine an unrealistic density with the per-world size
