@@ -116,30 +116,36 @@ _GRASP_DEPTH_FROM_TOP = 0.05
 class GraspSpec:
     """Per-shape grasp pose, authored in the object's COM frame.
 
-    ``pos_offset`` is in units of the per-world object half-size, which
-    makes the spec scale-invariant -- the same spec drives the gripper to
-    the same relative pose regardless of object size. The kernel multiplies
-    by ``half_size`` to recover meters. ``quat_offset`` rotates the EE target
-    around the body, on top of the shared ``base_ee_rot``.
+    The position target is composed of two vec3s with different unit
+    conventions, summed at runtime:
+
+    - ``pos_offset_fractional`` is in units of the per-world object half-size.
+      The kernel multiplies it by ``half_size`` to recover meters, so the
+      same spec drives the gripper to the same relative pose regardless of
+      object size.
+    - ``pos_offset_absolute`` is in absolute world meters. Use it for fixed
+      lifts (e.g. extra headroom for tall / awkward shapes) that should not
+      scale with the per-world object size.
+
+    ``quat_offset`` rotates the EE target around the body, on top of the
+    shared ``base_ee_rot``.
 
     ``overclose_fraction`` controls the gripper closure: each pad closes
     past the object surface by this fraction of the object's full Y-width.
     A value of 0 just touches the surface; 0.05 squeezes 5% of the width
     deeper per side.
 
-    ``z_extra`` lifts the seed Z target by a fixed amount of world meters
-    for tall / awkward shapes that need more headroom than the default.
-
     Composed at runtime as:
-        grasp_pos_world = com_world + body_q.q * (pos_offset * half_size)
+        pos_offset_m   = pos_offset_fractional * half_size + pos_offset_absolute
+        grasp_pos_world = com_world + body_q.q * pos_offset_m
         grasp_rot_world = body_q.q * base_ee_rot * quat_offset
         grasp_ctrl      = overclose_to_ctrl(overclose_fraction, y_half)
     """
 
-    pos_offset: wp.vec3 = field(default_factory=lambda: wp.vec3(0.0, 0.0, 0.0))
+    pos_offset_fractional: wp.vec3 = field(default_factory=lambda: wp.vec3(0.0, 0.0, 0.0))
+    pos_offset_absolute: wp.vec3 = field(default_factory=lambda: wp.vec3(0.0, 0.0, 0.0))
     quat_offset: wp.quat = field(default_factory=wp.quat_identity)
     overclose_fraction: float = 0.05
-    z_extra: float = 0.0
 
 
 GRASP_SPECS: dict[ObjectShape, GraspSpec] = {
@@ -152,16 +158,16 @@ GRASP_SPECS: dict[ObjectShape, GraspSpec] = {
     ObjectShape.RUBBER_DUCK: GraspSpec(overclose_fraction=0.10),
     ObjectShape.BRICK: GraspSpec(overclose_fraction=0.15),
     ObjectShape.RJ45_PLUG: GraspSpec(
-        pos_offset=wp.vec3(0.0, 0.30, 0.0),
+        pos_offset_fractional=wp.vec3(0.0, 0.30, 0.0),
         quat_offset=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 90.0 * wp.pi / 180.0),
         overclose_fraction=0.10,
     ),
-    ObjectShape.BEAR: GraspSpec(overclose_fraction=0.25, z_extra=0.01),
+    ObjectShape.BEAR: GraspSpec(overclose_fraction=0.25, pos_offset_absolute=wp.vec3(0.0, 0.0, 0.01)),
     ObjectShape.NUT: GraspSpec(
         quat_offset=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 30.0 * wp.pi / 180.0),
         overclose_fraction=0.15,
     ),
-    ObjectShape.BOLT: GraspSpec(overclose_fraction=0.30, z_extra=0.02),
+    ObjectShape.BOLT: GraspSpec(overclose_fraction=0.30, pos_offset_absolute=wp.vec3(0.0, 0.0, 0.02)),
 }
 
 
@@ -720,18 +726,25 @@ class Example:
         arm_ee_rot = wp.transform_get_rotation(wp.transform(*state_arm.body_q.numpy()[self.ik_ee_index]))
 
         # Build the per-world spec arrays from GRASP_SPECS.
-        offset_arr = np.zeros((self.world_count, 3), dtype=np.float32)
+        frac_arr = np.zeros((self.world_count, 3), dtype=np.float32)
+        abs_arr = np.zeros((self.world_count, 3), dtype=np.float32)
         quat_arr = np.tile(np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32), (self.world_count, 1))
         ctrl_arr = np.zeros(self.world_count, dtype=np.float32)
         for i, shape in enumerate(self.world_shapes):
             spec = GRASP_SPECS[shape]
-            x_half, y_half, z_half = self.world_half_sizes[i]
-            z_local = derive_pos_offset_z(half_size=x_half, z_half=z_half, z_extra=spec.z_extra)
-            offset_arr[i] = (*spec.pos_offset[:2], z_local)
+            _x_half, y_half, z_half = self.world_half_sizes[i]
+            frac_arr[i] = spec.pos_offset_fractional
+            # Fold the auto-seeded Z offset (in meters) into the absolute Z.
+            abs_arr[i] = (
+                spec.pos_offset_absolute[0],
+                spec.pos_offset_absolute[1],
+                spec.pos_offset_absolute[2] + derive_pos_offset_z(z_half=z_half),
+            )
             quat_arr[i] = spec.quat_offset
             ctrl_arr[i] = overclose_to_ctrl(spec.overclose_fraction, y_half_m=y_half)
         self.spec = _PerWorldGraspSpec(
-            pos_offset=wp.array(offset_arr, dtype=wp.vec3),
+            pos_offset_fractional=wp.array(frac_arr, dtype=wp.vec3),
+            pos_offset_absolute=wp.array(abs_arr, dtype=wp.vec3),
             quat_offset=wp.array(quat_arr, dtype=wp.quat),
             ctrl=wp.array(ctrl_arr, dtype=wp.float32),
         )
@@ -765,7 +778,8 @@ class Example:
                 self.model.body_world_start,
                 self.object_body_offset,
                 self._world_half_size_array,
-                self.spec.pos_offset,
+                self.spec.pos_offset_fractional,
+                self.spec.pos_offset_absolute,
                 self.spec.quat_offset,
                 self.spec.ctrl,
                 self.base_ee_rot,
@@ -1041,7 +1055,8 @@ class Example:
 class _PerWorldGraspSpec:
     """GPU-resident per-world materialization of ``GRASP_SPECS`` (SoA layout)."""
 
-    pos_offset: wp.array[wp.vec3]
+    pos_offset_fractional: wp.array[wp.vec3]
+    pos_offset_absolute: wp.array[wp.vec3]
     quat_offset: wp.array[wp.quat]
     ctrl: wp.array[wp.float32]
 
@@ -1063,17 +1078,12 @@ def overclose_to_ctrl(overclose_fraction: float, y_half_m: float, stroke_mm: flo
     return min(255.0, max(0.0, ctrl))
 
 
-def derive_pos_offset_z(
-    half_size: float,
-    z_half: float,
-    grasp_depth: float = _GRASP_DEPTH_FROM_TOP,
-    z_extra: float = 0.0,
-) -> float:
-    """Seed ``pos_offset.z`` (in half-size units) for the per-world grasp pose.
+def derive_pos_offset_z(z_half: float, grasp_depth: float = _GRASP_DEPTH_FROM_TOP) -> float:
+    """Seed Z offset (m) from the object COM where the EE should grasp.
 
     Geometry::
 
-        EE seed         <- grasp_pos_z = obj_center_z + pos_offset.z * half_size
+        EE seed         <- obj_center + return value
         ────────  obj_top
                  \\
                   ) z_half
@@ -1089,14 +1099,9 @@ def derive_pos_offset_z(
     The EE seed is placed at ``obj_top - grasp_depth`` (i.e. the fingers
     reach ``grasp_depth`` past the top surface) when the object is at least
     ``grasp_depth`` tall; otherwise it clamps to the table top so the
-    gripper doesn't dip below it. ``z_extra`` adds a fixed world-meter lift
-    for shapes that need extra headroom.
-
-    Returns a value in half-size units; the kernel multiplies by
-    ``half_size`` to recover meters.
+    gripper doesn't dip below it.
     """
-    z_offset_from_center_m = _GRASP_FLOOR_OFFSET_M + max(0.0, 2.0 * z_half - grasp_depth) - z_half + z_extra
-    return z_offset_from_center_m / half_size
+    return _GRASP_FLOOR_OFFSET_M + max(0.0, 2.0 * z_half - grasp_depth) - z_half
 
 
 # Builders for the primitive (non-mesh-asset) object shapes. Each entry takes the
@@ -1124,7 +1129,8 @@ def compute_grasp_targets(
     body_world_start: wp.array[wp.int32],
     object_body_offset: wp.int32,
     world_hs: wp.array[wp.float32],
-    spec_pos_offset: wp.array[wp.vec3],
+    spec_pos_offset_fractional: wp.array[wp.vec3],
+    spec_pos_offset_absolute: wp.array[wp.vec3],
     spec_quat_offset: wp.array[wp.quat],
     spec_ctrl: wp.array[wp.float32],
     base_ee_rot: wp.quat,
@@ -1135,6 +1141,7 @@ def compute_grasp_targets(
 ):
     """Compute world-frame grasp target from per-shape COM-frame spec.
 
+    Position composition: ``com + body_q.q * (frac * half_size + absolute)``.
     Rotation composition: ``body_q.q * base_ee_rot * spec_quat_offset[w]``.
     """
     w = wp.tid()
@@ -1143,7 +1150,7 @@ def compute_grasp_targets(
 
     com_local = body_com[obj_global]
     hs_w = world_hs[w]
-    pos_offset = spec_pos_offset[w] * hs_w
+    pos_offset = spec_pos_offset_fractional[w] * hs_w + spec_pos_offset_absolute[w]
 
     grasp_pos[w] = wp.transform_point(x_wb, com_local + pos_offset)
     grasp_rot[w] = wp.transform_get_rotation(x_wb) * base_ee_rot * spec_quat_offset[w]

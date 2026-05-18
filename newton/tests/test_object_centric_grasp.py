@@ -60,22 +60,16 @@ class TestGraspSpecs(unittest.TestCase):
             self.assertLess(spec.overclose_fraction, 0.5, msg=f"{shape}")
 
     def test_derive_pos_offset_z_formula(self):
-        # pos_offset.z = (0.0005 + max(0, 2*z_half - grasp_depth) - z_half + z_extra) / half_size
+        # Returns the absolute Z offset (m) from the object COM to the EE seed.
         grasp_depth = 0.05
-        cases = [
-            # (half_size, z_half, z_extra)
-            (0.010, 0.010, 0.0),
-            (0.012, 0.012, 0.0),
-            (0.015, 0.015, 0.02),
-            (0.015, 0.015, 0.01),
-        ]
-        for half_size, z_half, z_extra in cases:
-            expected = (0.0005 + max(0.0, 2.0 * z_half - grasp_depth) - z_half + z_extra) / half_size
+        cases = [0.010, 0.012, 0.015, 0.020, 0.030]  # z_half values to check
+        for z_half in cases:
+            expected = 0.0005 + max(0.0, 2.0 * z_half - grasp_depth) - z_half
             self.assertAlmostEqual(
-                derive_pos_offset_z(half_size=half_size, z_half=z_half, grasp_depth=grasp_depth, z_extra=z_extra),
+                derive_pos_offset_z(z_half=z_half, grasp_depth=grasp_depth),
                 expected,
                 places=6,
-                msg=f"pos_offset.z mismatch for z_extra={z_extra}",
+                msg=f"pos_offset.z mismatch for z_half={z_half}",
             )
 
 
@@ -88,7 +82,8 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
         body_world_start = wp.array([0], dtype=wp.int32)
         world_hs = wp.array([0.01], dtype=wp.float32)
 
-        spec_pos_offset = wp.array([wp.vec3(0.0, 0.0, 0.5)], dtype=wp.vec3)
+        spec_pos_offset_fractional = wp.array([wp.vec3(0.0, 0.0, 0.5)], dtype=wp.vec3)
+        spec_pos_offset_absolute = wp.array([wp.vec3(0.0, 0.0, 0.0)], dtype=wp.vec3)
         spec_quat_offset = wp.array([wp.quat(0.0, 0.0, 0.0, 1.0)], dtype=wp.quat)
         spec_ctrl = wp.array([123.0], dtype=wp.float32)
         base_ee_rot = wp.quat(0.0, 0.0, 0.0, 1.0)
@@ -106,7 +101,8 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
                 body_world_start,
                 0,
                 world_hs,
-                spec_pos_offset,
+                spec_pos_offset_fractional,
+                spec_pos_offset_absolute,
                 spec_quat_offset,
                 spec_ctrl,
                 base_ee_rot,
@@ -114,7 +110,7 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
             outputs=[grasp_pos, grasp_rot, grasp_ctrl],
         )
 
-        # pos_offset.z = 0.5, hs = 0.01 -> 0.005 m above COM = body_q.t + (0, 0, 0.005)
+        # fractional.z = 0.5, hs = 0.01 -> 0.005 m above COM = body_q.t + (0, 0, 0.005)
         np.testing.assert_allclose(grasp_pos.numpy()[0], [1.0, 2.0, 3.005], atol=1e-6)
         np.testing.assert_allclose(grasp_rot.numpy()[0], [0.0, 0.0, 0.0, 1.0], atol=1e-6)
         self.assertAlmostEqual(float(grasp_ctrl.numpy()[0]), 123.0, places=4)
@@ -126,7 +122,8 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
         body_world_start = wp.array([0], dtype=wp.int32)
         world_hs = wp.array([0.01], dtype=wp.float32)
 
-        spec_pos_offset = wp.array([wp.vec3(0.0, 0.0, 0.0)], dtype=wp.vec3)
+        spec_pos_offset_fractional = wp.array([wp.vec3(0.0, 0.0, 0.0)], dtype=wp.vec3)
+        spec_pos_offset_absolute = wp.array([wp.vec3(0.0, 0.0, 0.0)], dtype=wp.vec3)
         spec_quat_offset = wp.array([wp.quat(0.0, 0.0, 0.0, 1.0)], dtype=wp.quat)
         spec_ctrl = wp.array([0.0], dtype=wp.float32)
         base_ee_rot = wp.quat(0.0, 0.0, 0.0, 1.0)
@@ -144,7 +141,8 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
                 body_world_start,
                 0,
                 world_hs,
-                spec_pos_offset,
+                spec_pos_offset_fractional,
+                spec_pos_offset_absolute,
                 spec_quat_offset,
                 spec_ctrl,
                 base_ee_rot,
@@ -152,7 +150,7 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
             outputs=[grasp_pos, grasp_rot, grasp_ctrl],
         )
 
-        # With zero pos_offset and identity quat, grasp_pos = COM world = body_q.t + body_com.
+        # With zero pos offsets and identity quat, grasp_pos = COM world = body_q.t + body_com.
         np.testing.assert_allclose(grasp_pos.numpy()[0], [0.1, 0.2, 0.3], atol=1e-6)
 
     def test_rotation_composition(self):
@@ -165,7 +163,8 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
         body_world_start = wp.array([0], dtype=wp.int32)
         world_hs = wp.array([0.01], dtype=wp.float32)
 
-        spec_pos_offset = wp.array([wp.vec3(0.0, 0.0, 0.0)], dtype=wp.vec3)
+        spec_pos_offset_fractional = wp.array([wp.vec3(0.0, 0.0, 0.0)], dtype=wp.vec3)
+        spec_pos_offset_absolute = wp.array([wp.vec3(0.0, 0.0, 0.0)], dtype=wp.vec3)
         spec_quat_offset = wp.array([wp.quat(0.0, 0.0, 0.0, 1.0)], dtype=wp.quat)
         spec_ctrl = wp.array([0.0], dtype=wp.float32)
         sin45 = np.sin(np.pi / 4.0)
@@ -185,7 +184,8 @@ class TestComputeGraspTargetsKernel(unittest.TestCase):
                 body_world_start,
                 0,
                 world_hs,
-                spec_pos_offset,
+                spec_pos_offset_fractional,
+                spec_pos_offset_absolute,
                 spec_quat_offset,
                 spec_ctrl,
                 base_ee_rot,
@@ -225,7 +225,8 @@ class TestGraspTargetsMatchReference(unittest.TestCase):
         base_ee_rot = example.base_ee_rot
 
         # One-shot CPU read of the per-world spec arrays.
-        spec_pos_offset = example.spec.pos_offset.numpy()
+        spec_pos_offset_fractional = example.spec.pos_offset_fractional.numpy()
+        spec_pos_offset_absolute = example.spec.pos_offset_absolute.numpy()
         spec_quat_offset = example.spec.quat_offset.numpy()
         expected_ctrl = example.spec.ctrl.numpy().astype(np.float32)
 
@@ -236,10 +237,11 @@ class TestGraspTargetsMatchReference(unittest.TestCase):
             body_q = wp.transform(*body_q_np[obj_global])
             com_local = wp.vec3(*body_com_np[obj_global])
             hs_i = float(example.world_half_sizes[i, 0])
-            pos_offset = wp.vec3(*spec_pos_offset[i])
+            pos_frac = wp.vec3(*spec_pos_offset_fractional[i])
+            pos_abs = wp.vec3(*spec_pos_offset_absolute[i])
             quat_offset = wp.quat(*spec_quat_offset[i])
 
-            pos = wp.transform_point(body_q, com_local + pos_offset * hs_i)
+            pos = wp.transform_point(body_q, com_local + pos_frac * hs_i + pos_abs)
             rot = wp.transform_get_rotation(body_q) * base_ee_rot * quat_offset
             expected_pos[i] = [pos[0], pos[1], pos[2]]
             expected_rot[i] = [rot[0], rot[1], rot[2], rot[3]]
