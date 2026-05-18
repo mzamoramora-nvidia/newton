@@ -438,12 +438,13 @@ class Example:
         self.world_shapes = [ObjectShape(i % NUM_SHAPES) for i in range(n)]
 
         # Fixed density (1000 kg/m^3 ~= water): mass scales with shape volume and size,
-        # so we don't have to combine an unrealistic density with the per-world size jitter.
+        # so we don't have to combine an unrealistic density with the per-world size
+        # randomization.
         self.object_density = 1000.0
 
-        # Per-world size knob (the half-size unit that drives object scaling and
-        # the kernel-side multiplier for pos_offset_fractional). +/- 25% uniform
-        # jitter around the base.
+        # Per-world size knob (the half-size unit that drives object scaling and the
+        # kernel-side multiplier for pos_offset_fractional). +/- 25% uniform random
+        # draw around the base.
         base_half_size = 0.025
         self.world_half_scales = (base_half_size * rng.uniform(0.75, 1.25, size=n)).astype(np.float32)
         # Per-world actual half-extents (x_half, y_half, z_half) post-scale,
