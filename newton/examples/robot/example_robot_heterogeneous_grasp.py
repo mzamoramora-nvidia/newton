@@ -130,11 +130,13 @@ _GRASP_Z_EXTRA = {
 class GraspSpec:
     """Per-shape grasp pose, authored in the object's COM frame.
 
-    Both ``offset_local`` and ``quat_local`` are expressed in the body's COM-aligned
-    frame. ``offset_local`` is in **units of the per-world object half-size** so the
-    spec stays size-invariant under per-world half-size jitter; the kernel
-    multiplies it by ``half_size`` to recover meters. ``quat_local`` rotates the EE
-    target around the body, on top of the shared ``base_ee_rot``.
+    Both ``offset_local`` and ``quat_local`` are expressed in the body's
+    COM-aligned frame. ``offset_local`` is in **units of the per-world object
+    half-size**, which makes the spec scale-invariant: the same spec drives
+    the gripper to the same relative pose regardless of how large each
+    world's object actually is. The kernel multiplies it by ``half_size`` to
+    recover meters. ``quat_local`` rotates the EE target around the body, on
+    top of the shared ``base_ee_rot``.
 
     Composed at runtime as:
         grasp_pos_world = com_world + body_q.q * (offset_local * half_size)
@@ -1702,16 +1704,6 @@ class _PerWorldGraspSpec:
     ctrl_src: wp.array[wp.float32]
 
 
-def zero_init(shape, dtype: type = wp.float32):
-    """Allocate a Warp array filled with zeros. Thin wrapper for readability at call sites."""
-    return wp.zeros(shape, dtype=dtype)
-
-
-def full_init(shape, value, dtype: type = wp.float32):
-    """Allocate a Warp array filled with ``value``. Thin wrapper for readability at call sites."""
-    return wp.full(shape, value, dtype=dtype)
-
-
 def alloc_line_buffers(n: int):
     """Allocate a paired ``(begin, end)`` ``wp.vec3`` buffer for log_lines channels."""
     return wp.zeros(n, dtype=wp.vec3), wp.zeros(n, dtype=wp.vec3)
@@ -1802,40 +1794,40 @@ class GraspMetrics:
 
         # Per-world running scalars
         n = world_count
-        self.pad_force_cur = zero_init(n)
-        self.pad_friction_cur = zero_init(n)
-        self.table_force_cur = zero_init(n)
-        self.table_friction_cur = zero_init(n)
-        self.penetration_cur = zero_init(n)
+        self.pad_force_cur = wp.zeros(n, dtype=wp.float32)
+        self.pad_friction_cur = wp.zeros(n, dtype=wp.float32)
+        self.table_force_cur = wp.zeros(n, dtype=wp.float32)
+        self.table_friction_cur = wp.zeros(n, dtype=wp.float32)
+        self.penetration_cur = wp.zeros(n, dtype=wp.float32)
 
-        self.pad_force_max = zero_init(n)
-        self.pad_friction_max = zero_init(n)
-        self.table_force_max = zero_init(n)
-        self.table_friction_max = zero_init(n)
-        self.penetration_max = zero_init(n)
+        self.pad_force_max = wp.zeros(n, dtype=wp.float32)
+        self.pad_friction_max = wp.zeros(n, dtype=wp.float32)
+        self.table_force_max = wp.zeros(n, dtype=wp.float32)
+        self.table_friction_max = wp.zeros(n, dtype=wp.float32)
+        self.penetration_max = wp.zeros(n, dtype=wp.float32)
 
-        self.object_z_max = full_init(n, -wp.inf)
-        self.object_z_init = zero_init(n)
-        self.object_z_hold_start = full_init(n, wp.nan)
-        self.object_z_hold_end = full_init(n, wp.nan)
-        self.object_vel_sum = zero_init(n)
-        self.object_vel_count = zero_init(n, wp.int32)
+        self.object_z_max = wp.full(n, -wp.inf, dtype=wp.float32)
+        self.object_z_init = wp.zeros(n, dtype=wp.float32)
+        self.object_z_hold_start = wp.full(n, wp.nan, dtype=wp.float32)
+        self.object_z_hold_end = wp.full(n, wp.nan, dtype=wp.float32)
+        self.object_vel_sum = wp.zeros(n, dtype=wp.float32)
+        self.object_vel_count = wp.zeros(n, dtype=wp.int32)
 
-        self.world_nan_frame = full_init(n, -1, wp.int32)
-        self.prev_task_idx = zero_init(n, wp.int32)
+        self.world_nan_frame = wp.full(n, -1, dtype=wp.int32)
+        self.prev_task_idx = wp.zeros(n, dtype=wp.int32)
 
         # GUI staging (pre-allocated; populated on demand).
-        self.gui_staging = zero_init(_GUI_STAGE_SIZE)
+        self.gui_staging = wp.zeros(_GUI_STAGE_SIZE, dtype=wp.float32)
 
         per_state = (n, task_state_count)
-        self.state_pad_force_sum = zero_init(per_state)
-        self.state_pad_force_max = zero_init(per_state)
-        self.state_table_force_sum = zero_init(per_state)
-        self.state_table_force_max = zero_init(per_state)
-        self.state_pen_sum = zero_init(per_state)
-        self.state_pen_max = zero_init(per_state)
-        self.state_vel_sum = zero_init(per_state)
-        self.state_count = zero_init(per_state, wp.int32)
+        self.state_pad_force_sum = wp.zeros(per_state, dtype=wp.float32)
+        self.state_pad_force_max = wp.zeros(per_state, dtype=wp.float32)
+        self.state_table_force_sum = wp.zeros(per_state, dtype=wp.float32)
+        self.state_table_force_max = wp.zeros(per_state, dtype=wp.float32)
+        self.state_pen_sum = wp.zeros(per_state, dtype=wp.float32)
+        self.state_pen_max = wp.zeros(per_state, dtype=wp.float32)
+        self.state_vel_sum = wp.zeros(per_state, dtype=wp.float32)
+        self.state_count = wp.zeros(per_state, dtype=wp.int32)
 
     def capture_initial_object_z(self, state_0, body_world_start_array):
         wp.launch(
