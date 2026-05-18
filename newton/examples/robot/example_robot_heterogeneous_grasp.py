@@ -432,14 +432,13 @@ class Example:
         )
         print(f"Gripper DOF range: [{self.gripper_dof_start}, {self.gripper_dof_start + self.gripper_dof_count})")
 
-        # Gripper armature scaling for hydroelastic stability (from example_hydro_robotiq_gripper)
-        # The MJCF default armature is too small for hydroelastic contact stiffness.
-        if self.gripper_dof_count == 6:
-            mjcf_armature = np.array([0.005, 0.001, 0.001, 0.005, 0.001, 0.001])
-        else:
-            mjcf_armature = np.array([0.005, 0.001, 0.001, 0.001, 0.005, 0.001, 0.001, 0.001])
-        armature_scale = 2.0
-        gripper_armature = (armature_scale * mjcf_armature).tolist()
+        # Scale the 2F-85 V4 MJCF armature 2x for hydroelastic contact stiffness;
+        # the MJCF default is too small to keep the gripper stable under the
+        # higher contact forces hydroelastic generates. The V4 MJCF has 6
+        # gripper joints (driver + spring_link + follower, per side); older
+        # 2F-85 MJCFs have 8 (extra coupler per side) and would need a
+        # different array here.
+        gripper_armature = [0.010, 0.002, 0.002, 0.010, 0.002, 0.002]
         builder.joint_armature[self.gripper_dof_start : self.gripper_dof_start + len(gripper_armature)] = (
             gripper_armature
         )
