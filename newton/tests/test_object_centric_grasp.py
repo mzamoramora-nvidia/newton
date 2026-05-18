@@ -60,22 +60,24 @@ class TestGraspSpecs(unittest.TestCase):
             self.assertLess(spec.margin_pct, 0.5, msg=f"{shape}")
 
     def test_derive_offset_local_z_formula(self):
-        # offset_local.z = (0.0005 + max(0, 2*z_half - grasp_clearance) - z_half + extra) / half_size
+        # offset_local.z = (0.0005 + max(0, 2*z_half - grasp_clearance) - z_half + z_extra) / half_size
         grasp_clearance = 0.05
         cases = [
-            # (shape, half_size, z_half, extra_offset)
-            (ObjectShape.BOX, 0.010, 0.010, 0.0),
-            (ObjectShape.CUP, 0.012, 0.012, 0.0),
-            (ObjectShape.BOLT, 0.015, 0.015, 0.02),
-            (ObjectShape.BEAR, 0.015, 0.015, 0.01),
+            # (half_size, z_half, z_extra)
+            (0.010, 0.010, 0.0),
+            (0.012, 0.012, 0.0),
+            (0.015, 0.015, 0.02),
+            (0.015, 0.015, 0.01),
         ]
-        for shape, half_size, z_half, extra in cases:
-            expected = (0.0005 + max(0.0, 2.0 * z_half - grasp_clearance) - z_half + extra) / half_size
+        for half_size, z_half, z_extra in cases:
+            expected = (0.0005 + max(0.0, 2.0 * z_half - grasp_clearance) - z_half + z_extra) / half_size
             self.assertAlmostEqual(
-                derive_offset_local_z(shape, half_size=half_size, z_half=z_half, grasp_clearance=grasp_clearance),
+                derive_offset_local_z(
+                    half_size=half_size, z_half=z_half, grasp_clearance=grasp_clearance, z_extra=z_extra
+                ),
                 expected,
                 places=6,
-                msg=f"offset_local.z mismatch for {shape}",
+                msg=f"offset_local.z mismatch for z_extra={z_extra}",
             )
 
 

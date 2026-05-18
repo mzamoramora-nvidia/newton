@@ -6,7 +6,7 @@
 #
 # Demonstrates heterogeneous grasping environments: each world contains a
 # different object (shape, mass, size), all grasped and lifted by a Franka
-# Panda + Robotiq 2F-85 gripper. Supports 4 collision pipelines.
+# Panda + Robotiq 2F-85 gripper. Selectable SDF / hydroelastic collisions.
 #
 # Command: python -m newton.examples robot_heterogeneous_grasp
 #
@@ -41,13 +41,9 @@ _BRICK_TOP_THICKNESS = 0.001
 _BRICK_TUBE_OUTER_RADIUS = 0.003255
 _BRICK_CYLINDER_SEGMENTS = 24
 
-# Table dimensions. The table is centered at table_pos and extends along all
-# three axes by these half-extents. _TABLE_HALF_X is large enough to support
-# the Franka base at X = -0.5 plus the spawn region at X ~= 0; _TABLE_HALF_Y
-# leaves a 5 cm margin around the spawn region. If you change either, also
-# update the table SDF resolution in _setup_collision_sdf to keep the voxel
-# size near 5 mm (the SDF builder aligns to 8-voxel chunks, so round to a
-# multiple of 8).
+# Table half-extents [m]. Sized to support the Franka base at X = -0.5 plus
+# the spawn region at X ~= 0. If you change these, update the table SDF
+# resolution in _setup_collision_sdf to keep the voxel size near 5 mm.
 _TABLE_HALF_X = 0.425
 _TABLE_HALF_Y = 0.15
 _TABLE_HEIGHT = 0.10
@@ -81,17 +77,15 @@ class ObjectShape(IntEnum):
 SHAPE_NAMES = [s.name for s in ObjectShape]
 NUM_SHAPES = len(ObjectShape)
 
-_MESH_SHAPES = frozenset(
-    {
-        ObjectShape.CUP,
-        ObjectShape.RUBBER_DUCK,
-        ObjectShape.BRICK,
-        ObjectShape.RJ45_PLUG,
-        ObjectShape.BEAR,
-        ObjectShape.NUT,
-        ObjectShape.BOLT,
-    }
-)
+_MESH_SHAPES = {
+    ObjectShape.CUP,
+    ObjectShape.RUBBER_DUCK,
+    ObjectShape.BRICK,
+    ObjectShape.RJ45_PLUG,
+    ObjectShape.BEAR,
+    ObjectShape.NUT,
+    ObjectShape.BOLT,
+}
 
 
 class CollisionMode(IntEnum):
@@ -112,27 +106,21 @@ NUM_TASKS = len(TaskType)
 TASK_NAMES = [t.name for t in TaskType]
 
 
-# Per-shape vertical seed for the GUI's offset_local.z slider. Computed at init
-# (see derive_offset_local_z) so the gripper starts above the table for every
-# shape; the user retunes via the Apply button.
+# Default clearance between the spawn point and the EE's initial Z target.
 _GRASP_CLEARANCE = 0.05
-_GRASP_Z_EXTRA = {
-    ObjectShape.BOLT: 0.02,
-    ObjectShape.BEAR: 0.01,
-}
 
 
 @dataclass(frozen=True)
 class GraspSpec:
     """Per-shape grasp pose, authored in the object's COM frame.
 
-    Both ``offset_local`` and ``quat_local`` are expressed in the body's
-    COM-aligned frame. ``offset_local`` is in **units of the per-world object
-    half-size**, which makes the spec scale-invariant: the same spec drives
-    the gripper to the same relative pose regardless of how large each
-    world's object actually is. The kernel multiplies it by ``half_size`` to
-    recover meters. ``quat_local`` rotates the EE target around the body, on
-    top of the shared ``base_ee_rot``.
+    ``offset_local`` is in units of the per-world object half-size, which
+    makes the spec scale-invariant -- the same spec drives the gripper to
+    the same relative pose regardless of object size. The kernel multiplies
+    by ``half_size`` to recover meters. ``quat_local`` rotates the EE target
+    around the body, on top of the shared ``base_ee_rot``. ``z_extra`` lifts
+    the seed Z target by a fixed amount for tall / awkward shapes that need
+    more headroom than the default clearance.
 
     Composed at runtime as:
         grasp_pos_world = com_world + body_q.q * (offset_local * half_size)
@@ -143,6 +131,7 @@ class GraspSpec:
     offset_local: wp.vec3 = field(default_factory=lambda: wp.vec3(0.0, 0.0, 0.0))
     quat_local: wp.quat = field(default_factory=wp.quat_identity)
     margin_pct: float = 0.05
+    z_extra: float = 0.0
 
 
 GRASP_SPECS: dict[ObjectShape, GraspSpec] = {
@@ -159,12 +148,12 @@ GRASP_SPECS: dict[ObjectShape, GraspSpec] = {
         quat_local=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 90.0 * wp.pi / 180.0),
         margin_pct=0.10,
     ),
-    ObjectShape.BEAR: GraspSpec(margin_pct=0.25),
+    ObjectShape.BEAR: GraspSpec(margin_pct=0.25, z_extra=0.01),
     ObjectShape.NUT: GraspSpec(
         quat_local=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 30.0 * wp.pi / 180.0),
         margin_pct=0.15,
     ),
-    ObjectShape.BOLT: GraspSpec(margin_pct=0.30),
+    ObjectShape.BOLT: GraspSpec(margin_pct=0.30, z_extra=0.02),
 }
 
 
@@ -189,7 +178,6 @@ class Example:
 
         self._generate_world_params()
         robot_builder, arm_only_builder = self._build_robot()
-        # IK model: arm-only (no gripper DOFs) for cleaner IK solving
         self.model_arm_only = arm_only_builder.finalize()
         self._load_mesh_objects()
         self._world_z_half = np.full(self.world_count, -1.0)
@@ -198,7 +186,6 @@ class Example:
         self._setup_collision_sdf(scene)
         self.model = scene.finalize()
 
-        # Contact budget: 2000 per world (matching example_hydro_robotiq_gripper)
         self.rigid_contact_max = 2_000 * self.world_count
         print(
             f"Bodies: {self.model.body_count}, Joints: {self.model.joint_count}, DOFs: {self.model.joint_coord_count}"
@@ -208,7 +195,6 @@ class Example:
         self.state_1 = self.model.state()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
-        # IK and state machine setup
         self._setup_ik()
         self._setup_state_machine()
         self.control = self.model.control()
@@ -216,17 +202,17 @@ class Example:
         self.joint_targets_2d = wp.zeros(self.joint_target_shape, dtype=wp.float32)
         self.graph_ik = None
 
-        # MuJoCo ctrl for MJCF general actuators (CTRL_DIRECT mode)
+        # Direct-control path for the MJCF general actuators.
         self.has_mujoco_ctrl = hasattr(self.control, "mujoco") and self.control.mujoco is not None
         if self.has_mujoco_ctrl:
             ctrl = self.control.mujoco.ctrl
             actuator_count = ctrl.shape[0] // self.world_count
             self.mujoco_ctrl_2d = ctrl.reshape((self.world_count, actuator_count))
-            # Gripper actuator is the last one (after 7 arm actuators)
-            self.gripper_actuator_idx = self.arm_dof_count
+            self.gripper_actuator_idx = self.arm_dof_count  # gripper actuator follows the 7 arm actuators
             print(f"MuJoCo ctrl: {actuator_count} actuators/world, gripper at idx {self.gripper_actuator_idx}")
 
-            # Initialize ctrl to current arm joint positions so arm holds its pose
+            # Seed ctrl with the initial arm joint positions so the arm holds its pose
+            # on frame 0 before IK starts driving it.
             init_q = self.model.joint_q.numpy()
             ctrl_np = ctrl.numpy().reshape(self.world_count, actuator_count)
             dofs_per_world = self.model.joint_coord_count // self.world_count
@@ -362,11 +348,10 @@ class Example:
         builder.rigid_gap = self.shape_cfg.gap
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
 
-        # --- Franka Panda (no hand) from MuJoCo Menagerie ---
-        # Scene centred on the world-Y axis: table at (0, 0), robot 0.5m behind it in -X.
-        self.table_pos = wp.vec3(-0.275, 0.0, _TABLE_HEIGHT / 2.0)  # table body center, shifted under the robot
-        self.spawn_center = wp.vec3(0.0, 0.0, _TABLE_HEIGHT)  # object spawn anchor on the table top
-        self.robot_base_pos = wp.vec3(-0.5, 0.0, _TABLE_HEIGHT)  # on table, 0.5m behind center
+        # Scene layout: robot 0.5 m behind the table center along -X, both on the world Y axis.
+        self.table_pos = wp.vec3(-0.275, 0.0, _TABLE_HEIGHT / 2.0)
+        self.spawn_center = wp.vec3(0.0, 0.0, _TABLE_HEIGHT)
+        self.robot_base_pos = wp.vec3(-0.5, 0.0, _TABLE_HEIGHT)
 
         builder.add_mjcf(
             str(self._franka_dir / "panda_nohand.xml"),
@@ -375,7 +360,7 @@ class Example:
             enable_self_collisions=False,
         )
 
-        # Initial arm pose (same as ik_cube_stacking — reach-forward config)
+        # Reach-forward arm pose for the initial IK seed.
         init_q = [
             -3.6802115e-03,
             2.3901723e-02,
@@ -388,18 +373,16 @@ class Example:
         builder.joint_q[0:7] = init_q
         builder.joint_target_pos[0:7] = init_q
 
-        # Save arm-only builder for IK (before attaching gripper)
-        # The IK only needs the arm kinematic chain — link_offset handles TCP.
+        # Snapshot before attaching the gripper -- IK runs on the arm chain only,
+        # with link_offset mapping the EE link to the TCP.
         arm_only_builder = copy.deepcopy(builder)
 
         def find_body(name):
             return next(i for i, lbl in enumerate(builder.body_label) if lbl.endswith(f"/{name}"))
 
-        # --- Robotiq 2F-85 V4 ---
-        # Attach Robotiq to link7 (last link with mass), applying the attachment body's
-        # transform plus an extra 90° Z rotation for better jaw alignment. The attachment
-        # body in panda_nohand.xml is pos="0 0 0.107" quat="0.3826834 0 0 0.9238795";
-        # MJCF stores quats (w, x, y, z) so we re-order to Warp's (x, y, z, w) below.
+        # Attach Robotiq 2F-85 V4 to link7 using the MJCF's attachment-body
+        # transform plus an extra 90 deg Z rotation for better jaw alignment.
+        # q_attach reorders the MJCF (w, x, y, z) quat to Warp's (x, y, z, w).
         q_attach = wp.quat(0.0, 0.0, 0.9238795, 0.3826834)
         q_90z = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), wp.pi / 2.0)
         builder.add_mjcf(
@@ -409,9 +392,8 @@ class Example:
             enable_self_collisions=False,
         )
 
-        # Track key body indices.
-        # The attachment body from panda_nohand.xml has zero mass/inertia;
-        # give it a tiny mass so the inertia validator doesn't warn.
+        # The MJCF's attachment body is massless; give it a tiny inertia so
+        # the validator doesn't warn.
         self.ee_attachment_body_idx = find_body("attachment")
         builder.body_mass[self.ee_attachment_body_idx] = 1e-6
         builder.body_inertia[self.ee_attachment_body_idx] = wp.mat33(np.eye(3, dtype=np.float32) * 1e-9)
@@ -420,8 +402,7 @@ class Example:
             i for i in range(franka_body_count, builder.body_count) if builder.body_label[i].endswith("/base")
         )
 
-        # --- Joint configuration ---
-        # panda_nohand: 7 arm DOFs, no finger joints
+        # panda_nohand: 7 arm DOFs, no finger joints; gripper DOFs follow.
         self.arm_dof_count = 7
         self.gripper_dof_start = self.arm_dof_count  # Robotiq DOFs start right after arm
         self.gripper_dof_count = builder.joint_coord_count - self.arm_dof_count
@@ -432,12 +413,9 @@ class Example:
         )
         print(f"Gripper DOF range: [{self.gripper_dof_start}, {self.gripper_dof_start + self.gripper_dof_count})")
 
-        # Scale the 2F-85 V4 MJCF armature 2x for hydroelastic contact stiffness;
-        # the MJCF default is too small to keep the gripper stable under the
-        # higher contact forces hydroelastic generates. The V4 MJCF has 6
-        # gripper joints (driver + spring_link + follower, per side); older
-        # 2F-85 MJCFs have 8 (extra coupler per side) and would need a
-        # different array here.
+        # 2x the MJCF default armature -- the default is too small to stay
+        # stable under hydroelastic contact forces. Order matches the 6 V4
+        # gripper joints: driver, spring_link, follower per side.
         gripper_armature = [0.010, 0.002, 0.002, 0.010, 0.002, 0.002]
         builder.joint_armature[self.gripper_dof_start : self.gripper_dof_start + len(gripper_armature)] = (
             gripper_armature
@@ -610,8 +588,7 @@ class Example:
 
     def _build_scene(self, robot_builder):
         """Build the multi-world scene with per-world robot + table + object."""
-        # Table as kinematic body (mass=0) so MuJoCo detects collisions per world.
-        # Using body=-1 (static) causes MuJoCo to miss collisions for replicated worlds.
+        # Kinematic per-world table body; static (body=-1) doesn't replicate.
         table_mesh = newton.Mesh.create_box(_TABLE_HALF_X, _TABLE_HALF_Y, _TABLE_HEIGHT / 2.0, compute_inertia=False)
         table_cfg = replace(self.shape_cfg, density=0.0)
 
@@ -620,7 +597,6 @@ class Example:
             scene.begin_world()
             scene.add_builder(robot_builder)
 
-            # Kinematic table body (does not respond to forces)
             table_body = scene.add_body(
                 xform=wp.transform(self.table_pos, wp.quat_identity()),
                 label="table",
@@ -634,10 +610,8 @@ class Example:
                 label="table_shape",
             )
 
-            # Object on table surface at (0, 0, spawn_center.z + hs) plus the per-world spawn jitter
             obj_body = self._add_object(scene, world_id)
 
-            # After first world: record the object's local body index
             if world_id == 0:
                 self.object_body_offset = obj_body
 
@@ -663,10 +637,9 @@ class Example:
         ee_tf = wp.transform(*body_q_np[self.ik_ee_index])
         init_ee_rot = wp.transform_get_rotation(ee_tf)
 
-        # link_offset maps IK targets to the TCP, so grasp_pos values land at the
-        # fingertip center rather than the gripper base. init target must be the
-        # TCP position (not EE body) so the initial config is already a perfect
-        # solution and the IK doesn't drift.
+        # link_offset maps IK targets to the TCP. The initial position target is
+        # also the current TCP so the seed is already a perfect solution and IK
+        # doesn't drift on frame 0.
         tcp_offset_vec = wp.vec3(0.0, 0.0, _ROBOTIQ_TCP_OFFSET_M)
         init_tcp_pos = wp.transform_point(ee_tf, tcp_offset_vec)
         self.pos_obj = ik.IKObjectivePosition(
@@ -675,10 +648,9 @@ class Example:
             target_positions=wp.array([init_tcp_pos] * self.world_count, dtype=wp.vec3),
         )
 
-        # Rotation target: use the arm-only model's attachment body rotation.
-        # The Robotiq is rigidly mounted with an extra 90° Z rotation, but
-        # the IK only controls the arm — it should keep the attachment body
-        # at its initial orientation.
+        # Hold the attachment body at its initial orientation -- the IK runs on
+        # the arm chain only; the Robotiq's extra 90 deg Z mount is baked into
+        # base_ee_rot downstream.
         self.rot_obj = ik.IKObjectiveRotation(
             link_index=self.ik_ee_index,
             link_offset_rotation=wp.quat_identity(),
@@ -720,8 +692,8 @@ class Example:
         durations = [1.5, 1.0, 0.5, 1.0, 1.5, 0.0]
         self.task_durations = wp.array(durations, dtype=wp.float32)
 
-        # EE rotation target: use the arm-only model's attachment body rotation.
-        # This matches the IK rotation objective so there's no mismatch.
+        # Arm-only attachment-body rotation; same source the IK rotation
+        # objective uses so the grasp composition stays consistent.
         state_arm = self.model_arm_only.state()
         newton.eval_fk(self.model_arm_only, self.model_arm_only.joint_q, self.model_arm_only.joint_qd, state_arm)
         arm_ee_rot = wp.transform_get_rotation(wp.transform(*state_arm.body_q.numpy()[self.ik_ee_index]))
@@ -732,14 +704,17 @@ class Example:
             for shape in set(self.world_shapes)
         }
 
-        # Per-world spec materialized as parallel CPU/GPU arrays. Fill the CPU side
-        # from GRASP_SPECS, then construct the GPU mirror once.
+        # Build the per-world spec arrays from GRASP_SPECS.
         offset_np = np.zeros((self.world_count, 3), dtype=np.float32)
         quat_np = np.tile(np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32), (self.world_count, 1))
         ctrl_np = np.zeros(self.world_count, dtype=np.float32)
         for i, shape in enumerate(self.world_shapes):
             spec = GRASP_SPECS[shape]
-            z_local = derive_offset_local_z(shape, half_size=self.world_half_sizes[i], z_half=self._world_z_half[i])
+            z_local = derive_offset_local_z(
+                half_size=self.world_half_sizes[i],
+                z_half=self._world_z_half[i],
+                z_extra=spec.z_extra,
+            )
             offset_np[i] = (*spec.offset_local[:2], z_local)
             quat_np[i] = spec.quat_local
             ctrl_np[i] = margin_pct_to_ctrl(spec.margin_pct, y_half_m=self._world_y_half[i])
@@ -750,9 +725,6 @@ class Example:
             offset_local_np=offset_np,
             quat_local_np=quat_np,
             ctrl_np=ctrl_np,
-            offset_src=wp.zeros(1, dtype=wp.vec3),
-            quat_src=wp.zeros(1, dtype=wp.quat),
-            ctrl_src=wp.zeros(1, dtype=wp.float32),
         )
 
         # GPU runtime SoA outputs of compute_grasp_targets.
@@ -760,10 +732,7 @@ class Example:
         self.grasp_rot = wp.zeros(self.world_count, dtype=wp.quat)
         self.grasp_ctrl = wp.zeros(self.world_count, dtype=wp.float32)
 
-        # Per-world half-size array for the init kernel
         self._world_half_size_array = wp.array(np.asarray(self.world_half_sizes, dtype=np.float32), dtype=wp.float32)
-
-        # base_ee_rot as a wp.quat scalar (used by the init kernel)
         self.base_ee_rot = wp.quat(*arm_ee_rot)
 
         if self.verbose:
@@ -776,9 +745,8 @@ class Example:
                 flag = "  (non-zero, review offset_local)" if com_norm > 1e-4 else ""
                 print(f"  {shape.name:<12} |body_com| = {com_norm * 1000.0:8.3f} mm{flag}")
 
-        self.lift_distance_m: float = 0.1  # tunable via the GUI lift slider
+        self.lift_distance_m: float = 0.1
 
-        # state_0 is fully initialised by the time _setup_state_machine runs.
         wp.launch(
             compute_grasp_targets,
             dim=self.world_count,
@@ -806,13 +774,11 @@ class Example:
         # Actual EE position (extracted from body_q each frame)
         self.ee_pos_actual = wp.zeros(self.world_count, dtype=wp.vec3)
 
-        # Global body indices for EE in each world. Using the attachment body (not the
-        # Robotiq base) keeps EE tracking aligned with the IK model's EE link.
+        # Global EE body indices per world (attachment body, matching the IK EE link).
         body_ws = self.model.body_world_start.numpy()[: self.world_count].astype(np.int32)
         self.ee_body_global_indices = wp.array(body_ws + self.ee_attachment_body_idx, dtype=wp.int32)
 
-        # Snapshot of body_q at the start of each task (for interpolation)
-        # Initialize with current state_0 body_q
+        # Snapshot body_q at each task start, used to interpolate the EE target.
         self.task_init_body_q = wp.clone(self.state_0.body_q)
         self.body_count_total = self.model.body_count
 
@@ -1066,10 +1032,8 @@ class Example:
 class _PerWorldGraspSpec:
     """Per-world materialization of ``GRASP_SPECS`` as parallel CPU/GPU SoA arrays.
 
-    The CPU mirrors (``*_np``) are mutated by the GUI Apply path and then assigned
-    to the matching GPU arrays via ``.assign()``. ``*_src`` are 1-element staging
-    buffers reused by the single-slot Apply path so the per-frame Apply costs no
-    new allocations.
+    The ``*_np`` CPU mirrors hold the same values as the GPU arrays; tests and
+    future tuning paths read them without paying a GPU->CPU sync.
     """
 
     offset_local: wp.array[wp.vec3]
@@ -1078,9 +1042,6 @@ class _PerWorldGraspSpec:
     offset_local_np: np.ndarray
     quat_local_np: np.ndarray
     ctrl_np: np.ndarray
-    offset_src: wp.array[wp.vec3]
-    quat_src: wp.array[wp.quat]
-    ctrl_src: wp.array[wp.float32]
 
 
 def margin_pct_to_ctrl(margin_pct: float, y_half_m: float, stroke_mm: float = 85.0) -> float:
@@ -1096,14 +1057,13 @@ def margin_pct_to_ctrl(margin_pct: float, y_half_m: float, stroke_mm: float = 85
 
 
 def derive_offset_local_z(
-    shape: ObjectShape,
     half_size: float,
     z_half: float,
     grasp_clearance: float = _GRASP_CLEARANCE,
+    z_extra: float = 0.0,
 ) -> float:
-    """Seed offset_local.z so the EE starts at spawn_center + grasp_clearance for the shape."""
-    extra = _GRASP_Z_EXTRA.get(shape, 0.0)
-    return (_GRASP_FLOOR_OFFSET_M + max(0.0, 2.0 * z_half - grasp_clearance) - z_half + extra) / half_size
+    """Seed offset_local.z (in half-size units) so the EE starts above the object."""
+    return (_GRASP_FLOOR_OFFSET_M + max(0.0, 2.0 * z_half - grasp_clearance) - z_half + z_extra) / half_size
 
 
 # Builders for the primitive (non-mesh-asset) object shapes. Each entry takes the
