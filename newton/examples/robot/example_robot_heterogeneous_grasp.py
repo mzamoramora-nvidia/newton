@@ -664,7 +664,6 @@ class Example:
         newton.eval_fk(self.model_arm_only, self.model_arm_only.joint_q, self.model_arm_only.joint_qd, state_single)
         body_q_np = state_single.body_q.numpy()
         ee_tf = wp.transform(*body_q_np[self.ik_ee_index])
-        init_ee_pos = wp.transform_get_translation(ee_tf)
         init_ee_rot = wp.transform_get_rotation(ee_tf)
 
         # link_offset maps IK targets to the TCP, so grasp_pos values land at the
@@ -672,7 +671,7 @@ class Example:
         # TCP position (not EE body) so the initial config is already a perfect
         # solution and the IK doesn't drift.
         tcp_offset_vec = wp.vec3(0.0, 0.0, _ROBOTIQ_TCP_OFFSET_M)
-        init_tcp_pos = init_ee_pos + wp.quat_rotate(init_ee_rot, tcp_offset_vec)
+        init_tcp_pos = wp.transform_point(ee_tf, tcp_offset_vec)
         self.pos_obj = ik.IKObjectivePosition(
             link_index=self.ik_ee_index,
             link_offset=tcp_offset_vec,
@@ -1151,18 +1150,13 @@ def compute_grasp_targets(
     w = wp.tid()
     obj_global = body_world_start[w] + object_body_offset
     x_wb = body_q[obj_global]
-    body_tr = wp.transform_get_translation(x_wb)
-    body_q_rot = wp.transform_get_rotation(x_wb)
 
     com_local = body_com[obj_global]
-    com_world = body_tr + wp.quat_rotate(body_q_rot, com_local)
-
     hs_w = world_hs[w]
     offset_local = spec_offset_local[w] * hs_w
-    offset_world = wp.quat_rotate(body_q_rot, offset_local)
 
-    grasp_pos[w] = com_world + offset_world
-    grasp_rot[w] = body_q_rot * base_ee_rot * spec_quat_local[w]
+    grasp_pos[w] = wp.transform_point(x_wb, com_local + offset_local)
+    grasp_rot[w] = wp.transform_get_rotation(x_wb) * base_ee_rot * spec_quat_local[w]
     grasp_ctrl[w] = spec_ctrl[w]
 
 
@@ -1248,10 +1242,10 @@ def set_target_pose_kernel(
     t = wp.clamp(timer / dur, 0.0, 1.0)
 
     ee_body_idx = ee_body_global_indices[tid]
-    ee_pos_prev = wp.transform_get_translation(task_init_body_q[ee_body_idx])
-    ee_quat_prev = wp.transform_get_rotation(task_init_body_q[ee_body_idx])
+    ee_init_tf = task_init_body_q[ee_body_idx]
+    ee_quat_prev = wp.transform_get_rotation(ee_init_tf)
     tcp_offset_local = wp.vec3(0.0, 0.0, wp.static(_ROBOTIQ_TCP_OFFSET_M))
-    tcp_pos_prev = ee_pos_prev + wp.quat_rotate(ee_quat_prev, tcp_offset_local)
+    tcp_pos_prev = wp.transform_point(ee_init_tf, tcp_offset_local)
 
     ee_pos_target_interp[tid] = tcp_pos_prev * (1.0 - t) + target_pos * t
     ee_quat_interp = wp.quat_slerp(ee_quat_prev, gr, t)
@@ -1316,10 +1310,8 @@ def extract_ee_pos_kernel(
     """Extract world-frame TCP position per world from body_q."""
     tid = wp.tid()
     body_idx = ee_body_global_indices[tid]
-    ee_pos = wp.transform_get_translation(body_q[body_idx])
-    ee_quat = wp.transform_get_rotation(body_q[body_idx])
     tcp_offset_local = wp.vec3(0.0, 0.0, wp.static(_ROBOTIQ_TCP_OFFSET_M))
-    ee_pos_actual[tid] = ee_pos + wp.quat_rotate(ee_quat, tcp_offset_local)
+    ee_pos_actual[tid] = wp.transform_point(body_q[body_idx], tcp_offset_local)
 
 
 @wp.kernel(enable_backward=False)
