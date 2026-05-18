@@ -108,7 +108,7 @@ TASK_NAMES = [t.name for t in TaskType]
 
 # Default depth (m) the EE seed sits below the object's top -- i.e. how far
 # the fingers extend past the top surface to grip the body. Clamped against
-# the table for thin objects in derive_offset_local_z.
+# the table for thin objects in derive_pos_offset_z.
 _GRASP_DEPTH_FROM_TOP = 0.05
 
 
@@ -116,13 +116,13 @@ _GRASP_DEPTH_FROM_TOP = 0.05
 class GraspSpec:
     """Per-shape grasp pose, authored in the object's COM frame.
 
-    ``offset_local`` is in units of the per-world object half-size, which
+    ``pos_offset`` is in units of the per-world object half-size, which
     makes the spec scale-invariant -- the same spec drives the gripper to
     the same relative pose regardless of object size. The kernel multiplies
-    by ``half_size`` to recover meters. ``quat_local`` rotates the EE target
+    by ``half_size`` to recover meters. ``quat_offset`` rotates the EE target
     around the body, on top of the shared ``base_ee_rot``.
 
-    ``grip_overclose_fraction`` controls the gripper closure: each pad closes
+    ``overclose_fraction`` controls the gripper closure: each pad closes
     past the object surface by this fraction of the object's full Y-width.
     A value of 0 just touches the surface; 0.05 squeezes 5% of the width
     deeper per side.
@@ -131,37 +131,37 @@ class GraspSpec:
     for tall / awkward shapes that need more headroom than the default.
 
     Composed at runtime as:
-        grasp_pos_world = com_world + body_q.q * (offset_local * half_size)
-        grasp_rot_world = body_q.q * base_ee_rot * quat_local
-        grasp_ctrl      = grip_overclose_to_ctrl(grip_overclose_fraction, y_half)
+        grasp_pos_world = com_world + body_q.q * (pos_offset * half_size)
+        grasp_rot_world = body_q.q * base_ee_rot * quat_offset
+        grasp_ctrl      = overclose_to_ctrl(overclose_fraction, y_half)
     """
 
-    offset_local: wp.vec3 = field(default_factory=lambda: wp.vec3(0.0, 0.0, 0.0))
-    quat_local: wp.quat = field(default_factory=wp.quat_identity)
-    grip_overclose_fraction: float = 0.05
+    pos_offset: wp.vec3 = field(default_factory=lambda: wp.vec3(0.0, 0.0, 0.0))
+    quat_offset: wp.quat = field(default_factory=wp.quat_identity)
+    overclose_fraction: float = 0.05
     z_extra: float = 0.0
 
 
 GRASP_SPECS: dict[ObjectShape, GraspSpec] = {
-    ObjectShape.BOX: GraspSpec(grip_overclose_fraction=0.05),
-    ObjectShape.SPHERE: GraspSpec(grip_overclose_fraction=0.05),
-    ObjectShape.CYLINDER: GraspSpec(grip_overclose_fraction=0.05),
-    ObjectShape.CAPSULE: GraspSpec(grip_overclose_fraction=0.05),
-    ObjectShape.ELLIPSOID: GraspSpec(grip_overclose_fraction=0.05),
-    ObjectShape.CUP: GraspSpec(grip_overclose_fraction=0.22),
-    ObjectShape.RUBBER_DUCK: GraspSpec(grip_overclose_fraction=0.10),
-    ObjectShape.BRICK: GraspSpec(grip_overclose_fraction=0.15),
+    ObjectShape.BOX: GraspSpec(overclose_fraction=0.05),
+    ObjectShape.SPHERE: GraspSpec(overclose_fraction=0.05),
+    ObjectShape.CYLINDER: GraspSpec(overclose_fraction=0.05),
+    ObjectShape.CAPSULE: GraspSpec(overclose_fraction=0.05),
+    ObjectShape.ELLIPSOID: GraspSpec(overclose_fraction=0.05),
+    ObjectShape.CUP: GraspSpec(overclose_fraction=0.22),
+    ObjectShape.RUBBER_DUCK: GraspSpec(overclose_fraction=0.10),
+    ObjectShape.BRICK: GraspSpec(overclose_fraction=0.15),
     ObjectShape.RJ45_PLUG: GraspSpec(
-        offset_local=wp.vec3(0.0, 0.30, 0.0),
-        quat_local=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 90.0 * wp.pi / 180.0),
-        grip_overclose_fraction=0.10,
+        pos_offset=wp.vec3(0.0, 0.30, 0.0),
+        quat_offset=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 90.0 * wp.pi / 180.0),
+        overclose_fraction=0.10,
     ),
-    ObjectShape.BEAR: GraspSpec(grip_overclose_fraction=0.25, z_extra=0.01),
+    ObjectShape.BEAR: GraspSpec(overclose_fraction=0.25, z_extra=0.01),
     ObjectShape.NUT: GraspSpec(
-        quat_local=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 30.0 * wp.pi / 180.0),
-        grip_overclose_fraction=0.15,
+        quat_offset=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 30.0 * wp.pi / 180.0),
+        overclose_fraction=0.15,
     ),
-    ObjectShape.BOLT: GraspSpec(grip_overclose_fraction=0.30, z_extra=0.02),
+    ObjectShape.BOLT: GraspSpec(overclose_fraction=0.30, z_extra=0.02),
 }
 
 
@@ -730,20 +730,20 @@ class Example:
         ctrl_np = np.zeros(self.world_count, dtype=np.float32)
         for i, shape in enumerate(self.world_shapes):
             spec = GRASP_SPECS[shape]
-            z_local = derive_offset_local_z(
+            z_local = derive_pos_offset_z(
                 half_size=self.world_half_sizes[i],
                 z_half=self._world_z_half[i],
                 z_extra=spec.z_extra,
             )
-            offset_np[i] = (*spec.offset_local[:2], z_local)
-            quat_np[i] = spec.quat_local
-            ctrl_np[i] = grip_overclose_to_ctrl(spec.grip_overclose_fraction, y_half_m=self._world_y_half[i])
+            offset_np[i] = (*spec.pos_offset[:2], z_local)
+            quat_np[i] = spec.quat_offset
+            ctrl_np[i] = overclose_to_ctrl(spec.overclose_fraction, y_half_m=self._world_y_half[i])
         self.spec = _PerWorldGraspSpec(
-            offset_local=wp.array(offset_np, dtype=wp.vec3),
-            quat_local=wp.array(quat_np, dtype=wp.quat),
+            pos_offset=wp.array(offset_np, dtype=wp.vec3),
+            quat_offset=wp.array(quat_np, dtype=wp.quat),
             ctrl=wp.array(ctrl_np, dtype=wp.float32),
-            offset_local_np=offset_np,
-            quat_local_np=quat_np,
+            pos_offset_np=offset_np,
+            quat_offset_np=quat_np,
             ctrl_np=ctrl_np,
         )
 
@@ -762,7 +762,7 @@ class Example:
             print("[grasp] per-shape body_com magnitudes (body-local frame):")
             for shape, idx in sorted(first_world.items(), key=lambda kv: kv[0].name):
                 com_norm = np.linalg.norm(body_com_np[int(body_ws_np[idx]) + self.object_body_offset])
-                flag = "  (non-zero, review offset_local)" if com_norm > 1e-4 else ""
+                flag = "  (non-zero, review pos_offset)" if com_norm > 1e-4 else ""
                 print(f"  {shape.name:<12} |body_com| = {com_norm * 1000.0:8.3f} mm{flag}")
 
         self.lift_distance_m: float = 0.1
@@ -776,8 +776,8 @@ class Example:
                 self.model.body_world_start,
                 self.object_body_offset,
                 self._world_half_size_array,
-                self.spec.offset_local,
-                self.spec.quat_local,
+                self.spec.pos_offset,
+                self.spec.quat_offset,
                 self.spec.ctrl,
                 self.base_ee_rot,
             ],
@@ -1056,18 +1056,18 @@ class _PerWorldGraspSpec:
     future tuning paths read them without paying a GPU->CPU sync.
     """
 
-    offset_local: wp.array[wp.vec3]
-    quat_local: wp.array[wp.quat]
+    pos_offset: wp.array[wp.vec3]
+    quat_offset: wp.array[wp.quat]
     ctrl: wp.array[wp.float32]
-    offset_local_np: np.ndarray
-    quat_local_np: np.ndarray
+    pos_offset_np: np.ndarray
+    quat_offset_np: np.ndarray
     ctrl_np: np.ndarray
 
 
-def grip_overclose_to_ctrl(grip_overclose_fraction: float, y_half_m: float, stroke_mm: float = 85.0) -> float:
+def overclose_to_ctrl(overclose_fraction: float, y_half_m: float, stroke_mm: float = 85.0) -> float:
     """Convert a per-shape grip overclose fraction to a Robotiq [0, 255] control value.
 
-    ``grip_overclose_fraction`` is how far each pad closes past the object
+    ``overclose_fraction`` is how far each pad closes past the object
     surface, expressed as a fraction of the object's full Y-width. The
     resulting opening between the pads is ``y_width * (1 - 2 * fraction)``,
     and ``ctrl`` is the corresponding closure level on the Robotiq 2F-85
@@ -1075,23 +1075,23 @@ def grip_overclose_to_ctrl(grip_overclose_fraction: float, y_half_m: float, stro
     opening (85 mm). Output is clamped to ``[0, 255]``.
     """
     y_width_mm = 2.0 * y_half_m * 1000.0
-    overclose_mm = grip_overclose_fraction * y_width_mm
+    overclose_mm = overclose_fraction * y_width_mm
     pad_opening_mm = y_width_mm - 2.0 * overclose_mm
     ctrl = 255.0 * (1.0 - pad_opening_mm / stroke_mm)
     return min(255.0, max(0.0, ctrl))
 
 
-def derive_offset_local_z(
+def derive_pos_offset_z(
     half_size: float,
     z_half: float,
     grasp_depth: float = _GRASP_DEPTH_FROM_TOP,
     z_extra: float = 0.0,
 ) -> float:
-    """Seed ``offset_local.z`` (in half-size units) for the per-world grasp pose.
+    """Seed ``pos_offset.z`` (in half-size units) for the per-world grasp pose.
 
     Geometry::
 
-        EE seed         <- grasp_pos_z = obj_center_z + offset_local.z * half_size
+        EE seed         <- grasp_pos_z = obj_center_z + pos_offset.z * half_size
         ────────  obj_top
                  \\
                   ) z_half
@@ -1142,8 +1142,8 @@ def compute_grasp_targets(
     body_world_start: wp.array[wp.int32],
     object_body_offset: wp.int32,
     world_hs: wp.array[wp.float32],
-    spec_offset_local: wp.array[wp.vec3],
-    spec_quat_local: wp.array[wp.quat],
+    spec_pos_offset: wp.array[wp.vec3],
+    spec_quat_offset: wp.array[wp.quat],
     spec_ctrl: wp.array[wp.float32],
     base_ee_rot: wp.quat,
     # outputs
@@ -1153,7 +1153,7 @@ def compute_grasp_targets(
 ):
     """Compute world-frame grasp target from per-shape COM-frame spec.
 
-    Rotation composition: ``body_q.q * base_ee_rot * spec_quat_local[w]``.
+    Rotation composition: ``body_q.q * base_ee_rot * spec_quat_offset[w]``.
     """
     w = wp.tid()
     obj_global = body_world_start[w] + object_body_offset
@@ -1161,10 +1161,10 @@ def compute_grasp_targets(
 
     com_local = body_com[obj_global]
     hs_w = world_hs[w]
-    offset_local = spec_offset_local[w] * hs_w
+    pos_offset = spec_pos_offset[w] * hs_w
 
-    grasp_pos[w] = wp.transform_point(x_wb, com_local + offset_local)
-    grasp_rot[w] = wp.transform_get_rotation(x_wb) * base_ee_rot * spec_quat_local[w]
+    grasp_pos[w] = wp.transform_point(x_wb, com_local + pos_offset)
+    grasp_rot[w] = wp.transform_get_rotation(x_wb) * base_ee_rot * spec_quat_offset[w]
     grasp_ctrl[w] = spec_ctrl[w]
 
 
@@ -1252,8 +1252,8 @@ def set_target_pose_kernel(
     ee_body_idx = ee_body_global_indices[tid]
     ee_init_tf = task_init_body_q[ee_body_idx]
     ee_quat_prev = wp.transform_get_rotation(ee_init_tf)
-    tcp_offset_local = wp.vec3(0.0, 0.0, wp.static(_ROBOTIQ_TCP_OFFSET_M))
-    tcp_pos_prev = wp.transform_point(ee_init_tf, tcp_offset_local)
+    tcp_pos_offset = wp.vec3(0.0, 0.0, wp.static(_ROBOTIQ_TCP_OFFSET_M))
+    tcp_pos_prev = wp.transform_point(ee_init_tf, tcp_pos_offset)
 
     ee_pos_target_interp[tid] = tcp_pos_prev * (1.0 - t) + target_pos * t
     ee_quat_interp = wp.quat_slerp(ee_quat_prev, gr, t)
@@ -1318,8 +1318,8 @@ def extract_ee_pos_kernel(
     """Extract world-frame TCP position per world from body_q."""
     tid = wp.tid()
     body_idx = ee_body_global_indices[tid]
-    tcp_offset_local = wp.vec3(0.0, 0.0, wp.static(_ROBOTIQ_TCP_OFFSET_M))
-    ee_pos_actual[tid] = wp.transform_point(body_q[body_idx], tcp_offset_local)
+    tcp_pos_offset = wp.vec3(0.0, 0.0, wp.static(_ROBOTIQ_TCP_OFFSET_M))
+    ee_pos_actual[tid] = wp.transform_point(body_q[body_idx], tcp_pos_offset)
 
 
 @wp.kernel(enable_backward=False)
