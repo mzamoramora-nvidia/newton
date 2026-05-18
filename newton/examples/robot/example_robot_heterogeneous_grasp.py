@@ -68,8 +68,8 @@ _HYDROELASTIC_KH_PA = 2e11
 
 # Simulation rate: sim_dt = frame_dt / _SUBSTEPS_PER_FRAME. Collision pipeline
 # runs every _COLLIDE_EVERY_N_SUBSTEPS substeps.
-_SUBSTEPS_PER_FRAME = 16
-_COLLIDE_EVERY_N_SUBSTEPS = 4
+_SUBSTEPS_PER_FRAME = 4
+_COLLIDE_EVERY_N_SUBSTEPS = 1
 
 
 class ObjectShape(IntEnum):
@@ -436,8 +436,11 @@ class Example:
         rng = np.random.default_rng(self.seed)
         n = self.world_count
 
-        # Round-robin shape assignment across all ObjectShape values
-        self.world_shapes = [ObjectShape(i % NUM_SHAPES) for i in range(n)]
+        # Round-robin shape assignment across all ObjectShape values, with mesh
+        # shapes ordered first so the more interesting objects render in the
+        # front rows of the viewer grid.
+        mesh_first = [s for s in ObjectShape if s in _MESH_SHAPES] + [s for s in ObjectShape if s not in _MESH_SHAPES]
+        self.world_shapes = [mesh_first[i % NUM_SHAPES] for i in range(n)]
 
         # Fixed density (1000 kg/m^3 ~= water): mass scales with shape volume and size,
         # so we don't have to combine an unrealistic density with the per-world size
