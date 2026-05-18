@@ -503,7 +503,7 @@ class Example:
         """Add a grasp object to the builder for one world."""
         shape = self.world_shapes[world_id]
         half_size = float(self.world_half_sizes[world_id, 0])
-        mesh = self.mesh_objects[shape] if shape in _MESH_SHAPES else _PRIMITIVE_MESH_FACTORIES[shape](half_size)
+        mesh = self.mesh_objects[shape] if shape in _MESH_SHAPES else _make_primitive_mesh(shape, half_size)
 
         if shape in _MESH_SHAPES:
             extents = mesh.vertices.max(axis=0) - mesh.vertices.min(axis=0)
@@ -1099,17 +1099,24 @@ def derive_pos_offset_z(z_half: float, grasp_depth: float = _GRASP_DEPTH_FROM_TO
     return _GRASP_FLOOR_OFFSET_M + max(0.0, 2.0 * z_half - grasp_depth) - z_half
 
 
-# Builders for the primitive (non-mesh-asset) object shapes. Each entry takes the
-# per-world half-size and returns a ``newton.Mesh`` -- we convert primitives to
-# meshes so every world ends up with the same shape type, which the MuJoCo
-# solver requires in ``separate_worlds=True`` mode.
-_PRIMITIVE_MESH_FACTORIES = {
-    ObjectShape.BOX: lambda hs: newton.Mesh.create_box(hs, hs, hs, compute_inertia=False),
-    ObjectShape.SPHERE: lambda hs: newton.Mesh.create_sphere(hs, compute_inertia=False),
-    ObjectShape.CYLINDER: lambda hs: newton.Mesh.create_cylinder(hs, hs, up_axis=newton.Axis.X, compute_inertia=False),
-    ObjectShape.CAPSULE: lambda hs: newton.Mesh.create_capsule(hs, hs, up_axis=newton.Axis.X, compute_inertia=False),
-    ObjectShape.ELLIPSOID: lambda hs: newton.Mesh.create_ellipsoid(hs * 2.0, hs, hs, compute_inertia=False),
-}
+def _make_primitive_mesh(shape: ObjectShape, half_size: float) -> newton.Mesh:
+    """Build a ``newton.Mesh`` for one of the primitive object shapes.
+
+    Primitives are converted to meshes so every world ends up with the same
+    shape type, which the MuJoCo solver requires in ``separate_worlds=True``
+    mode. ``half_size`` is the per-world target half-size.
+    """
+    if shape == ObjectShape.BOX:
+        return newton.Mesh.create_box(half_size, half_size, half_size, compute_inertia=False)
+    if shape == ObjectShape.SPHERE:
+        return newton.Mesh.create_sphere(half_size, compute_inertia=False)
+    if shape == ObjectShape.CYLINDER:
+        return newton.Mesh.create_cylinder(half_size, half_size, up_axis=newton.Axis.X, compute_inertia=False)
+    if shape == ObjectShape.CAPSULE:
+        return newton.Mesh.create_capsule(half_size, half_size, up_axis=newton.Axis.X, compute_inertia=False)
+    if shape == ObjectShape.ELLIPSOID:
+        return newton.Mesh.create_ellipsoid(half_size * 2.0, half_size, half_size, compute_inertia=False)
+    raise ValueError(f"Not a primitive shape: {shape}")
 
 
 # ----------------------------------------------------------------------------
