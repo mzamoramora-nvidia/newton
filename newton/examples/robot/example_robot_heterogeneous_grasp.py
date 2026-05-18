@@ -234,7 +234,7 @@ class Example:
         # mesh-shape worlds (set above in _generate_world_params) sit in the
         # front rows of the view.
         self.viewer.set_camera(wp.vec3(7.0, 3.0, 2.2), -20.0, -150.0)
-        self.viewer.set_world_offsets(wp.vec3(1.5, 1.5, 0.0))
+        self._set_grid_world_offsets(cols=6, spacing=1.5)
         if isinstance(self.viewer, newton.viewer.ViewerGL):
             self.viewer._paused = True
         self.capture()
@@ -963,6 +963,23 @@ class Example:
         ctrl_np = ctrl.numpy().reshape(self.world_count, actuator_count)
         ctrl_np[:, : self.arm_dof_count] = init_q_2d[:, : self.arm_dof_count]
         wp.copy(ctrl, wp.array(ctrl_np.flatten(), dtype=wp.float32))
+
+    def _set_grid_world_offsets(self, cols: int, spacing: float):
+        """Lay worlds out on a ``cols``-wide grid with uniform XY spacing.
+
+        Bypasses the viewer's auto-square grid (``ceil(N**0.5)`` columns) so
+        we get a wider, shallower layout for the multi-world view.
+        """
+        rows = (self.world_count + cols - 1) // cols
+        offsets = np.zeros((self.world_count, 3), dtype=np.float32)
+        for i in range(self.world_count):
+            row = i // cols
+            col = i % cols
+            offsets[i, 0] = (col - (cols - 1) / 2.0) * spacing
+            offsets[i, 1] = (row - (rows - 1) / 2.0) * spacing
+        self.viewer.world_offsets = wp.array(offsets, dtype=wp.vec3, device=self.viewer.device)
+        if hasattr(self.viewer, "picking") and self.viewer.picking is not None:
+            self.viewer.picking.world_offsets = self.viewer.world_offsets
 
     def _set_joint_targets(self):
         """Compute IK targets from state machine and solve IK each frame."""
