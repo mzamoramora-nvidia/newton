@@ -208,7 +208,7 @@ class Example:
         self._setup_collision_sdf(scene)
         self.model = scene.finalize()
 
-        self.rigid_contact_max = 2_000 * self.world_count
+        self.rigid_contact_max = 4_000 * self.world_count
         print(
             f"Bodies: {self.model.body_count}, Joints: {self.model.joint_count}, DOFs: {self.model.joint_coord_count}"
         )
@@ -931,7 +931,7 @@ class Example:
             iterations=100,
             ls_iterations=200,
             impratio=50.0,
-            njmax=4 * nconmax_per_world,  # 4x margin: each contact spans ~3 constraint rows
+            njmax=nconmax_per_world,
             nconmax=nconmax_per_world,
         )
 
