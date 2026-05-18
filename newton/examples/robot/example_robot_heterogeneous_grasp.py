@@ -443,8 +443,8 @@ class Example:
         self.object_density = 1000.0
 
         # Per-world size knob (the half-size unit that drives object scaling and the
-        # kernel-side multiplier for pos_offset_fractional). +/- 25% uniform random
-        # draw around the base.
+        # kernel-side multiplier for pos_offset_fractional). +/- 25% uniform
+        # randomization around the base.
         base_half_size = 0.025
         self.world_half_scales = (base_half_size * rng.uniform(0.75, 1.25, size=n)).astype(np.float32)
         # Per-world actual half-extents (x_half, y_half, z_half) post-scale,
@@ -468,7 +468,7 @@ class Example:
     def _load_mesh_objects(self):
         """Load mesh assets for all mesh-based shapes (only those actually needed).
 
-        SDFs are NOT built here — they are built at the correct scale in
+        SDFs are NOT built here -- they are built at the correct scale in
         ``_setup_collision_sdf`` after scale-baking per world.
         """
         needed = set(self.world_shapes)
@@ -515,7 +515,7 @@ class Example:
             uniform_scale = 2.0 * half_scale / extents.max() if extents.max() > 0 else 1.0
         else:
             uniform_scale = 1.0
-        # RJ45_PLUG is spawned with a 90° Z-yaw so its body-frame Y is the mesh's X-extent.
+        # RJ45_PLUG is spawned with a 90 deg Z-yaw so its body-frame Y is the mesh's X-extent.
         y_extent = extents[0] if shape == ObjectShape.RJ45_PLUG else extents[1]
         self.world_half_sizes[world_id, 0] = extents[0] / 2.0 * uniform_scale
         self.world_half_sizes[world_id, 1] = y_extent / 2.0 * uniform_scale
@@ -664,7 +664,7 @@ class Example:
             target_rotations=wp.array([list(init_ee_rot)] * self.world_count, dtype=wp.vec4),
         )
 
-        # Joint limit objective — replicate single-model limits for all problems
+        # Joint limit objective -- replicate single-model limits for all problems
         ik_dofs = self.model_arm_only.joint_coord_count
         ll = self.model_arm_only.joint_limit_lower.numpy()
         lu = self.model_arm_only.joint_limit_upper.numpy()
@@ -1083,7 +1083,7 @@ def derive_pos_offset_z(z_half: float, grasp_depth: float = _GRASP_DEPTH_FROM_TO
     Geometry::
 
         EE seed         <- obj_center + return value
-        ────────  obj_top
+        --------  obj_top
                  \\
                   ) z_half
                  /
@@ -1091,9 +1091,9 @@ def derive_pos_offset_z(z_half: float, grasp_depth: float = _GRASP_DEPTH_FROM_TO
                  \\
                   ) z_half
                  /
-        ────────  obj_bottom
-        ░░░░░░░░░░░░  table_top
-            └ floor_gap = _GRASP_FLOOR_OFFSET_M
+        --------  obj_bottom
+        ########  table_top
+            |_ floor_gap = _GRASP_FLOOR_OFFSET_M
 
     The EE seed is placed at ``obj_top - grasp_depth`` (i.e. the fingers
     reach ``grasp_depth`` past the top surface) when the object is at least
