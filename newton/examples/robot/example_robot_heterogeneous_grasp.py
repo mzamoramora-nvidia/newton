@@ -931,10 +931,7 @@ class Example:
             iterations=100,
             ls_iterations=200,
             impratio=50.0,
-            # Each contact expands into multiple constraint rows under elliptic
-            # cone friction; give njmax a 4x margin over nconmax so the MuJoCo
-            # constraint solver doesn't overflow at peak contact counts.
-            njmax=4 * nconmax_per_world,
+            njmax=4 * nconmax_per_world,  # 4x margin: each contact spans ~3 constraint rows
             nconmax=nconmax_per_world,
         )
 
