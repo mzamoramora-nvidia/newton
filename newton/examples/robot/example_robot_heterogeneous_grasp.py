@@ -595,20 +595,29 @@ class Example:
         scene = newton.ModelBuilder()
         for world_id in range(self.world_count):
             scene.begin_world()
+            link0_body = scene.body_count  # first body added by add_builder is the panda link0
+            robot_shape_start = scene.shape_count
             scene.add_builder(robot_builder)
+            robot_shape_end = scene.shape_count
 
             table_body = scene.add_body(
                 xform=wp.transform(self.table_pos, wp.quat_identity()),
                 label="table",
                 is_kinematic=True,
             )
-            scene.add_shape_mesh(
+            table_shape = scene.add_shape_mesh(
                 body=table_body,
                 mesh=table_mesh,
                 cfg=table_cfg,
                 color=(0.20, 0.20, 0.22),
                 label="table_shape",
             )
+
+            # The robot base rests on the table top; filter link0 vs table to
+            # avoid wasted contact generation on a pair that can never separate.
+            for shape_idx in range(robot_shape_start, robot_shape_end):
+                if scene.shape_body[shape_idx] == link0_body:
+                    scene.add_shape_collision_filter_pair(shape_idx, table_shape)
 
             obj_body = self._add_object(scene, world_id)
 
