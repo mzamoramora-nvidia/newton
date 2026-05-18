@@ -253,6 +253,8 @@ class Example:
     def simulate(self):
         for i in range(self.sim_substeps):
             self.state_0.clear_forces()
+            # Interactive picker forces (right-click drag); no-op on ViewerNull.
+            self.viewer.apply_forces(self.state_0)
             if self.collision_pipeline and i % self.collide_substeps == 0:
                 self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
@@ -794,7 +796,8 @@ class Example:
         table (so the contact-surface visualization always has at least one
         pair to draw). Only applied in NEWTON_HYDROELASTIC mode.
         """
-        sdf_narrow_band = (-0.0015, 0.0015)
+        # +/- 3 mm, wider than the max pad-into-surface squeeze.
+        sdf_narrow_band = (-0.003, 0.003)
         hydroelastic_enabled = self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC
 
         # ---- Pass 1: build SDF on every collision shape ----
