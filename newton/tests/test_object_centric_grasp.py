@@ -27,7 +27,7 @@ from newton.examples.robot.example_robot_heterogeneous_grasp import (
 class TestHeterogeneousGraspLift(unittest.TestCase):
     """At least half the worlds lift their object above ``LIFT_THRESHOLD_M``."""
 
-    WORLD_COUNT = 12
+    WORLD_COUNT = 24  # matches the example's default world_count
     NUM_FRAMES = 700
     SEED = 42
     COLLISION_MODE = "newton_hydroelastic"
