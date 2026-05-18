@@ -224,22 +224,25 @@ class TestGraspTargetsMatchReference(unittest.TestCase):
         body_ws_np = example.model.body_world_start.numpy()
         base_ee_rot = example.base_ee_rot
 
+        # One-shot CPU read of the per-world spec arrays.
+        spec_pos_offset = example.spec.pos_offset.numpy()
+        spec_quat_offset = example.spec.quat_offset.numpy()
+        expected_ctrl = example.spec.ctrl.numpy().astype(np.float32)
+
         expected_pos = np.zeros((wc, 3), dtype=np.float32)
         expected_rot = np.zeros((wc, 4), dtype=np.float32)
         for i in range(wc):
             obj_global = int(body_ws_np[i]) + example.object_body_offset
             body_q = wp.transform(*body_q_np[obj_global])
             com_local = wp.vec3(*body_com_np[obj_global])
-            hs_i = float(example.world_half_sizes[i])
-            pos_offset = wp.vec3(*example.spec.pos_offset_np[i])
-            quat_offset = wp.quat(*example.spec.quat_offset_np[i])
+            hs_i = float(example.world_half_sizes[i, 0])  # 0 = size knob column
+            pos_offset = wp.vec3(*spec_pos_offset[i])
+            quat_offset = wp.quat(*spec_quat_offset[i])
 
             pos = wp.transform_point(body_q, com_local + pos_offset * hs_i)
             rot = wp.transform_get_rotation(body_q) * base_ee_rot * quat_offset
             expected_pos[i] = [pos[0], pos[1], pos[2]]
             expected_rot[i] = [rot[0], rot[1], rot[2], rot[3]]
-
-        expected_ctrl = example.spec.ctrl_np.astype(np.float32)
 
         np.testing.assert_allclose(
             grasp_pos, expected_pos, atol=1e-5, err_msg="grasp_pos kernel output disagrees with host reference"

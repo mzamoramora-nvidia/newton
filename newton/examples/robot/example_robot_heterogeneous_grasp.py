@@ -58,6 +58,13 @@ _TABLE_KH_PA = 1e10
 # Vertical clearance between the spawn point and the object's lowest extent.
 _GRASP_FLOOR_OFFSET_M = 0.0005
 
+# Column indices into the per-world ``world_half_sizes`` array. Each row is
+# a vec3 of half-extents: the size knob that scales the object plus the
+# post-scale Y/Z half-extents filled in by ``_add_object``.
+_HS_KNOB = 0  # per-world size knob (half-size unit for offset_local)
+_HS_Y = 1  # post-scale Y half-extent (gripper-jaw axis)
+_HS_Z = 2  # post-scale Z half-extent (world up)
+
 
 class ObjectShape(IntEnum):
     BOX = 0
@@ -188,8 +195,6 @@ class Example:
         robot_builder, arm_only_builder = self._build_robot()
         self.model_arm_only = arm_only_builder.finalize()
         self._load_mesh_objects()
-        self._world_z_half = np.zeros(self.world_count, dtype=np.float32)
-        self._world_y_half = np.zeros(self.world_count, dtype=np.float32)
         scene = self._build_scene(robot_builder)
         self._setup_collision_sdf(scene)
         self.model = scene.finalize()
@@ -404,7 +409,7 @@ class Example:
         # the validator doesn't warn.
         self.ee_attachment_body_idx = find_body("attachment")
         builder.body_mass[self.ee_attachment_body_idx] = 1e-6
-        builder.body_inertia[self.ee_attachment_body_idx] = wp.mat33(np.eye(3, dtype=np.float32) * 1e-9)
+        builder.body_inertia[self.ee_attachment_body_idx] = wp.mat33(1e-9, 0.0, 0.0, 0.0, 1e-9, 0.0, 0.0, 0.0, 1e-9)
         franka_body_count = self.ee_attachment_body_idx + 1
         self.ee_base_body_idx = next(
             i for i in range(franka_body_count, builder.body_count) if builder.body_label[i].endswith("/base")
@@ -460,9 +465,13 @@ class Example:
         # so we don't have to combine an unrealistic density with the per-world size jitter.
         self.object_density = 1000.0
 
-        # Per-world object half-size with +/- 25% uniform jitter around the base.
+        # Per-world half-extents (size_knob, y_half, z_half) -- one vec3 row per
+        # world. The knob is the size scaling target with +/- 25% uniform jitter
+        # around the base; y_half and z_half are written by _add_object once the
+        # object mesh is finalized.
         base_half_size = 0.025
-        self.world_half_sizes = base_half_size * rng.uniform(0.75, 1.25, size=n)
+        self.world_half_sizes = np.zeros((n, 3), dtype=np.float32)
+        self.world_half_sizes[:, _HS_KNOB] = base_half_size * rng.uniform(0.75, 1.25, size=n)
 
         # Per-world spawn pose randomization: XY offset on the table and Z-yaw rotation.
         # Both draws are uniform in [-range, +range]; ranges of 0 collapse to deterministic
@@ -476,7 +485,7 @@ class Example:
             for i in range(n):
                 print(
                     f"  World {i:3d}: shape={SHAPE_NAMES[self.world_shapes[i]]:>12s}  "
-                    f"hs={self.world_half_sizes[i] * 1000:.1f} mm"
+                    f"hs={self.world_half_sizes[i, _HS_KNOB] * 1000:.1f} mm"
                 )
 
     def _load_mesh_objects(self):
@@ -519,7 +528,7 @@ class Example:
     def _add_object(self, builder: newton.ModelBuilder, world_id: int):
         """Add a grasp object to the builder for one world."""
         shape = self.world_shapes[world_id]
-        half_size = self.world_half_sizes[world_id]
+        half_size = self.world_half_sizes[world_id, _HS_KNOB]
         mesh = self.mesh_objects[shape] if shape in _MESH_SHAPES else _PRIMITIVE_MESH_FACTORIES[shape](half_size)
 
         if shape in _MESH_SHAPES:
@@ -527,12 +536,14 @@ class Example:
             uniform_scale = 2.0 * half_size / extents.max() if extents.max() > 0 else 1.0
             # RJ45_PLUG is spawned with a 90° Z-yaw so its body-frame Y is the mesh's X-extent.
             y_extent = extents[0] if shape == ObjectShape.RJ45_PLUG else extents[1]
-            self._world_y_half[world_id] = y_extent / 2.0 * uniform_scale
-            self._world_z_half[world_id] = extents[2] / 2.0 * uniform_scale
+            y_half = y_extent / 2.0 * uniform_scale
+            z_half = extents[2] / 2.0 * uniform_scale
         else:
             uniform_scale = 1.0
-            self._world_y_half[world_id] = half_size
-            self._world_z_half[world_id] = half_size
+            y_half = half_size
+            z_half = half_size
+        self.world_half_sizes[world_id, _HS_Y] = y_half
+        self.world_half_sizes[world_id, _HS_Z] = z_half
         scale = wp.vec3(uniform_scale, uniform_scale, uniform_scale)
 
         z_axis = wp.vec3(0.0, 0.0, 1.0)
@@ -541,7 +552,7 @@ class Example:
         sx, sy, sz = self.spawn_center
         dx, dy = self._world_spawn_xy[world_id]
         yaw_rot = wp.quat_from_axis_angle(z_axis, self._world_spawn_yaw[world_id])
-        obj_z = sz + self._world_z_half[world_id] + _GRASP_FLOOR_OFFSET_M
+        obj_z = sz + z_half + _GRASP_FLOOR_OFFSET_M
         obj_body = builder.add_body(
             xform=wp.transform(wp.vec3(sx + dx, sy + dy, obj_z), yaw_rot * obj_rot),
             label="object",
@@ -718,33 +729,24 @@ class Example:
         newton.eval_fk(self.model_arm_only, self.model_arm_only.joint_q, self.model_arm_only.joint_qd, state_arm)
         arm_ee_rot = wp.transform_get_rotation(wp.transform(*state_arm.body_q.numpy()[self.ik_ee_index]))
 
-        # --- Object-centric grasp: per-world spec inputs + SoA runtime outputs ---
-        self._shape_mask: dict[ObjectShape, np.ndarray] = {
-            shape: np.where(np.asarray(self.world_shapes) == shape)[0].astype(np.int32)
-            for shape in set(self.world_shapes)
-        }
-
         # Build the per-world spec arrays from GRASP_SPECS.
-        offset_np = np.zeros((self.world_count, 3), dtype=np.float32)
-        quat_np = np.tile(np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32), (self.world_count, 1))
-        ctrl_np = np.zeros(self.world_count, dtype=np.float32)
+        offset_arr = np.zeros((self.world_count, 3), dtype=np.float32)
+        quat_arr = np.tile(np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32), (self.world_count, 1))
+        ctrl_arr = np.zeros(self.world_count, dtype=np.float32)
         for i, shape in enumerate(self.world_shapes):
             spec = GRASP_SPECS[shape]
             z_local = derive_pos_offset_z(
-                half_size=self.world_half_sizes[i],
-                z_half=self._world_z_half[i],
+                half_size=self.world_half_sizes[i, _HS_KNOB],
+                z_half=self.world_half_sizes[i, _HS_Z],
                 z_extra=spec.z_extra,
             )
-            offset_np[i] = (*spec.pos_offset[:2], z_local)
-            quat_np[i] = spec.quat_offset
-            ctrl_np[i] = overclose_to_ctrl(spec.overclose_fraction, y_half_m=self._world_y_half[i])
+            offset_arr[i] = (*spec.pos_offset[:2], z_local)
+            quat_arr[i] = spec.quat_offset
+            ctrl_arr[i] = overclose_to_ctrl(spec.overclose_fraction, y_half_m=self.world_half_sizes[i, _HS_Y])
         self.spec = _PerWorldGraspSpec(
-            pos_offset=wp.array(offset_np, dtype=wp.vec3),
-            quat_offset=wp.array(quat_np, dtype=wp.quat),
-            ctrl=wp.array(ctrl_np, dtype=wp.float32),
-            pos_offset_np=offset_np,
-            quat_offset_np=quat_np,
-            ctrl_np=ctrl_np,
+            pos_offset=wp.array(offset_arr, dtype=wp.vec3),
+            quat_offset=wp.array(quat_arr, dtype=wp.quat),
+            ctrl=wp.array(ctrl_arr, dtype=wp.float32),
         )
 
         # GPU runtime SoA outputs of compute_grasp_targets.
@@ -752,7 +754,7 @@ class Example:
         self.grasp_rot = wp.zeros(self.world_count, dtype=wp.quat)
         self.grasp_ctrl = wp.zeros(self.world_count, dtype=wp.float32)
 
-        self._world_half_size_array = wp.array(np.asarray(self.world_half_sizes, dtype=np.float32), dtype=wp.float32)
+        self._world_half_size_array = wp.array(self.world_half_sizes[:, _HS_KNOB].copy(), dtype=wp.float32)
         self.base_ee_rot = wp.quat(*arm_ee_rot)
 
         if self.verbose:
@@ -1050,18 +1052,11 @@ class Example:
 
 @dataclass
 class _PerWorldGraspSpec:
-    """Per-world materialization of ``GRASP_SPECS`` as parallel CPU/GPU SoA arrays.
-
-    The ``*_np`` CPU mirrors hold the same values as the GPU arrays; tests and
-    future tuning paths read them without paying a GPU->CPU sync.
-    """
+    """GPU-resident per-world materialization of ``GRASP_SPECS`` (SoA layout)."""
 
     pos_offset: wp.array[wp.vec3]
     quat_offset: wp.array[wp.quat]
     ctrl: wp.array[wp.float32]
-    pos_offset_np: np.ndarray
-    quat_offset_np: np.ndarray
-    ctrl_np: np.ndarray
 
 
 def overclose_to_ctrl(overclose_fraction: float, y_half_m: float, stroke_mm: float = 85.0) -> float:
