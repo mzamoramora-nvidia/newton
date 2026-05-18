@@ -593,6 +593,7 @@ class Example:
         table_cfg = replace(self.shape_cfg, density=0.0)
 
         scene = newton.ModelBuilder()
+        table_shapes: list[int] = []
         for world_id in range(self.world_count):
             scene.begin_world()
             link0_body = scene.body_count  # first body added by add_builder is the panda link0
@@ -612,6 +613,7 @@ class Example:
                 color=(0.20, 0.20, 0.22),
                 label="table_shape",
             )
+            table_shapes.append(table_shape)
 
             # The robot base rests on the table top; filter link0 vs table to
             # avoid wasted contact generation on a pair that can never separate.
@@ -626,7 +628,11 @@ class Example:
 
             scene.end_world()
 
-        scene.add_ground_plane()
+        ground_shape = scene.add_ground_plane()
+        # Table bottom sits on the ground plane; filter every per-world table
+        # against the single shared ground shape.
+        for table_shape in table_shapes:
+            scene.add_shape_collision_filter_pair(table_shape, ground_shape)
         return scene
 
     def _setup_ik(self):
