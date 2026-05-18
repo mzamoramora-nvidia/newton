@@ -441,12 +441,14 @@ class Example:
         # so we don't have to combine an unrealistic density with the per-world size jitter.
         self.object_density = 1000.0
 
-        # Per-world half-extents as a flat (n, 3) array: (x_half, y_half, z_half).
-        # x_half is drawn here with +/- 25% uniform jitter around the base; y_half
-        # and z_half are filled by _add_object once the mesh is finalized.
+        # Per-world size knob (the half-size unit that drives object scaling and
+        # the kernel-side multiplier for pos_offset_fractional). +/- 25% uniform
+        # jitter around the base.
         base_half_size = 0.025
+        self.world_half_scales = (base_half_size * rng.uniform(0.75, 1.25, size=n)).astype(np.float32)
+        # Per-world actual half-extents (x_half, y_half, z_half) post-scale,
+        # filled in by _add_object once the mesh is finalized.
         self.world_half_sizes = np.zeros((n, 3), dtype=np.float32)
-        self.world_half_sizes[:, 0] = base_half_size * rng.uniform(0.75, 1.25, size=n)
 
         # Per-world spawn pose randomization: XY offset on the table and Z-yaw rotation.
         # Both draws are uniform in [-range, +range]; ranges of 0 collapse to deterministic
@@ -459,7 +461,7 @@ class Example:
             for i in range(n):
                 print(
                     f"  World {i:3d}: shape={SHAPE_NAMES[self.world_shapes[i]]:>12s}  "
-                    f"hs={self.world_half_sizes[i, 0] * 1000:.1f} mm"
+                    f"hs={self.world_half_scales[i] * 1000:.1f} mm"
                 )
 
     def _load_mesh_objects(self):
@@ -502,20 +504,21 @@ class Example:
     def _add_object(self, builder: newton.ModelBuilder, world_id: int):
         """Add a grasp object to the builder for one world."""
         shape = self.world_shapes[world_id]
-        half_size = float(self.world_half_sizes[world_id, 0])
-        mesh = self.mesh_objects[shape] if shape in _MESH_SHAPES else _make_primitive_mesh(shape, half_size)
+        half_scale = float(self.world_half_scales[world_id])
+        mesh = self.mesh_objects[shape] if shape in _MESH_SHAPES else _make_primitive_mesh(shape, half_scale)
 
+        # Mesh assets are scaled so the longest extent matches 2 * half_scale.
+        # Primitives are already at target scale.
+        extents = mesh.vertices.max(axis=0) - mesh.vertices.min(axis=0)
         if shape in _MESH_SHAPES:
-            extents = mesh.vertices.max(axis=0) - mesh.vertices.min(axis=0)
-            uniform_scale = 2.0 * half_size / extents.max() if extents.max() > 0 else 1.0
-            # RJ45_PLUG is spawned with a 90° Z-yaw so its body-frame Y is the mesh's X-extent.
-            y_extent = extents[0] if shape == ObjectShape.RJ45_PLUG else extents[1]
-            self.world_half_sizes[world_id, 1] = y_extent / 2.0 * uniform_scale
-            self.world_half_sizes[world_id, 2] = extents[2] / 2.0 * uniform_scale
+            uniform_scale = 2.0 * half_scale / extents.max() if extents.max() > 0 else 1.0
         else:
             uniform_scale = 1.0
-            self.world_half_sizes[world_id, 1] = half_size
-            self.world_half_sizes[world_id, 2] = half_size
+        # RJ45_PLUG is spawned with a 90° Z-yaw so its body-frame Y is the mesh's X-extent.
+        y_extent = extents[0] if shape == ObjectShape.RJ45_PLUG else extents[1]
+        self.world_half_sizes[world_id, 0] = extents[0] / 2.0 * uniform_scale
+        self.world_half_sizes[world_id, 1] = y_extent / 2.0 * uniform_scale
+        self.world_half_sizes[world_id, 2] = extents[2] / 2.0 * uniform_scale
         scale = wp.vec3(uniform_scale, uniform_scale, uniform_scale)
 
         z_axis = wp.vec3(0.0, 0.0, 1.0)
@@ -708,7 +711,7 @@ class Example:
         ctrl_arr = np.zeros(self.world_count, dtype=np.float32)
         for i, shape in enumerate(self.world_shapes):
             spec = GRASP_SPECS[shape]
-            _x_half, y_half, z_half = self.world_half_sizes[i]
+            _, y_half, z_half = self.world_half_sizes[i]
             frac_arr[i] = spec.pos_offset_fractional
             # Fold the auto-seeded Z offset (in meters) into the absolute Z.
             abs_arr[i] = (
@@ -730,7 +733,7 @@ class Example:
         self.grasp_rot = wp.zeros(self.world_count, dtype=wp.quat)
         self.grasp_ctrl = wp.zeros(self.world_count, dtype=wp.float32)
 
-        self._world_half_size_array = wp.array(self.world_half_sizes[:, 0].copy(), dtype=wp.float32)
+        self._world_half_scale_array = wp.array(self.world_half_scales, dtype=wp.float32)
         self.base_ee_rot = wp.quat(*arm_ee_rot)
 
         if self.verbose:
@@ -753,7 +756,7 @@ class Example:
                 self.model.body_com,
                 self.model.body_world_start,
                 self.object_body_offset,
-                self._world_half_size_array,
+                self._world_half_scale_array,
                 self.spec.pos_offset_fractional,
                 self.spec.pos_offset_absolute,
                 self.spec.quat_offset,
