@@ -235,7 +235,7 @@ class TestGraspTargetsMatchReference(unittest.TestCase):
             obj_global = int(body_ws_np[i]) + example.object_body_offset
             body_q = wp.transform(*body_q_np[obj_global])
             com_local = wp.vec3(*body_com_np[obj_global])
-            hs_i = float(example.world_half_sizes[i, 0])  # 0 = size knob column
+            hs_i = float(example.world_half_sizes[i, 0])
             pos_offset = wp.vec3(*spec_pos_offset[i])
             quat_offset = wp.quat(*spec_quat_offset[i])
 
