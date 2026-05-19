@@ -497,6 +497,14 @@ add_example_test(
     test_options={"num-frames": 700},
     use_viewer=True,
 )
+add_example_test(
+    TestRobotExamples,
+    name="robot.example_robot_heterogeneous_grasp",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 700, "collision-mode": "newton_sdf"},
+    use_viewer=True,
+    test_suffix="newton_sdf",
+)
 
 
 class TestRobotPolicyExamples(unittest.TestCase):
