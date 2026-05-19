@@ -108,11 +108,16 @@ class CollisionMode(IntEnum):
 
 class TaskType(IntEnum):
     APPROACH = 0
-    CLOSE_GRIPPER = 1
-    SETTLE = 2  # hold pose + full closure; lets contact forces stabilize before LIFT
-    LIFT = 3
-    HOLD = 4
-    DONE = 5
+    REFINE_APPROACH = 1
+    CLOSE_GRIPPER = 2
+    SETTLE = 3
+    LIFT = 4
+    HOLD = 5
+    DONE = 6
+
+
+# Hover height above grasp_pos for the APPROACH state.
+_PRE_GRASP_HOVER_M = 0.05
 
 
 NUM_TASKS = len(TaskType)
@@ -706,7 +711,8 @@ class Example:
         self.task_timer = wp.zeros(self.world_count, dtype=wp.float32)
 
         # Task durations: [APPROACH, CLOSE_GRIPPER, SETTLE, LIFT, HOLD, DONE]
-        durations = [1.5, 1.0, 0.5, 1.0, 1.5, 0.0]
+        # APPROACH, REFINE_APPROACH, CLOSE_GRIPPER, SETTLE, LIFT, HOLD, DONE
+        durations = [1.0, 0.7, 1.0, 0.5, 1.0, 1.5, 0.0]  # seconds, indexed by TaskType
         self.task_durations = wp.array(durations, dtype=wp.float32)
 
         # Arm-only attachment-body rotation; same source the IK rotation
@@ -1249,35 +1255,7 @@ def set_target_pose_kernel(
     gr = grasp_rot[tid]
     gc = grasp_ctrl[tid]
     lift_vec = wp.vec3(0.0, 0.0, lift_distance_m)
-
-    if state == wp.static(int(TaskType.APPROACH)):
-        target_pos = gp
-        ctrl = 0.0
-    elif state == wp.static(int(TaskType.CLOSE_GRIPPER)):
-        target_pos = gp
-        dur_close = task_durations[wp.static(int(TaskType.CLOSE_GRIPPER))]
-        alpha = wp.clamp(timer / dur_close, 0.0, 1.0)
-        ctrl = alpha * gc
-    elif state == wp.static(int(TaskType.SETTLE)):
-        target_pos = gp
-        ctrl = gc
-    elif state == wp.static(int(TaskType.LIFT)):
-        target_pos = gp + lift_vec
-        ctrl = gc
-    elif state == wp.static(int(TaskType.HOLD)):
-        target_pos = gp + lift_vec
-        ctrl = gc
-    else:
-        target_pos = gp + lift_vec
-        ctrl = gc
-
-    ee_pos_target[tid] = target_pos
-    # rot target: wp.vec4 because downstream consumers still take vec4
-    ee_rot_target[tid] = wp.vec4(gr[0], gr[1], gr[2], gr[3])
-    gripper_target[tid] = ctrl
-
-    dur = task_durations[state] if state < wp.static(int(TaskType.DONE)) else 1.0
-    t = wp.clamp(timer / dur, 0.0, 1.0)
+    hover_vec = wp.vec3(0.0, 0.0, wp.static(_PRE_GRASP_HOVER_M))
 
     ee_body_idx = ee_body_global_indices[tid]
     ee_init_tf = task_init_body_q[ee_body_idx]
@@ -1285,8 +1263,44 @@ def set_target_pose_kernel(
     tcp_pos_offset = wp.vec3(0.0, 0.0, wp.static(_ROBOTIQ_TCP_OFFSET_M))
     tcp_pos_prev = wp.transform_point(ee_init_tf, tcp_pos_offset)
 
+    # Anchor pose to the previous state's settled value from CLOSE_GRIPPER on.
+    freeze = state >= wp.static(int(TaskType.CLOSE_GRIPPER))
+
+    if state == wp.static(int(TaskType.APPROACH)):
+        target_pos = gp + hover_vec
+        ctrl = 0.0
+    elif state == wp.static(int(TaskType.REFINE_APPROACH)):
+        target_pos = gp
+        ctrl = 0.0
+    elif state == wp.static(int(TaskType.CLOSE_GRIPPER)):
+        target_pos = tcp_pos_prev
+        dur_close = task_durations[wp.static(int(TaskType.CLOSE_GRIPPER))]
+        alpha = wp.clamp(timer / dur_close, 0.0, 1.0)
+        ctrl = alpha * gc
+    elif state == wp.static(int(TaskType.SETTLE)):
+        target_pos = tcp_pos_prev
+        ctrl = gc
+    elif state == wp.static(int(TaskType.LIFT)):
+        target_pos = tcp_pos_prev + lift_vec
+        ctrl = gc
+    elif state == wp.static(int(TaskType.HOLD)):
+        target_pos = tcp_pos_prev + lift_vec
+        ctrl = gc
+    else:
+        target_pos = tcp_pos_prev + lift_vec
+        ctrl = gc
+
+    rot_target = ee_quat_prev if freeze else gr
+
+    ee_pos_target[tid] = target_pos
+    ee_rot_target[tid] = wp.vec4(rot_target[0], rot_target[1], rot_target[2], rot_target[3])
+    gripper_target[tid] = ctrl
+
+    dur = task_durations[state] if state < wp.static(int(TaskType.DONE)) else 1.0
+    t = wp.clamp(timer / dur, 0.0, 1.0)
+
     ee_pos_target_interp[tid] = tcp_pos_prev * (1.0 - t) + target_pos * t
-    ee_quat_interp = wp.quat_slerp(ee_quat_prev, gr, t)
+    ee_quat_interp = wp.quat_slerp(ee_quat_prev, rot_target, t)
     ee_rot_target_interp[tid] = wp.vec4(ee_quat_interp[0], ee_quat_interp[1], ee_quat_interp[2], ee_quat_interp[3])
 
 
@@ -1317,8 +1331,8 @@ def advance_task_kernel(
     if timer < dur:
         return
 
-    # For APPROACH and LIFT, also require EE position settling
-    if state == wp.static(int(TaskType.APPROACH)) or state == wp.static(int(TaskType.LIFT)):
+    # Wait for EE settling on REFINE_APPROACH and LIFT (APPROACH is a coarse hover).
+    if state == wp.static(int(TaskType.REFINE_APPROACH)) or state == wp.static(int(TaskType.LIFT)):
         target = ee_pos_target[tid]
         actual = ee_pos_actual[tid]
         err_x = wp.abs(target[0] - actual[0])
