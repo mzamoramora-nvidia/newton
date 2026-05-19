@@ -10,6 +10,52 @@
 #
 # Command: python -m newton.examples robot_heterogeneous_grasp
 #
+# ---------------------------------------------------------------------------
+# Heterogeneous-environments pattern (how to read this example)
+# ---------------------------------------------------------------------------
+# A "heterogeneous" multi-world scene is one where each world holds different
+# entities (here: a different object shape per world), as opposed to the
+# common case of N copies of the same scene built via
+# ``ModelBuilder.replicate()``. See ``docs/concepts/worlds.rst`` for the
+# underlying ``begin_world`` / ``end_world`` / ``add_builder`` API.
+#
+# This file follows three conventions you can copy into other heterogeneous
+# examples:
+#
+# 1. Per-world scene construction (``_build_scene``).
+#    A robot+gripper ``ModelBuilder`` is built once, then re-used inside a
+#    ``for world_id in range(world_count)`` loop that calls
+#    ``scene.begin_world()``, ``scene.add_builder(robot_builder)``, adds the
+#    per-world table and object via ``_add_object(scene, world_id)``, then
+#    ``scene.end_world()``. The ground plane is added once at world ``-1``.
+#    Use ``replicate()`` for the homogeneous case; use this loop when worlds
+#    differ.
+#
+# 2. Per-world parameter arrays.
+#    Per-world properties are stored as NumPy arrays of shape
+#    ``(world_count, ...)`` and uploaded to Warp arrays indexed by
+#    ``world_id`` inside the simulation kernels. See:
+#      - ``_generate_world_params`` -- builds ``world_shapes``,
+#        ``world_half_scales`` (shape ``(n,)``), ``world_half_sizes`` (shape
+#        ``(n, 3)``), and spawn-pose randomization arrays.
+#      - ``_setup_state_machine`` -- expands ``GRASP_SPECS`` (per-shape) into
+#        per-world ``_PerWorldGraspSpec`` arrays.
+#      - ``set_target_pose_kernel`` -- the per-world kernel reads
+#        ``world_id = wp.tid()`` and indexes every per-world array by it.
+#
+# 3. Collision filters between shared and per-world bodies.
+#    Because the robot is replicated into each world but the ground is a
+#    single global shape, per-world filter pairs are added explicitly:
+#    robot link0 vs. per-world table, and per-world table vs. shared ground.
+#    Inspect via ``scene.body_shapes[link0_body]`` to enumerate the shapes
+#    of a recently-added body.
+#
+# Anchor functions (read in this order):
+#   ``Example._build_scene``         -- the per-world scene loop
+#   ``Example._generate_world_params`` -- per-world parameter arrays
+#   ``Example._add_object``          -- per-world object branch (12 shapes)
+#   ``Example._setup_state_machine`` -- per-world grasp-spec upload
+#   ``set_target_pose_kernel``       -- per-world kernel indexing
 ###########################################################################
 
 import copy
