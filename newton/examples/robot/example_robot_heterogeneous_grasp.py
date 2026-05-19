@@ -1284,10 +1284,12 @@ def set_target_pose_kernel(
         target_pos = tcp_pos_prev + lift_vec
         ctrl = gc
     elif state == wp.static(int(TaskType.HOLD)):
-        target_pos = tcp_pos_prev + lift_vec
+        # tcp_pos_prev was snapshotted at the start of HOLD (post-LIFT), so just
+        # hold there -- adding lift_vec again would compound the lift.
+        target_pos = tcp_pos_prev
         ctrl = gc
     else:
-        target_pos = tcp_pos_prev + lift_vec
+        target_pos = tcp_pos_prev
         ctrl = gc
 
     rot_target = ee_quat_prev if freeze else gr
