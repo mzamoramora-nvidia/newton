@@ -119,6 +119,11 @@ class TaskType(IntEnum):
 # Hover height above grasp_pos for the APPROACH state.
 _PRE_GRASP_HOVER_M = 0.05
 
+# Lift-success bar used by test_final: at least _MIN_LIFT_SUCCESS_RATE of worlds
+# raise their object by _LIFT_DELTA_M against the initial body-origin Z.
+_LIFT_DELTA_M = 0.07
+_MIN_LIFT_SUCCESS_RATE = 0.80
+
 
 NUM_TASKS = len(TaskType)
 TASK_NAMES = [t.name for t in TaskType]
@@ -222,6 +227,14 @@ class Example:
         self.state_1 = self.model.state()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
+        # Snapshot the per-world object body-origin Z; test_final compares the
+        # final Z against this baseline to score lift success.
+        body_q_init = self.state_0.body_q.numpy()
+        body_ws_init = self.model.body_world_start.numpy()
+        self._initial_object_z = np.array(
+            [body_q_init[int(body_ws_init[w]) + self.object_body_offset, 2] for w in range(self.world_count)]
+        )
+
         self._setup_ik()
         self._setup_state_machine()
         self.control = self.model.control()
@@ -293,6 +306,26 @@ class Example:
         body_q_np = self.state_0.body_q.numpy()
         nan_bodies = int(np.isnan(body_q_np).any(axis=-1).sum())
         assert nan_bodies == 0, f"NaN detected in {nan_bodies} body transform(s)"
+
+        body_ws_np = self.model.body_world_start.numpy()
+        final_z = np.array(
+            [body_q_np[int(body_ws_np[w]) + self.object_body_offset, 2] for w in range(self.world_count)]
+        )
+        delta = final_z - self._initial_object_z
+        lifted = delta > _LIFT_DELTA_M
+        success_rate = int(lifted.sum()) / self.world_count
+        if success_rate < _MIN_LIFT_SUCCESS_RATE:
+            failing = [
+                f"  W{w:2d} {self.world_shapes[w].name:<12} init={self._initial_object_z[w]:.4f}"
+                f" final={final_z[w]:.4f} delta={delta[w]:+.4f}"
+                for w in range(self.world_count)
+                if not lifted[w]
+            ]
+            raise AssertionError(
+                "Lift success {:.2%} below {:.2%}. Failing worlds:\n{}".format(
+                    success_rate, _MIN_LIFT_SUCCESS_RATE, "\n".join(failing)
+                )
+            )
 
     @staticmethod
     def create_parser():

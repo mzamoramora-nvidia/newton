@@ -490,6 +490,13 @@ add_example_test(
     test_options={"usd_required": True, "num-frames": 720},
     use_viewer=True,
 )
+add_example_test(
+    TestRobotExamples,
+    name="robot.example_robot_heterogeneous_grasp",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 700},
+    use_viewer=True,
+)
 
 
 class TestRobotPolicyExamples(unittest.TestCase):
