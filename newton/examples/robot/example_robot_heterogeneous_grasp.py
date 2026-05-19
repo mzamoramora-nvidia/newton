@@ -417,7 +417,11 @@ class Example:
             kh=_HYDROELASTIC_KH_PA,
             gap=0.0005,
             mu=1.0,
-            mu_torsional=0.0,
+            # Torsional/rolling friction only kicks in when condim>=4 (set per
+            # shape on the pads and objects in _setup_collision_sdf). In SDF
+            # mode this is the main lever that keeps smooth primitives from
+            # spinning out of the gripper.
+            mu_torsional=0.1,
             mu_rolling=0.0,
         )
 
@@ -950,17 +954,35 @@ class Example:
                 elif mesh.sdf is None:
                     mesh.build_sdf(max_resolution=sdf_max_res, narrow_band_range=sdf_narrow_band, margin=sdf_margin)
 
-        # ---- Pass 2: fingertip, object, and table shapes get hydroelastic flag ----
-        if hydroelastic_enabled:
-            fingertip_names = {
-                "left_pad1",
-                "left_pad2",
-                "right_pad1",
-                "right_pad2",
-                "left_follower_geom_1",
-                "right_follower_geom_0",
-            }
+        fingertip_names = {
+            "left_pad1",
+            "left_pad2",
+            "right_pad1",
+            "right_pad2",
+            "left_follower_geom_1",
+            "right_follower_geom_0",
+        }
 
+        # ---- Pass 2: condim=4 + mu_torsional on pads + objects (both modes)
+        # so MuJoCo applies torsional friction at the pad-object contact.
+        # Without condim=4 the mu_torsional field is ignored and smooth
+        # primitives spin out of the gripper in SDF mode. Also clear VISIBLE
+        # on the pads so they don't occlude the contact-surface visualization.
+        condim_attr = builder.custom_attributes["mujoco:condim"]
+        if condim_attr.values is None:
+            condim_attr.values = {}
+        for shape_idx, label in enumerate(builder.shape_label):
+            short = label.split("/")[-1] if label else ""
+            is_fingertip = short in fingertip_names
+            is_object = "object" in short
+            if is_fingertip or is_object:
+                condim_attr.values[shape_idx] = 4
+                builder.shape_material_mu_torsional[shape_idx] = self.shape_cfg.mu_torsional
+            if is_fingertip:
+                builder.shape_flags[shape_idx] &= ~newton.ShapeFlags.VISIBLE
+
+        # ---- Pass 3: fingertip, object, and table shapes get hydroelastic flag ----
+        if hydroelastic_enabled:
             hydro_count = 0
             for shape_idx, label in enumerate(builder.shape_label):
                 short = label.split("/")[-1] if label else ""
@@ -979,8 +1001,6 @@ class Example:
                     else:
                         builder.shape_material_kh[shape_idx] = _HYDROELASTIC_KH_PA
                     builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
-                    if is_fingertip:
-                        builder.shape_flags[shape_idx] &= ~newton.ShapeFlags.VISIBLE
                     hydro_count += 1
 
             print(f"[SDF setup] Marked {hydro_count} shapes as HYDROELASTIC")
