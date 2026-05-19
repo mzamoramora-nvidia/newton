@@ -92,8 +92,8 @@ For homogeneous multi-world scenes, prefer :meth:`~newton.ModelBuilder.add_world
       for world_id in range(world_count):
           scene.begin_world()
           scene.add_builder(shared)            # entities common to every world
-          scene.add_body(...)                  # per-world entities differ
-          scene.add_shape_box(body=..., hx=..., hy=..., hz=...)
+          body = scene.add_body(...)           # per-world entities differ
+          scene.add_shape_box(body=body, hx=..., hy=..., hz=...)
           scene.end_world()
 
 
