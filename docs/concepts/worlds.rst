@@ -80,6 +80,22 @@ In this example, we create a model with two worlds (world ``0`` and world ``1``)
 
 For homogeneous multi-world scenes, prefer :meth:`~newton.ModelBuilder.add_world` or :meth:`~newton.ModelBuilder.replicate` instead of manually repeating world scopes for each copy.
 
+.. tip::
+   **A useful pattern for heterogeneous scenes** is to build a shared sub-builder once (for entities common to every world, e.g. a robot), then inject it into each world inside a loop while adding the per-world entities directly:
+
+   .. code-block:: python
+
+      shared = newton.ModelBuilder()
+      # ... populate shared (e.g. the robot common to every world) ...
+
+      scene = newton.ModelBuilder()
+      for world_id in range(world_count):
+          scene.begin_world()
+          scene.add_builder(shared)            # entities common to every world
+          scene.add_body(...)                  # per-world entities differ
+          scene.add_shape_box(body=..., hx=..., hy=..., hz=...)
+          scene.end_world()
+
 
 .. _World grouping:
 
@@ -366,33 +382,6 @@ Therefore, kernels need to check whether the relative entity index is within bou
 
 This pattern of computing ``sum`` and ``max`` of per-world entity counts provides a consistent way to handle memory allocations and thread grid dimensions for heterogeneous multi-world simulations in Newton.
 
-
-.. _Heterogeneous worlds:
-
-Heterogeneous Worlds
---------------------
-
-When worlds differ from each other, build a shared sub-builder once and
-inject it into each world inside a ``for`` loop, adding the per-world
-entities between :meth:`~newton.ModelBuilder.begin_world` and
-:meth:`~newton.ModelBuilder.end_world`:
-
-.. code-block:: python
-
-   shared = newton.ModelBuilder()
-   # ... populate shared (e.g. the robot common to every world) ...
-
-   scene = newton.ModelBuilder()
-   scene.add_ground_plane()  # global entity, world -1
-   for world_id in range(world_count):
-       scene.begin_world()
-       scene.add_builder(shared)            # entities common to every world
-       scene.add_body(...)                  # per-world entities differ
-       scene.add_shape_box(body=..., hx=..., hy=..., hz=...)
-       scene.end_world()
-
-Use :meth:`~newton.ModelBuilder.replicate` when worlds are identical; use
-this loop when they aren't.
 
 See Also
 --------
