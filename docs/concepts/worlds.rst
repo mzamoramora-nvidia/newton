@@ -367,46 +367,32 @@ Therefore, kernels need to check whether the relative entity index is within bou
 This pattern of computing ``sum`` and ``max`` of per-world entity counts provides a consistent way to handle memory allocations and thread grid dimensions for heterogeneous multi-world simulations in Newton.
 
 
-.. _Heterogeneous example:
+.. _Heterogeneous worlds:
 
-Worked Example: A Heterogeneous Multi-World Scene
--------------------------------------------------
+Heterogeneous Worlds
+--------------------
 
-For a full end-to-end example of a heterogeneous multi-world simulation, see
-``newton/examples/robot/example_robot_heterogeneous_grasp.py``. It builds a
-scene in which each world contains a different object (12 shapes spanning
-primitives and meshes) grasped by a shared Franka Panda + Robotiq 2F-85
-robot. The example demonstrates three patterns that recur in any
-heterogeneous multi-world setup:
+When worlds differ from each other, build a shared sub-builder once and
+inject it into each world inside a ``for`` loop, adding the per-world
+entities between :meth:`~newton.ModelBuilder.begin_world` and
+:meth:`~newton.ModelBuilder.end_world`:
 
-1. **Per-world scene construction.** A robot+gripper sub-builder is built
-   once and reused inside a ``for world_id in range(world_count)`` loop that
-   calls :meth:`~newton.ModelBuilder.begin_world`,
-   :meth:`~newton.ModelBuilder.add_builder` (for the shared robot),
-   per-world ``add_shape_*`` / ``add_body`` calls (for the differing
-   object), and :meth:`~newton.ModelBuilder.end_world`. The ground plane is
-   added globally (world ``-1``). Use :meth:`~newton.ModelBuilder.replicate`
-   when worlds are identical; use this loop when they aren't. See
-   ``Example._build_scene``.
+.. code-block:: python
 
-2. **Per-world parameter arrays.** Per-world properties (object shape,
-   half-size, spawn pose, grasp specifications) are stored as NumPy arrays
-   of shape ``(world_count, ...)`` and uploaded to Warp arrays that the
-   simulation kernels index by ``world_id = wp.tid()``. See
-   ``Example._generate_world_params`` and ``set_target_pose_kernel``.
+   shared = newton.ModelBuilder()
+   # ... populate shared (e.g. the robot common to every world) ...
 
-3. **Collision filters between shared and per-world bodies.** Because the
-   robot is replicated into each world but the ground plane lives at world
-   ``-1``, per-world filter pairs are added explicitly via
-   ``ModelBuilder.add_shape_collision_filter_pair`` (robot link0 vs.
-   per-world table, per-world table vs. shared ground). Enumerate the
-   shapes of a recently-added body via ``scene.body_shapes[body_id]``.
+   scene = newton.ModelBuilder()
+   scene.add_ground_plane()  # global entity, world -1
+   for world_id in range(world_count):
+       scene.begin_world()
+       scene.add_builder(shared)            # entities common to every world
+       scene.add_body(...)                  # per-world entities differ
+       scene.add_shape_box(body=..., hx=..., hy=..., hz=...)
+       scene.end_world()
 
-Run with:
-
-.. code-block:: shell
-
-    python -m newton.examples robot_heterogeneous_grasp
+Use :meth:`~newton.ModelBuilder.replicate` when worlds are identical; use
+this loop when they aren't.
 
 See Also
 --------
