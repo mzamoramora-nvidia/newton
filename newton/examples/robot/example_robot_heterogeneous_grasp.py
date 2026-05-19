@@ -219,10 +219,14 @@ class GraspSpec:
 
 GRASP_SPECS: dict[ObjectShape, GraspSpec] = {
     ObjectShape.BOX: GraspSpec(overclose_fraction=0.05),
-    ObjectShape.SPHERE: GraspSpec(overclose_fraction=0.05),
-    ObjectShape.CYLINDER: GraspSpec(overclose_fraction=0.05),
-    ObjectShape.CAPSULE: GraspSpec(overclose_fraction=0.05),
-    ObjectShape.ELLIPSOID: GraspSpec(overclose_fraction=0.05),
+    # Smooth primitives need a firmer grip than the box: after contact
+    # reduction the effective pad-object contact patch on a curved surface
+    # is small with noisy normals, so the lighter 0.05 grip used by the box
+    # can let them spin out in SDF mode.
+    ObjectShape.SPHERE: GraspSpec(overclose_fraction=0.10),
+    ObjectShape.CYLINDER: GraspSpec(overclose_fraction=0.10),
+    ObjectShape.CAPSULE: GraspSpec(overclose_fraction=0.10),
+    ObjectShape.ELLIPSOID: GraspSpec(overclose_fraction=0.10),
     ObjectShape.CUP: GraspSpec(overclose_fraction=0.22),
     ObjectShape.RUBBER_DUCK: GraspSpec(overclose_fraction=0.10),
     ObjectShape.BRICK: GraspSpec(overclose_fraction=0.15),
@@ -360,16 +364,25 @@ class Example:
         delta = final_z - self._initial_object_z
         lifted = delta > _LIFT_DELTA_M
         success_rate = int(lifted.sum()) / self.world_count
+        not_lifted = [
+            f"  W{w:2d} {self.world_shapes[w].name:<12} init={self._initial_object_z[w]:.4f}"
+            f" final={final_z[w]:.4f} delta={delta[w]:+.4f}"
+            for w in range(self.world_count)
+            if not lifted[w]
+        ]
+        print(
+            "[lift] mode={} rate={:.2%} ({}/{}). Not lifted:\n{}".format(
+                self.collision_mode.name.lower(),
+                success_rate,
+                int(lifted.sum()),
+                self.world_count,
+                "\n".join(not_lifted) if not_lifted else "  (all worlds lifted)",
+            )
+        )
         if success_rate < _MIN_LIFT_SUCCESS_RATE:
-            failing = [
-                f"  W{w:2d} {self.world_shapes[w].name:<12} init={self._initial_object_z[w]:.4f}"
-                f" final={final_z[w]:.4f} delta={delta[w]:+.4f}"
-                for w in range(self.world_count)
-                if not lifted[w]
-            ]
             raise AssertionError(
                 "Lift success {:.2%} below {:.2%}. Failing worlds:\n{}".format(
-                    success_rate, _MIN_LIFT_SUCCESS_RATE, "\n".join(failing)
+                    success_rate, _MIN_LIFT_SUCCESS_RATE, "\n".join(not_lifted)
                 )
             )
 
