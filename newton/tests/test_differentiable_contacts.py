@@ -7,7 +7,16 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.geometry.differentiable_contacts import launch_differentiable_hydroelastic_stiffness
+from newton.geometry import HydroelasticSDF
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
+
+
+@wp.kernel
+def body_height_loss_kernel(body_q: wp.array[wp.transform], body_index: int, target_z: float, loss: wp.array[float]):
+    p = wp.transform_get_translation(body_q[body_index])
+    err = p[2] - target_z
+    loss[0] = err * err
 
 
 def test_no_overhead_when_disabled(test, device):
@@ -45,6 +54,94 @@ def test_arrays_allocated_when_enabled(test, device):
         test.assertIsNotNone(contacts.rigid_contact_diff_point0_world)
         test.assertIsNotNone(contacts.rigid_contact_diff_point1_world)
         test.assertTrue(contacts.rigid_contact_diff_distance.requires_grad)
+
+
+def test_hydroelastic_stiffness_gradient_through_kh(test, device):
+    """Hydroelastic stiffness replay differentiates through per-shape kh."""
+    with wp.ScopedDevice(device):
+        contacts = newton.Contacts(
+            rigid_contact_max=4,
+            soft_contact_max=0,
+            requires_grad=True,
+            device=device,
+            per_contact_shape_properties=True,
+        )
+        contacts.rigid_contact_count.assign(np.array([1], dtype=np.int32))
+        contacts.rigid_contact_shape0.assign(np.array([0, -1, -1, -1], dtype=np.int32))
+        contacts.rigid_contact_shape1.assign(np.array([1, -1, -1, -1], dtype=np.int32))
+
+        kh = wp.array([10.0, 30.0], dtype=wp.float32, requires_grad=True, device=device)
+        # k_eff = 10 * 30 / (10 + 30) = 7.5. Frozen stiffness 3.75 gives
+        # geometry factor 0.5, so d stiffness / d kh = 0.5 * d k_eff / d kh.
+        contacts.rigid_contact_stiffness.assign(np.array([3.75, 0.0, 0.0, 0.0], dtype=np.float32))
+
+        with wp.Tape() as tape:
+            launch_differentiable_hydroelastic_stiffness(contacts, kh, device=device)
+
+        seed = wp.array([1.0, 0.0, 0.0, 0.0], dtype=wp.float32, device=device)
+        tape.backward(grads={contacts.rigid_contact_stiffness: seed})
+
+        test.assertAlmostEqual(contacts.rigid_contact_stiffness.numpy()[0], 3.75, places=5)
+        grad_kh = tape.gradients.get(kh)
+        test.assertIsNotNone(grad_kh, "kh gradient should be recorded on tape")
+        np.testing.assert_allclose(grad_kh.numpy(), np.array([0.28125, 0.03125], dtype=np.float32), rtol=1e-5)
+
+
+def test_hydroelastic_kh_gradient_through_solver_step(test, device):
+    """Gradients flow from a body trajectory loss to hydroelastic shape kh."""
+    with wp.ScopedDevice(device):
+        box_half = 0.1
+        shape_cfg = newton.ModelBuilder.ShapeConfig(
+            sdf_max_resolution=32,
+            sdf_narrow_band_range=(-0.04, 0.04),
+            is_hydroelastic=True,
+            gap=0.01,
+            kh=2.0e5,
+            mu=0.0,
+        )
+
+        builder = newton.ModelBuilder(gravity=0.0)
+        builder.add_shape_box(
+            body=-1,
+            xform=wp.transform(wp.vec3(0.0, 0.0, box_half), wp.quat_identity()),
+            hx=box_half,
+            hy=box_half,
+            hz=box_half,
+            cfg=shape_cfg,
+        )
+        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 2.0 * box_half - 0.015), wp.quat_identity()))
+        builder.add_shape_box(body=body, hx=box_half, hy=box_half, hz=box_half, cfg=shape_cfg)
+        model = builder.finalize(device=device, requires_grad=True)
+
+        solver = newton.solvers.SolverSemiImplicit(model, angular_damping=0.0)
+        pipeline = newton.CollisionPipeline(
+            model,
+            broad_phase="explicit",
+            sdf_hydroelastic_config=HydroelasticSDF.Config(
+                buffer_fraction=1.0,
+                buffer_mult_iso=3,
+                buffer_mult_contact=2,
+            ),
+            requires_grad=True,
+        )
+        contacts = pipeline.contacts()
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        loss = wp.zeros(1, dtype=wp.float32, requires_grad=True, device=device)
+
+        with wp.Tape() as tape:
+            state_0.clear_forces()
+            pipeline.collide(state_0, contacts)
+            solver.step(state_0, state_1, control, contacts, 1.0 / 30.0)
+            wp.launch(body_height_loss_kernel, dim=1, inputs=[state_1.body_q, body, 0.21], outputs=[loss])
+
+        tape.backward(loss)
+        test.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0, "Expected hydroelastic contacts")
+        grad_kh = tape.gradients.get(model.shape_material_kh)
+        test.assertIsNotNone(grad_kh, "shape_material_kh gradient should be recorded on tape")
+        grad_np = grad_kh.numpy()
+        test.assertGreater(float(np.max(np.abs(grad_np))), 1.0e-12, f"Expected non-zero kh gradient, got {grad_np}")
 
 
 def test_sphere_on_plane_distance(test, device):
@@ -532,6 +629,18 @@ add_function_test(
     TestDifferentiableContacts,
     "test_arrays_allocated_when_enabled",
     test_arrays_allocated_when_enabled,
+    devices=devices,
+)
+add_function_test(
+    TestDifferentiableContacts,
+    "test_hydroelastic_stiffness_gradient_through_kh",
+    test_hydroelastic_stiffness_gradient_through_kh,
+    devices=devices,
+)
+add_function_test(
+    TestDifferentiableContacts,
+    "test_hydroelastic_kh_gradient_through_solver_step",
+    test_hydroelastic_kh_gradient_through_solver_step,
     devices=devices,
 )
 add_function_test(

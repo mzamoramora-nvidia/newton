@@ -209,12 +209,16 @@ class Contacts:
 
             # contact stiffness/damping/friction (only allocated if per_contact_shape_properties is enabled)
             if self.per_contact_shape_properties:
-                self.rigid_contact_stiffness = wp.zeros(rigid_contact_max, dtype=wp.float32)
+                self.rigid_contact_stiffness = wp.zeros(
+                    rigid_contact_max, dtype=wp.float32, requires_grad=requires_grad
+                )
                 """Per-contact stiffness [N/m], shape (rigid_contact_max,), dtype float."""
                 self.rigid_contact_damping = wp.zeros(rigid_contact_max, dtype=wp.float32)
                 """Per-contact damping [N·s/m], shape (rigid_contact_max,), dtype float."""
                 self.rigid_contact_friction = wp.zeros(rigid_contact_max, dtype=wp.float32)
                 """Per-contact friction coefficient [dimensionless], shape (rigid_contact_max,), dtype float."""
+                self.rigid_contact_stiffness_factor = wp.zeros(rigid_contact_max, dtype=wp.float32)
+                """Frozen hydroelastic geometry factor for differentiable stiffness replay."""
             else:
                 self.rigid_contact_stiffness = None
                 """Per-contact stiffness [N/m], shape (rigid_contact_max,), dtype float."""
@@ -222,6 +226,8 @@ class Contacts:
                 """Per-contact damping [N·s/m], shape (rigid_contact_max,), dtype float."""
                 self.rigid_contact_friction = None
                 """Per-contact friction coefficient [dimensionless], shape (rigid_contact_max,), dtype float."""
+                self.rigid_contact_stiffness_factor = None
+                """Frozen hydroelastic geometry factor for differentiable stiffness replay."""
 
             # Contact matching index — filled by the collision pipeline when
             # contact_matching is enabled.
@@ -339,6 +345,7 @@ class Contacts:
                 self.rigid_contact_stiffness.zero_()
                 self.rigid_contact_damping.zero_()
                 self.rigid_contact_friction.zero_()
+                self.rigid_contact_stiffness_factor.zero_()
 
             if self.rigid_contact_match_index is not None:
                 self.rigid_contact_match_index.fill_(-1)

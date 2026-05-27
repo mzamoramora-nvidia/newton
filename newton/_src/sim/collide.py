@@ -14,7 +14,10 @@ from ..geometry.collision_core import compute_tight_aabb_from_support
 from ..geometry.contact_data import ContactData, make_contact_sort_key
 from ..geometry.contact_match import ContactMatcher
 from ..geometry.contact_sort import ContactSorter
-from ..geometry.differentiable_contacts import launch_differentiable_contact_augment
+from ..geometry.differentiable_contacts import (
+    launch_differentiable_contact_augment,
+    launch_differentiable_hydroelastic_stiffness,
+)
 from ..geometry.flags import ShapeFlags
 from ..geometry.kernels import create_soft_contacts
 from ..geometry.narrow_phase import NarrowPhase
@@ -1179,6 +1182,20 @@ class CollisionPipeline:
                 shape_body=model.shape_body,
                 device=self.device,
                 **sticky_offsets,
+            )
+
+        # Hydroelastic contact geometry is produced by tape-disabled SDF and
+        # reduction kernels. Replay only the per-contact stiffness through
+        # differentiable shape_material_kh so material identification can tune kh.
+        if (
+            self.requires_grad
+            and self.hydroelastic_sdf is not None
+            and contacts.rigid_contact_stiffness is not None
+        ):
+            launch_differentiable_hydroelastic_stiffness(
+                contacts=contacts,
+                shape_material_kh=model.shape_material_kh,
+                device=self.device,
             )
 
         # Differentiable contact augmentation: reconstruct world-space contact

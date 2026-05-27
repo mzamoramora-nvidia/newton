@@ -620,6 +620,14 @@ add_example_test(
 
 add_example_test(
     TestDiffSimExamples,
+    name="diffsim.example_diffsim_hydroelastic_kh_two_bounce",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 700},
+    use_viewer=True,
+)
+
+add_example_test(
+    TestDiffSimExamples,
     name="diffsim.example_diffsim_bear",
     devices=test_devices,
     test_options={"usd_required": True, "num-frames": 4 * 60},  # train_iters * sim_steps

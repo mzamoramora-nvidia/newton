@@ -1111,6 +1111,7 @@ class HydroelasticContactReduction:
                 grid_size,
             ],
             device=self.device,
+            record_tape=False,
         )
         # --- accumulate reduced friction moments per normal bin (Phase 1.5) ---
         if self._accumulate_moments_kernel is not None:
@@ -1133,6 +1134,7 @@ class HydroelasticContactReduction:
                     grid_size,
                 ],
                 device=self.device,
+                record_tape=False,
             )
         # --- export reduced contacts (Phase 2) ---
         wp.launch(

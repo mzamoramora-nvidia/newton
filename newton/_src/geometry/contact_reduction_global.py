@@ -868,6 +868,7 @@ class GlobalContactReducer:
                 num_threads,
             ],
             device=self.device,
+            record_tape=False,
         )
         # Zero the active-slots count in a separate kernel so the write is
         # ordered (by the CUDA kernel-launch boundary) after every read in
@@ -877,6 +878,7 @@ class GlobalContactReducer:
             dim=1,
             inputs=[self.hashtable.active_slots, self.hashtable.capacity],
             device=self.device,
+            record_tape=False,
         )
 
     def get_data_struct(self) -> GlobalContactReducerData:
