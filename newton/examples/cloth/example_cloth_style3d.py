@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+# Command: python -m newton.examples cloth_style3d
+
 import warp as wp
 from pxr import Usd
 

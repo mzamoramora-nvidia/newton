@@ -4,6 +4,8 @@
 ###########################################################################
 # Example Cable Bundle Hysteresis
 #
+# Command: python -m newton.examples cable_bundle_hysteresis
+#
 # Demonstrates Dahl friction model for cable bending hysteresis.
 # Creates a bundle of 7 cables passing through moving obstacles that
 # apply cyclic loading (load -> hold -> release). The Dahl model captures

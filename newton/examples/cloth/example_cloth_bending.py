@@ -4,6 +4,8 @@
 ###########################################################################
 # Example Sim Cloth Bending
 #
+# Command: python -m newton.examples cloth_bending
+#
 # This simulation demonstrates cloth bending behavior using the Vertex Block
 # Descent (VBD) integrator. A cloth mesh, initially curved, is dropped on
 # the ground. The cloth maintains its curved shape due to bending stiffness,

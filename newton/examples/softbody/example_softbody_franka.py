@@ -4,6 +4,8 @@
 ###########################################################################
 # Example Soft Body Franka
 #
+# Command: python -m newton.examples softbody_franka
+#
 # Demonstrates a Franka Panda robot grasping a deformable rubber duck
 # on a table. The robot is positioned via Newton's GPU IK solver;
 # Featherstone is used as a kinematic integrator to produce proper

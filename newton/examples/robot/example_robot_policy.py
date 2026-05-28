@@ -11,11 +11,11 @@
 # Press "p" to reset the robot.
 # Press "i", "j", "k", "l", "u", "o" to move the robot.
 # Run this example with:
-# python -m newton.examples robot_policy --robot g1_29dof
-# python -m newton.examples robot_policy --robot g1_23dof
-# python -m newton.examples robot_policy --robot go2
-# python -m newton.examples robot_policy --robot anymal
-# python -m newton.examples robot_policy --robot anymal --physx
+# Command: python -m newton.examples robot_policy --robot g1_29dof
+# Command: python -m newton.examples robot_policy --robot g1_23dof
+# Command: python -m newton.examples robot_policy --robot go2
+# Command: python -m newton.examples robot_policy --robot anymal
+# Command: python -m newton.examples robot_policy --robot anymal --physx
 ###########################################################################
 
 from dataclasses import dataclass

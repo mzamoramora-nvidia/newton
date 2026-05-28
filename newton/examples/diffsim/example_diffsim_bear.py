@@ -4,6 +4,8 @@
 ###########################################################################
 # Example Diffsim Bear
 #
+# Command: python -m newton.examples diffsim_bear
+#
 # Trains a tetrahedral mesh bear to run. Feeds 8 time-varying input
 # phases as inputs into a single-layer fully connected network with a tanh
 # activation function. Interprets the output of the network as tet

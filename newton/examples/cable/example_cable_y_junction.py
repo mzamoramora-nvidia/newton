@@ -4,6 +4,8 @@
 ###########################################################################
 # Example Cable Y-Junction
 #
+# Command: python -m newton.examples cable_y_junction
+#
 # This example shows how to simulate a Y-junction using `builder.add_rod_graph(...)`
 # with a shared junction node.
 #

@@ -4,6 +4,8 @@
 ###########################################################################
 # Example Cable Pile
 #
+# Command: python -m newton.examples cable_pile
+#
 # Demonstrates complex cable-to-cable contact and settling behavior.
 # Creates a pile of cables with alternating
 # orientations (X/Y axis) and sinusoidal waviness. Tests multi-body contact

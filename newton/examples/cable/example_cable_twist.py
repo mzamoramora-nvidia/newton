@@ -4,6 +4,8 @@
 ###########################################################################
 # Example Cable Twist
 #
+# Command: python -m newton.examples cable_twist
+#
 # Demonstrates twist propagation along cables with dynamic spinning.
 # Shows 3 cables side-by-side with zigzag paths and increasing bend stiffness.
 # The first segment of each cable continuously spins, propagating twist along the cable.

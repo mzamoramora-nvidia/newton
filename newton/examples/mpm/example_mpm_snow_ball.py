@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+# Command: python -m newton.examples mpm_snow_ball
+
 import warnings
 
 import numpy as np

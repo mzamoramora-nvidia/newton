@@ -8,6 +8,8 @@ flow out through a narrow aperture at the bottom, demonstrating viscoplastic
 material behavior with mesh collisions.
 """
 
+# Command: python -m newton.examples mpm_viscous
+
 import numpy as np
 import warp as wp
 

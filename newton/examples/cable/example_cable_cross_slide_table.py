@@ -4,6 +4,8 @@
 ###########################################################################
 # Example Cable Cross-Slide Table
 #
+# Command: python -m newton.examples cable_cross_slide_table
+#
 # Demonstrates a cable-driven cross-slide table inspired by the Simscape
 # Multibody cable-driven XY table example https://www.mathworks.com/help/sm/ug/cable-driven-xy-table-with-cross-base.html.
 # The mechanism is laid out on the ground plane: the blue base is fixed, the green carriage moves horizontally,

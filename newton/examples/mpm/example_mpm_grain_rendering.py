@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+# Command: python -m newton.examples mpm_grain_rendering
+
 import numpy as np
 import warp as wp
 
