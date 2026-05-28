@@ -7,8 +7,8 @@
 # Demonstrates heightfield terrain with objects dropped onto it.
 # Supports both Newton's native CollisionPipeline and MuJoCo solver.
 #
-# Command: uv run -m newton.examples basic_heightfield
-# MuJoCo: uv run -m newton.examples basic_heightfield --solver mujoco
+# Command: python -m newton.examples basic_heightfield
+# MuJoCo: python -m newton.examples basic_heightfield --solver mujoco
 #
 ###########################################################################
 

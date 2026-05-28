@@ -14,7 +14,7 @@
 # - Height: 8.89 cm (3.5 inches) = 0.0889 m
 # - Resolution: 4x6 cells per card
 #
-# Command: uv run -m newton.examples cloth_poker_cards
+# Command: python -m newton.examples cloth_poker_cards
 #
 ###########################################################################
 

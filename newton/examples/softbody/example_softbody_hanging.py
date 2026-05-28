@@ -8,7 +8,7 @@
 # from fixed particles on the left side. Four grids with different damping values
 # (1e-1 to 1e-4) showcase the effect of damping on Neo-Hookean elastic behavior.
 #
-# Command: uv run -m newton.examples softbody.example_softbody_hanging
+# Command: python -m newton.examples softbody_hanging
 #
 ###########################################################################
 

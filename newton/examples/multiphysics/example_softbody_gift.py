@@ -8,7 +8,7 @@
 # straps wrapped around them. The blocks fall under gravity, and the cloth
 # straps hold them together.
 #
-# Command: uv run -m newton.examples softbody_gift
+# Command: python -m newton.examples softbody_gift
 #
 ###########################################################################
 

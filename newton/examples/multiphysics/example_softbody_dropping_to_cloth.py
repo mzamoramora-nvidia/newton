@@ -8,7 +8,7 @@
 # dropping onto a cloth sheet. The soft body uses Neo-Hookean elasticity
 # and deforms on impact with the cloth.
 #
-# Command: python -m newton.examples.multiphysics.example_softbody_dropping_to_cloth
+# Command: python -m newton.examples softbody_dropping_to_cloth
 #
 ###########################################################################
 

@@ -5,7 +5,7 @@
 # Cloth Rollers
 #
 # A rolled cloth mesh that unrolls as the inner seam rotates.
-# Command: uv run -m newton.examples cloth_rollers
+# Command: python -m newton.examples cloth_rollers
 #
 ###########################################################################
 

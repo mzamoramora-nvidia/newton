@@ -8,7 +8,7 @@
 # to a kinematic root link with a prescribed revolute joint motion. Two
 # static annular boundary meshes keep dynamic "bags" on the belt.
 #
-# Command: uv run -m newton.examples basic_conveyor
+# Command: python -m newton.examples basic_conveyor
 #
 ###########################################################################
 

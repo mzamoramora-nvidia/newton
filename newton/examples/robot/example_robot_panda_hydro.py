@@ -8,7 +8,7 @@
 # Franka Panda arm with SDF hydroelastic contacts and inverse kinematics.
 # Supports different scene configurations: pen or cube.
 #
-# Command: python -m newton.examples panda_hydro --scene pen --world-count 1
+# Command: python -m newton.examples robot_panda_hydro --scene pen --world-count 1
 #
 ###########################################################################
 

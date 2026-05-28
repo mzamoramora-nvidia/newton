@@ -9,7 +9,7 @@
 # for two-axis motion. The latch deflects on entry and locks
 # the plug once fully inserted.
 #
-# Command: uv run -m newton.examples contacts_rj45_plug
+# Command: python -m newton.examples contacts_rj45_plug
 #
 ###########################################################################
 
