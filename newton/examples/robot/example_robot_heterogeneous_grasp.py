@@ -112,6 +112,20 @@ _SPAWN_YAW_RANGE_DEG = 30.0
 # Hydroelastic stiffness applied to object meshes and gripper pads. [Pa]
 _HYDROELASTIC_KH_PA = 2e11
 
+# SDF construction parameters for contact-critical shapes. The padding is only
+# the SDF volume AABB padding; it does not inflate the physical collision
+# surface. Keep it at least as large as the pair contact gap used by SDF mesh
+# contacts (2 * ShapeConfig.gap below) so near-surface queries stay inside the
+# sampled texture volume.
+_SDF_CONTACT_QUERY_PADDING_M = 0.001
+_SDF_CONTACT_NARROW_BAND_M = (-0.008, 0.008)
+_SDF_DEFAULT_NARROW_BAND_M = (-0.003, 0.003)
+_SDF_TABLE_NARROW_BAND_M = (-0.015, 0.015)
+_SDF_OBJECT_MAX_RES = 96
+_SDF_FINGERTIP_MAX_RES = 96
+_SDF_DEFAULT_MAX_RES = 64
+_SDF_TABLE_MAX_RES = 176
+
 # Simulation rate: sim_dt = frame_dt / _SUBSTEPS_PER_FRAME. Collision pipeline
 # runs every _COLLIDE_EVERY_N_SUBSTEPS substeps.
 _SUBSTEPS_PER_FRAME = 4
@@ -906,33 +920,48 @@ class Example:
         table (so the contact-surface visualization always has at least one
         pair to draw). Only applied in NEWTON_HYDROELASTIC mode.
         """
-        # Default +/- 3 mm narrow band, wider than the max pad-into-surface
-        # squeeze. The table uses a larger band because its lower SDF
-        # resolution gives a voxel size of ~5 mm.
-        sdf_narrow_band_default = (-0.003, 0.003)
-        sdf_narrow_band_table = (-0.015, 0.015)
         hydroelastic_enabled = self.collision_mode == CollisionMode.NEWTON_HYDROELASTIC
+        fingertip_names = {
+            "left_pad1",
+            "left_pad2",
+            "right_pad1",
+            "right_pad2",
+            "left_follower_geom_0",
+            "left_follower_geom_1",
+            "right_follower_geom_0",
+            "right_follower_geom_1",
+        }
 
         # ---- Pass 1: build SDF on every collision shape ----
-        # Object shapes get higher resolution (96) for better contact quality;
-        # robot links, gripper, and table use 64.
+        # Object and fingertip shapes get wider narrow bands for sustained
+        # grasp contacts. Non-contact robot links keep the smaller band.
         for shape_idx in range(builder.shape_count):
             if not (builder.shape_flags[shape_idx] & newton.ShapeFlags.COLLIDE_SHAPES):
                 continue
 
             label = builder.shape_label[shape_idx] if shape_idx < len(builder.shape_label) else ""
-            is_object = "object" in label
-            is_table = "table" in label
+            short = label.split("/")[-1] if label else ""
+            is_object = "object" in short
+            is_table = "table" in short
+            is_fingertip = short in fingertip_names
+            is_contact_critical = is_object or is_fingertip or is_table
             if is_object:
-                sdf_max_res = 96
+                sdf_max_res = _SDF_OBJECT_MAX_RES
+            elif is_fingertip:
+                sdf_max_res = _SDF_FINGERTIP_MAX_RES
             elif is_table:
                 # 0.85 m table / ~5 mm voxel target, rounded up to a multiple of 8 (tile-aligned).
-                sdf_max_res = 176
+                sdf_max_res = _SDF_TABLE_MAX_RES
             else:
-                sdf_max_res = 64
-            # Object meshes get a smaller margin to avoid inflating thin features
-            sdf_margin = 0.0002 if is_object else self.shape_cfg.gap
-            sdf_narrow_band = sdf_narrow_band_table if is_table else sdf_narrow_band_default
+                sdf_max_res = _SDF_DEFAULT_MAX_RES
+
+            sdf_margin = _SDF_CONTACT_QUERY_PADDING_M if is_contact_critical else self.shape_cfg.gap
+            if is_table:
+                sdf_narrow_band = _SDF_TABLE_NARROW_BAND_M
+            elif is_object or is_fingertip:
+                sdf_narrow_band = _SDF_CONTACT_NARROW_BAND_M
+            else:
+                sdf_narrow_band = _SDF_DEFAULT_NARROW_BAND_M
 
             if builder.shape_type[shape_idx] == newton.GeoType.BOX:
                 # Convert BOX to MESH + SDF (needed for pad shapes from MJCF)
@@ -966,15 +995,6 @@ class Example:
                     mesh.build_sdf(max_resolution=sdf_max_res, narrow_band_range=sdf_narrow_band, margin=sdf_margin)
                 elif mesh.sdf is None:
                     mesh.build_sdf(max_resolution=sdf_max_res, narrow_band_range=sdf_narrow_band, margin=sdf_margin)
-
-        fingertip_names = {
-            "left_pad1",
-            "left_pad2",
-            "right_pad1",
-            "right_pad2",
-            "left_follower_geom_1",
-            "right_follower_geom_0",
-        }
 
         # ---- Pass 2: condim=4 + mu_torsional on pads + objects (both modes)
         # so MuJoCo applies torsional friction at the pad-object contact.
