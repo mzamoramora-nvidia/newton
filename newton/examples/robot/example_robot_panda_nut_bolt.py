@@ -9,8 +9,10 @@
 # IK-based control. The nut threads onto the bolt under gravity after
 # release. Supports M20 (default) and M16 assemblies via --assembly.
 #
-# Command: python -m newton.examples robot_panda_nut_bolt --world-count 4
-# Command: python -m newton.examples robot_panda_nut_bolt --assembly m16_loose
+# Commands:
+# python -m newton.examples robot_panda_nut_bolt --world-count 4
+# python -m newton.examples robot_panda_nut_bolt --assembly m16_loose
+# python -m newton.examples robot_panda_nut_bolt --test --world-count 128 --num-frames 3600 --viewer null
 #
 ###########################################################################
 
@@ -801,7 +803,7 @@ class Example:
             self._pen_rigid_current_wp = wp.zeros((self.world_count, 3), dtype=float)
             self._pen_hydro_current_wp = wp.zeros((self.world_count, 3), dtype=float)
 
-        # SPS (steps per second) tracker — lightweight, always on.
+        # Performance tracker — lightweight, always on.
         self._sps_frame_count = 0
         self._sps_last_time = time.perf_counter()
         self._sps_samples: list[float] = []
@@ -1301,7 +1303,7 @@ class Example:
         self._update_sps()
 
     def _update_sps(self):
-        """Print SPS every ~1s with running average and std deviation."""
+        """Print performance every ~1s with running average and std deviation."""
         self._sps_frame_count += 1
         now = time.perf_counter()
         elapsed = now - self._sps_last_time
@@ -1315,7 +1317,7 @@ class Example:
         if not self._sps_warmup_done:
             self._sps_warmup_done = True
             print(
-                f"[SPS] sim_time={self.sim_time:.2f}s  {sps:.1f} steps/s  "
+                f"[Perf] frame={self._gui_frame:4d}  sim_time={self.sim_time:.2f}s  {sps:.1f} steps/s  "
                 f"({sps_per_env:.1f}/env, {self.world_count} worlds) (warmup)"
             )
             return
@@ -1325,7 +1327,7 @@ class Example:
         avg = sum(self._sps_samples) / n
         std = ((sum((s - avg) ** 2 for s in self._sps_samples) / (n - 1)) ** 0.5) if n > 1 else 0.0
         print(
-            f"[SPS] sim_time={self.sim_time:.2f}s  {sps:.1f} steps/s  "
+            f"[Perf] frame={self._gui_frame:4d}  sim_time={self.sim_time:.2f}s  {sps:.1f} steps/s  "
             f"({sps_per_env:.1f}/env, {self.world_count} worlds)  "
             f"avg={avg:.1f}  std={std:.1f}  n={n}"
         )
