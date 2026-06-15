@@ -735,7 +735,7 @@ class Example:
         self.control = self.model.control()
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
-        wp.copy(self.control.joint_target_pos[:9], self.model.joint_q[:9])
+        wp.copy(self.control.joint_target_q[:9], self.model.joint_q[:9])
 
         # IK and tasks
         self.state = self.model.state()
@@ -980,7 +980,7 @@ class Example:
             7.8549200e-01,
         ]
         builder.joint_q[:9] = [*init_q, 0.05, 0.05]
-        builder.joint_target_pos[:9] = [*init_q, 1.0, 1.0]
+        builder.joint_target_q[:9] = [*init_q, 1.0, 1.0]
 
         # Joint gains (high values needed with gravity compensation)
         builder.joint_target_ke[:9] = [4500, 4500, 3500, 3500, 2000, 2000, 2000, 100, 100]
@@ -1226,7 +1226,7 @@ class Example:
             self.ik_solver.step(self.joint_q_ik, self.joint_q_ik, iterations=self.ik_iters)
 
         # Set joint target positions from IK solution + gripper targets
-        joint_target_view = self.control.joint_target_pos.reshape((self.world_count, -1))
+        joint_target_view = self.control.joint_target_q.reshape((self.world_count, -1))
         wp.copy(dest=joint_target_view[:, :7], src=self.joint_q_ik[:, :7])
         wp.copy(dest=joint_target_view[:, 7:9], src=self.gripper_target[:, :2])
 
