@@ -1,0 +1,143 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Parity tests for the example ``--load-usd`` flag.
+
+For each deformable example that supports ``--load-usd``, build it both ways
+(procedural default and from the bundled USD asset) and assert the constructed
+model and initial simulation state are equivalent: identical element counts and
+matching point clouds / mass multisets. This guarantees the USD round-trip
+reproduces the procedural setup; trajectory parity beyond t=0 is not asserted, as
+the asset's float round-trip leaves sub-1e-4 differences a chaotic solve would
+amplify.
+
+Each build runs in its own subprocess (like the example tests) so global
+state from one example never leaks into another's construction.
+"""
+
+import importlib
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+import numpy as np
+import warp as wp
+
+import newton
+import newton.examples
+from newton.tests.unittest_utils import USD_AVAILABLE, add_function_test
+
+# Examples carrying a --load-usd flag (procedural default + USD opt-in).
+_LOAD_USD_EXAMPLES = [
+    "newton.examples.cable.example_cable_twist",
+    "newton.examples.cable.example_cable_pile",
+    "newton.examples.cable.example_cable_bundle_hysteresis",
+    "newton.examples.cable.example_cable_cross_slide_table",
+    "newton.examples.cloth.example_cloth_bending",
+    "newton.examples.cloth.example_cloth_hanging",
+    "newton.examples.softbody.example_softbody_hanging",
+    "newton.examples.multiphysics.example_rigid_soft_contact",
+]
+
+
+def _dump_initial_state(module_path: str, load_usd: bool, out_path: str):
+    """Build the example on CPU and save its counts + initial state to ``out_path``."""
+    mod = importlib.import_module(module_path)
+    parser = mod.Example.create_parser()
+    args = newton.examples.default_args(parser)
+    args.load_usd = load_usd
+
+    viewer = newton.viewer.ViewerNull(num_frames=1)
+    with wp.ScopedDevice("cpu"):
+        example = mod.Example(viewer, args)
+
+    model = example.model
+    state = getattr(example, "state_0", None) or model.state()
+    arrays = {
+        "particle_count": np.int64(model.particle_count),
+        "body_count": np.int64(model.body_count),
+        "joint_count": np.int64(model.joint_count),
+        "tri_count": np.int64(getattr(model, "tri_count", 0)),
+        "edge_count": np.int64(getattr(model, "edge_count", 0)),
+        "tet_count": np.int64(getattr(model, "tet_count", 0)),
+    }
+    if model.particle_count:
+        arrays["particle_pos"] = state.particle_q.numpy()
+        arrays["particle_mass"] = model.particle_mass.numpy()
+    if model.body_count:
+        arrays["body_pos"] = state.body_q.numpy()[:, :3]
+        arrays["body_mass"] = model.body_mass.numpy()
+    np.savez(out_path, **arrays)
+
+
+def _sorted_rows(arr: np.ndarray) -> np.ndarray:
+    return arr if arr.size == 0 else arr[np.lexsort(arr.T[::-1])]
+
+
+def _build_in_subprocess(module_path: str, load_usd: bool, out_path: str):
+    """Run _dump_initial_state for one (example, flag) in an isolated subprocess."""
+    cmd = [sys.executable, __file__, module_path, "1" if load_usd else "0", out_path]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"building {module_path} (load_usd={load_usd}) failed:\n{result.stderr}")
+
+
+def _check_load_usd_parity(test: unittest.TestCase, device, module_path: str):
+    del device  # builds run on CPU inside the subprocess
+    with tempfile.TemporaryDirectory() as tmp:
+        proc_path = str(Path(tmp) / "proc.npz")
+        usd_path = str(Path(tmp) / "usd.npz")
+        _build_in_subprocess(module_path, False, proc_path)
+        _build_in_subprocess(module_path, True, usd_path)
+        proc = np.load(proc_path)
+        usd = np.load(usd_path)
+
+        for key in ("particle_count", "body_count", "joint_count", "tri_count", "edge_count", "tet_count"):
+            test.assertEqual(
+                int(proc[key]), int(usd[key]), f"{module_path}: {key} differs ({int(proc[key])} vs {int(usd[key])})"
+            )
+        for key, atol in (("particle_pos", 1e-3), ("body_pos", 1e-3)):
+            if key in proc.files:
+                np.testing.assert_allclose(
+                    _sorted_rows(usd[key]), _sorted_rows(proc[key]), atol=atol, err_msg=f"{module_path}: {key} differs"
+                )
+        for key in ("particle_mass", "body_mass"):
+            if key in proc.files:
+                np.testing.assert_allclose(
+                    np.sort(usd[key]), np.sort(proc[key]), rtol=1e-4, atol=1e-6, err_msg=f"{module_path}: {key} differs"
+                )
+
+
+class TestExampleLoadUsdParity(unittest.TestCase):
+    """``--load-usd`` reproduces the procedural example setup."""
+
+
+for _module_path in _LOAD_USD_EXAMPLES:
+    _short = _module_path.rsplit(".", 1)[1].removeprefix("example_")
+    add_function_test(
+        TestExampleLoadUsdParity,
+        f"test_load_usd_parity_{_short}",
+        _check_load_usd_parity,
+        devices=None if USD_AVAILABLE else [],
+        check_output=False,
+        module_path=_module_path,
+    )
+
+
+if __name__ == "__main__":
+    # Subprocess entry point: build one example variant and dump its initial state.
+    _dump_initial_state(sys.argv[1], sys.argv[2] == "1", sys.argv[3])
