@@ -916,6 +916,42 @@ add_example_test(
     use_viewer=True,
 )
 
+# --load-usd variants: build the cloth / soft body from the bundled USD assets
+# instead of procedurally, guarding the round-trip of the committed assets + the
+# importer. GPU-only to avoid doubling CPU CI time on the larger meshes.
+add_example_test(
+    TestClothExamples,
+    name="cloth.example_cloth_bending",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 400, "load_usd": True, "usd_required": True},
+    use_viewer=True,
+    test_suffix="load_usd",
+)
+add_example_test(
+    TestClothExamples,
+    name="cloth.example_cloth_hanging",
+    devices=cuda_test_devices,
+    test_options={"load_usd": True, "usd_required": True},
+    use_viewer=True,
+    test_suffix="load_usd",
+)
+add_example_test(
+    TestSoftbodyExamples,
+    name="softbody.example_softbody_hanging",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 120, "load_usd": True, "usd_required": True},
+    use_viewer=True,
+    test_suffix="load_usd",
+)
+add_example_test(
+    TestMultiphysicsExamples,
+    name="multiphysics.example_rigid_soft_contact",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 180, "solver": "vbd", "load_usd": True, "usd_required": True},
+    use_viewer=True,
+    test_suffix="load_usd",
+)
+
 
 class TestKaminoExamples(unittest.TestCase):
     pass

@@ -12,6 +12,9 @@
 #
 ###########################################################################
 
+import argparse
+
+import numpy as np
 import warp as wp
 
 import newton
@@ -22,6 +25,7 @@ class Example:
     def __init__(self, viewer, args):
         self.viewer = viewer
         self.solver_type = args.solver
+        self.load_usd = bool(getattr(args, "load_usd", False))
         self.sim_time = 0.0
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -45,24 +49,46 @@ class Example:
         damping_values = [1e4, 1e3, 1e2, 1e1]
         spacing = 0.6  # Space between grids along Y-axis
 
-        for i, k_damp in enumerate(damping_values):
-            y_offset = i * spacing
-            builder.add_soft_grid(
-                pos=wp.vec3(0.0, 1.0 + y_offset, 1.0),
-                rot=wp.quat_identity(),
-                vel=wp.vec3(0.0, 0.0, 0.0),
-                dim_x=dim_x,
-                dim_y=dim_y,
-                dim_z=dim_z,
-                cell_x=cell_size,
-                cell_y=cell_size,
-                cell_z=cell_size,
-                density=1.0e3,
-                k_mu=1.0e5,
-                k_lambda=1.0e5,
-                k_damp=k_damp,
-                fix_left=True,
-            )
+        if self.load_usd:
+            # The bundled asset stores the four soft grids as TetMesh prims with a
+            # bound physics material (E, nu, density). k_damp and fix_left are not
+            # part of that base schema, so re-apply them per body after import.
+            result = builder.add_usd(newton.examples.get_asset("softbody_hanging.usda"))
+            for i, k_damp in enumerate(damping_values):
+                soft = result["path_soft_map"][f"/World/SoftBody_{i}"]
+                p_start, p_end = soft["particle"]
+                t_start, t_end = soft["tet"]
+
+                # Re-apply per-element damping (tet_materials row is k_mu, k_lambda, k_damp).
+                for t in range(t_start, t_end):
+                    k_mu, k_lambda, _ = builder.tet_materials[t]
+                    builder.tet_materials[t] = (k_mu, k_lambda, k_damp)
+
+                # Re-pin the minimum-x layer (matches fix_left) by zeroing its mass.
+                xs = np.array(builder.particle_q[p_start:p_end])[:, 0]
+                min_x = xs.min()
+                for j, x in enumerate(xs):
+                    if abs(x - min_x) < 1.0e-6:
+                        builder.particle_mass[p_start + j] = 0.0
+        else:
+            for i, k_damp in enumerate(damping_values):
+                y_offset = i * spacing
+                builder.add_soft_grid(
+                    pos=wp.vec3(0.0, 1.0 + y_offset, 1.0),
+                    rot=wp.quat_identity(),
+                    vel=wp.vec3(0.0, 0.0, 0.0),
+                    dim_x=dim_x,
+                    dim_y=dim_y,
+                    dim_z=dim_z,
+                    cell_x=cell_size,
+                    cell_y=cell_size,
+                    cell_z=cell_size,
+                    density=1.0e3,
+                    k_mu=1.0e5,
+                    k_lambda=1.0e5,
+                    k_damp=k_damp,
+                    fix_left=True,
+                )
 
         # Color the mesh for VBD solver
         builder.color()
@@ -147,6 +173,12 @@ class Example:
             type=str,
             choices=["vbd"],
             default="vbd",
+        )
+        parser.add_argument(
+            "--load-usd",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Load soft bodies from the bundled USD asset instead of building them procedurally.",
         )
         return parser
 
