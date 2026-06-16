@@ -10,6 +10,8 @@
 #
 ###########################################################################
 
+import argparse
+
 import numpy as np
 import warp as wp
 from newton.solvers.experimental.coupled import SolverCoupledProxy
@@ -102,6 +104,7 @@ class Example:
         self.solver_type = args.solver
         self.rigid_solver = _normalized_rigid_solver_name(args.rigid_solver)
         self.soft_solver = args.soft_solver if self.solver_type == "coupled" else self.solver_type
+        self.load_usd = bool(getattr(args, "load_usd", False))
         self.sim_time = 0.0
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -147,21 +150,31 @@ class Example:
         builder.particle_max_velocity = 50.0
         builder.add_ground_plane(cfg=ground_contact_cfg)
 
-        builder.add_soft_grid(
-            pos=wp.vec3(0.0, 0.0, 0.0),
-            rot=wp.quat_identity(),
-            vel=wp.vec3(0.0, 0.0, 0.0),
-            dim_x=GRID_DIM_X,
-            dim_y=GRID_DIM_Y,
-            dim_z=GRID_DIM_Z,
-            cell_x=GRID_CELL_SIZE,
-            cell_y=GRID_CELL_SIZE,
-            cell_z=GRID_CELL_SIZE,
-            density=SOFT_GRID_DENSITY,
-            k_mu=SOFT_GRID_K_MU,
-            k_lambda=SOFT_GRID_K_LAMBDA,
-            k_damp=SOFT_GRID_K_DAMP,
-        )
+        if self.load_usd:
+            # The bundled asset stores the soft grid as a TetMesh prim with a bound
+            # physics material (E, nu, density). k_damp is not part of that base
+            # schema, so re-apply it per element after import.
+            result = builder.add_usd(newton.examples.get_asset("rigid_soft_contact_soft.usda"))
+            t_start, t_end = result["path_soft_map"]["/World/SoftBody"]["tet"]
+            for t in range(t_start, t_end):
+                k_mu, k_lambda, _ = builder.tet_materials[t]
+                builder.tet_materials[t] = (k_mu, k_lambda, SOFT_GRID_K_DAMP)
+        else:
+            builder.add_soft_grid(
+                pos=wp.vec3(0.0, 0.0, 0.0),
+                rot=wp.quat_identity(),
+                vel=wp.vec3(0.0, 0.0, 0.0),
+                dim_x=GRID_DIM_X,
+                dim_y=GRID_DIM_Y,
+                dim_z=GRID_DIM_Z,
+                cell_x=GRID_CELL_SIZE,
+                cell_y=GRID_CELL_SIZE,
+                cell_z=GRID_CELL_SIZE,
+                density=SOFT_GRID_DENSITY,
+                k_mu=SOFT_GRID_K_MU,
+                k_lambda=SOFT_GRID_K_LAMBDA,
+                k_damp=SOFT_GRID_K_DAMP,
+            )
 
         # Warp's original example is y-up; Newton examples are z-up.
         sphere_xform = wp.transform(wp.vec3(0.2, 0.5, SPHERE_INITIAL_Z), wp.quat_identity())
@@ -402,6 +415,12 @@ class Example:
             help="VBD solver iterations per substep in coupled mode",
             type=int,
             default=10,
+        )
+        parser.add_argument(
+            "--load-usd",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Load the soft grid from the bundled USD asset instead of building it procedurally.",
         )
         return parser
 

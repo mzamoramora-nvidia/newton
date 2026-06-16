@@ -11,6 +11,9 @@
 #
 ###########################################################################
 
+import argparse
+import warnings
+
 import warp as wp
 
 import newton
@@ -24,6 +27,7 @@ class Example:
 
         # setup simulation parameters first
         self.solver_type = args.solver
+        self.load_usd = bool(getattr(args, "load_usd", False))
 
         self.sim_height = args.height
         self.sim_width = args.width
@@ -103,7 +107,31 @@ class Example:
                 "tri_kd": 1.0e2,
             }
 
-        if self.solver_type == "style3d":
+        # USD loading is only wired up for the default vbd path; other solvers
+        # fall back to the procedural build.
+        use_usd = self.load_usd and self.solver_type == "vbd"
+        if self.load_usd and not use_usd:
+            warnings.warn(
+                f"--load-usd is only supported with --solver vbd; falling back to procedural build "
+                f"for solver '{self.solver_type}'.",
+                stacklevel=2,
+            )
+
+        if use_usd:
+            # World-space cloth baked from the procedural grid below.
+            result = builder.add_usd(newton.examples.get_asset("cloth_hanging.usda"))
+            p0, p1 = result["path_cloth_map"]["/World/Cloth"]["particle"]
+
+            # The base USD schema cannot express pinned particles, so re-pin the
+            # fixed column like fix_left did. The grid is rotated 90 deg about Z,
+            # so that column maps to the minimum-y edge in the baked world points.
+            points = builder.particle_q[p0:p1]
+            min_y = min(p[1] for p in points)
+            for i, p in enumerate(points):
+                if abs(p[1] - min_y) < 1.0e-4:
+                    builder.particle_mass[p0 + i] = 0.0
+                    builder.particle_flags[p0 + i] &= ~int(newton.ParticleFlags.ACTIVE)
+        elif self.solver_type == "style3d":
             style3d.add_cloth_grid(builder, **common_params, **solver_params)
         else:
             builder.add_cloth_grid(**common_params, **solver_params)
@@ -211,6 +239,12 @@ class Example:
         )
         parser.add_argument("--width", type=int, default=64, help="Cloth resolution in x.")
         parser.add_argument("--height", type=int, default=32, help="Cloth resolution in y.")
+        parser.add_argument(
+            "--load-usd",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Load cloth geometry from the bundled USD asset instead of building it procedurally (vbd solver only).",
+        )
         return parser
 
 

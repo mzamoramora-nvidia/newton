@@ -11,6 +11,8 @@
 #
 ###########################################################################
 
+import argparse
+
 import numpy as np
 import warp as wp
 from pxr import Usd
@@ -33,17 +35,7 @@ class Example:
         self.iterations = 10
 
         self.viewer = viewer
-
-        usd_stage = Usd.Stage.Open(newton.examples.get_asset("curvedSurface.usd"))
-        usd_prim = usd_stage.GetPrimAtPath("/root/cloth")
-
-        cloth_mesh = newton.usd.get_mesh(usd_prim)
-        mesh_points = cloth_mesh.vertices
-        mesh_indices = cloth_mesh.indices
-
-        self.input_scale_factor = 1.0
-        vertices = [wp.vec3(v) * self.input_scale_factor for v in mesh_points]
-        self.faces = mesh_indices.reshape(-1, 3)
+        self.load_usd = bool(getattr(args, "load_usd", False))
 
         builder = newton.ModelBuilder()
 
@@ -53,20 +45,41 @@ class Example:
         builder.default_shape_cfg.ke = contact_ke
         builder.default_shape_cfg.kd = contact_kd
         builder.default_shape_cfg.mu = contact_mu
-        builder.add_cloth_mesh(
-            pos=wp.vec3(0.0, 0.0, 10.0),
-            rot=wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), wp.pi / 6.0),
-            scale=1.0,
-            vertices=vertices,
-            indices=mesh_indices,
-            vel=wp.vec3(0.0, 0.0, 0.0),
-            density=0.02,
-            tri_ke=5.0e1,
-            tri_ka=5.0e1,
-            tri_kd=5.0e0,
-            edge_ke=1.0e1,
-            edge_kd=1.0e1,
-        )
+
+        if self.load_usd:
+            # The USD surface-deformable material carries only stiffness; supply the
+            # same damping as the procedural build via the builder defaults so the
+            # imported cloth settles identically.
+            builder.default_tri_kd = 5.0e0
+            builder.default_edge_kd = 1.0e1
+            # World-space cloth baked from the same procedural build below.
+            builder.add_usd(newton.examples.get_asset("cloth_bending.usda"))
+        else:
+            usd_stage = Usd.Stage.Open(newton.examples.get_asset("curvedSurface.usd"))
+            usd_prim = usd_stage.GetPrimAtPath("/root/cloth")
+
+            cloth_mesh = newton.usd.get_mesh(usd_prim)
+            mesh_points = cloth_mesh.vertices
+            mesh_indices = cloth_mesh.indices
+
+            self.input_scale_factor = 1.0
+            vertices = [wp.vec3(v) * self.input_scale_factor for v in mesh_points]
+            self.faces = mesh_indices.reshape(-1, 3)
+
+            builder.add_cloth_mesh(
+                pos=wp.vec3(0.0, 0.0, 10.0),
+                rot=wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), wp.pi / 6.0),
+                scale=1.0,
+                vertices=vertices,
+                indices=mesh_indices,
+                vel=wp.vec3(0.0, 0.0, 0.0),
+                density=0.02,
+                tri_ke=5.0e1,
+                tri_ka=5.0e1,
+                tri_kd=5.0e0,
+                edge_ke=1.0e1,
+                edge_kd=1.0e1,
+            )
 
         builder.color(include_bending=True)
         builder.add_ground_plane()
@@ -133,6 +146,17 @@ class Example:
         self.viewer.log_state(self.state_0)
         self.viewer.end_frame()
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        parser.add_argument(
+            "--load-usd",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Load cloth geometry from the bundled USD asset instead of building it procedurally.",
+        )
+        return parser
+
     def test_final(self):
         # Test that particles have come to rest (lenient velocity threshold)
         newton.examples.test_particle_state(
@@ -169,7 +193,8 @@ class Example:
 
 if __name__ == "__main__":
     # Parse arguments and initialize viewer
-    viewer, args = newton.examples.init()
+    parser = Example.create_parser()
+    viewer, args = newton.examples.init(parser)
 
     # Create viewer and run
     newton.examples.run(Example(viewer, args), args)

@@ -1,0 +1,30 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def Material "ClothMat" (
+        prepend apiSchemas = ["PhysicsSurfaceDeformableMaterialAPI"]
+    )
+    {
+        custom float physics:bendStiffness = 10
+        custom float physics:density = 0.02
+        custom float physics:shearStiffness = 50
+        custom float physics:stretchStiffness = 50
+    }
+
+    def Mesh "Cloth" (
+        prepend apiSchemas = ["PhysicsSurfaceDeformableSimAPI", "MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+        int[] faceVertexIndices = [1, 2, 0, 3, 4, 2, 7, 8, 6, 9, 10, 8, 3, 5, 4, 11, 12, 10, 13, 0, 12, 1, 3, 2, 7, 9, 8, 9, 11, 10, 11, 13, 12, 13, 1, 0]
+        rel material:binding:physics = </World/ClothMat>
+        point3f[] points = [(0, -0.6428518, 9.113452), (0, 1.0891988, 10.113452), (0.70710695, -0.5124718, 8.887628), (0.70710695, 1.2195789, 9.887628), (0.99999994, -0.2839483, 8.491813), (0.99999994, 1.4481028, 9.491813), (0, -1.3660253, 10.366025), (0, 0.36602533, 11.366025), (-0.70710695, -1.2195789, 10.112372), (-0.55520797, 0.5124718, 11.112372), (-0.84810096, -0.8660253, 9.5), (-0.79322195, 0.8660253, 10.5), (-0.50032896, -0.5124718, 8.887628), (-0.70710695, 1.2195789, 9.887628)]
+    }
+}
+
