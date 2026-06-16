@@ -75,13 +75,49 @@ def _dump_initial_state(module_path: str, load_usd: bool, out_path: str):
         "edge_count": np.int64(getattr(model, "edge_count", 0)),
         "tet_count": np.int64(getattr(model, "tet_count", 0)),
     }
+    particle_pos = None
     if model.particle_count:
-        arrays["particle_pos"] = state.particle_q.numpy()
+        particle_pos = state.particle_q.numpy()
+        arrays["particle_pos"] = particle_pos
         arrays["particle_mass"] = model.particle_mass.numpy()
     if model.body_count:
         arrays["body_pos"] = state.body_q.numpy()[:, :3]
         arrays["body_mass"] = model.body_mass.numpy()
+
+    # Connectivity (canonicalized by vertex position so it is independent of vertex
+    # / element ordering) and per-element stiffness, so a topology or material-mapping
+    # change between the two build paths is caught, not just geometry + mass.
+    def _store_elements(prefix, indices_attr, material_attr):
+        idx = getattr(model, indices_attr, None)
+        if idx is None or particle_pos is None:
+            return
+        idx = idx.numpy()
+        if idx.size:
+            arrays[f"{prefix}_canon"] = _canon_elements(particle_pos, idx)
+        mat = getattr(model, material_attr, None)
+        if mat is not None and mat.numpy().size:
+            arrays[f"{prefix}_material"] = mat.numpy()
+
+    _store_elements("tri", "tri_indices", "tri_materials")
+    _store_elements("tet", "tet_indices", "tet_materials")
+    edge_bending = getattr(model, "edge_bending_properties", None)
+    if edge_bending is not None and edge_bending.numpy().size:
+        arrays["edge_bending"] = edge_bending.numpy()
+    if model.joint_count:
+        arrays["joint_target_ke"] = model.joint_target_ke.numpy()
     np.savez(out_path, **arrays)
+
+
+def _canon_elements(positions: np.ndarray, indices: np.ndarray) -> np.ndarray:
+    """Order-independent connectivity signature: each element's vertex positions
+    sorted within the element, then all elements sorted. Robust to vertex/element
+    reordering between the two build paths."""
+    rows = []
+    for elem in indices:
+        verts = positions[elem]
+        rows.append(verts[np.lexsort(verts.T[::-1])].flatten())
+    out = np.array(rows, dtype=np.float64)
+    return out[np.lexsort(out.T[::-1])]
 
 
 def _sorted_rows(arr: np.ndarray) -> np.ndarray:
@@ -120,6 +156,31 @@ def _check_load_usd_parity(test: unittest.TestCase, device, module_path: str):
                 np.testing.assert_allclose(
                     np.sort(usd[key]), np.sort(proc[key]), rtol=1e-4, atol=1e-6, err_msg=f"{module_path}: {key} differs"
                 )
+
+        # Connectivity: canonicalized element signatures must match exactly.
+        for key in ("tri_canon", "tet_canon"):
+            if key in proc.files:
+                np.testing.assert_allclose(
+                    usd[key], proc[key], atol=1e-3, err_msg=f"{module_path}: {key} (connectivity) differs"
+                )
+
+        # Per-element stiffness multisets (order-independent).
+        for key in ("tri_material", "tet_material", "edge_bending"):
+            if key in proc.files:
+                np.testing.assert_allclose(
+                    _sorted_rows(usd[key]), _sorted_rows(proc[key]), rtol=1e-3, atol=1e-6,
+                    err_msg=f"{module_path}: {key} (stiffness) differs",
+                )
+        if "joint_target_ke" in proc.files:
+            # Cable per-joint stiffness round-trips through the base-schema modulus
+            # (stiffness = modulus * I / segment_length). For a non-straight cable the
+            # mean segment length differs a few percent from the value the example used
+            # to set its uniform stiffness directly, so allow a loose tolerance here -
+            # it still catches gross (e.g. 2x) conversion errors.
+            np.testing.assert_allclose(
+                np.sort(usd["joint_target_ke"]), np.sort(proc["joint_target_ke"]), rtol=5e-2, atol=1e-6,
+                err_msg=f"{module_path}: joint_target_ke (stiffness) differs",
+            )
 
 
 class TestExampleLoadUsdParity(unittest.TestCase):

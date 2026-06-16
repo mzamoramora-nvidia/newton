@@ -118,6 +118,13 @@ class Example:
             )
 
         if use_usd:
+            # Damping is solver tuning, not part of the AOUSD deformable schema
+            # (which carries only elastic stiffness), so it cannot be read from the
+            # asset. Supply it procedurally to match the non-USD build; a future
+            # Newton material extension parsed via the schema resolver could instead
+            # carry it through USD and let us drop these defaults.
+            builder.default_tri_kd = 1.0e2
+            builder.default_edge_kd = 0.0
             # World-space cloth baked from the procedural grid below.
             result = builder.add_usd(newton.examples.get_asset("cloth_hanging.usda"))
             p0, p1 = result["path_cloth_map"]["/World/Cloth"]["particle"]

@@ -47,9 +47,11 @@ class Example:
         builder.default_shape_cfg.mu = contact_mu
 
         if self.load_usd:
-            # The USD surface-deformable material carries only stiffness; supply the
-            # same damping as the procedural build via the builder defaults so the
-            # imported cloth settles identically.
+            # Damping is solver tuning, not part of the AOUSD deformable schema
+            # (which carries only elastic stiffness), so it cannot be read from the
+            # asset. Supply it procedurally to match the non-USD build; a future
+            # Newton material extension parsed via the schema resolver could instead
+            # carry it through USD and let us drop these defaults.
             builder.default_tri_kd = 5.0e0
             builder.default_edge_kd = 1.0e1
             # World-space cloth baked from the same procedural build below.
