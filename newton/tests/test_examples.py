@@ -418,6 +418,40 @@ add_example_test(
     use_viewer=True,
     test_options={"num-frames": 20},
 )
+# --load-usd variants: build the cables from the bundled USD assets instead of
+# procedurally, guarding the round-trip of the committed assets + the importer.
+add_example_test(
+    TestCableExamples,
+    name="cable.example_cable_twist",
+    devices=test_devices,
+    use_viewer=True,
+    test_options={"num-frames": 20, "load_usd": True, "usd_required": True},
+    test_suffix="load_usd",
+)
+add_example_test(
+    TestCableExamples,
+    name="cable.example_cable_bundle_hysteresis",
+    devices=test_devices,
+    use_viewer=True,
+    test_options={"num-frames": 20, "load_usd": True, "usd_required": True},
+    test_suffix="load_usd",
+)
+add_example_test(
+    TestCableExamples,
+    name="cable.example_cable_cross_slide_table",
+    devices=test_devices,
+    use_viewer=True,
+    test_options={"num-frames": 540, "load_usd": True, "usd_required": True},
+    test_suffix="load_usd",
+)
+add_example_test(
+    TestCableExamples,
+    name="cable.example_cable_pile",
+    devices=test_devices,
+    use_viewer=True,
+    test_options={"num-frames": 20, "load_usd": True, "usd_required": True},
+    test_suffix="load_usd",
+)
 
 
 class TestClothExamples(unittest.TestCase):

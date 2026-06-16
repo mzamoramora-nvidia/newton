@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import argparse
 import math
 
 import numpy as np
@@ -414,6 +415,7 @@ class Example:
     def __init__(self, viewer, args):
         # Store viewer and configure simulation cadence.
         self.viewer = viewer
+        self.load_usd = bool(getattr(args, "load_usd", False))
 
         fps = 60
         self.frame_dt = 1.0 / fps
@@ -680,19 +682,37 @@ class Example:
         cable_cfg.density = 200.0
         cable_cfg.gap = 2.0 * cable_radius
 
-        self.cable_bodies, cable_joints = builder.add_rod(
-            positions=straight_cable_points,
-            quaternions=straight_cable_quats,
-            radius=cable_radius,
-            cfg=cable_cfg,
-            stretch_stiffness=1.0e5,
-            stretch_damping=1.0e-4,
-            bend_stiffness=1.0e-2,
-            bend_damping=1.0e-2,
-            wrap_in_articulation=False,
-            label="xy_table_cable",
-            body_frame_origin="com",
-        )
+        if self.load_usd:
+            # Load the straight build pose from USD (the asset sets
+            # cableWrapInArticulation=false so the loop closes with ball joints
+            # below); the pulley-wrapped route stays programmatic and is applied
+            # to the state after finalize, since it depends on the pulley layout.
+            result = builder.add_usd(newton.examples.get_asset("cable_cross_slide_table.usda"))
+            self.cable_bodies, cable_joints = result["path_cable_map"]["/World/Cable"]
+
+            # Per-shape collision gap and bend damping are not part of the base
+            # USD curve material; apply them after loading.
+            for body in self.cable_bodies:
+                for shape in builder.body_shapes[body]:
+                    builder.shape_gap[shape] = 2.0 * cable_radius
+            for j in cable_joints:
+                builder.joint_target_kd[builder.joint_qd_start[j] + 1] = 1.0e-2
+        else:
+            self.cable_bodies, cable_joints = builder.add_rod(
+                positions=straight_cable_points,
+                quaternions=straight_cable_quats,
+                radius=cable_radius,
+                cfg=cable_cfg,
+                stretch_stiffness=1.0e5,
+                stretch_damping=1.0e-4,
+                bend_stiffness=1.0e-2,
+                bend_damping=1.0e-2,
+                wrap_in_articulation=False,
+                label="xy_table_cable",
+                body_frame_origin="com",
+            )
+        # Body origins are com-framed (segment midpoints), so place each body at the
+        # midpoint of its pulley-wrapped segment.
         initial_cable_xforms = [
             wp.transform(cable_points[i] + (cable_points[i + 1] - cable_points[i]) * 0.5, cable_quats[i])
             for i in range(len(self.cable_bodies))
@@ -963,8 +983,20 @@ class Example:
                 f"{TABLE_TRACKING_RMS_ERROR_TOLERANCE:.4f} m."
             )
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        parser.add_argument(
+            "--load-usd",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Load the straight build cable from the bundled USD asset instead of building it procedurally.",
+        )
+        return parser
+
 
 if __name__ == "__main__":
-    viewer, args = newton.examples.init()
+    parser = Example.create_parser()
+    viewer, args = newton.examples.init(parser)
     example = Example(viewer, args)
     newton.examples.run(example, args)

@@ -11,6 +11,7 @@
 #
 ###########################################################################
 
+import argparse
 import math
 
 import numpy as np
@@ -33,6 +34,7 @@ class Example:
     ):
         self.viewer = viewer
         self.args = args
+        self.load_usd = bool(getattr(args, "load_usd", False))
 
         # Simulation cadence
         self.fps = 60
@@ -108,56 +110,72 @@ class Example:
             )
             builder.add_ground_plane(cfg=ground_cfg)
 
-        # Build layered lanes of cables with alternating orientations
-        for layer in range(self.layers):
-            orient = "x" if (layer % 2 == 0) else "y"
-            z0 = 0.3 + layer * layer_gap
-            for lane in range(self.lanes_per_layer):
-                offset = (lane - (self.lanes_per_layer - 1) * 0.5) * lane_spacing
-                if orient == "x":
-                    start = wp.vec3(0.0, offset, z0)
-                else:
-                    start = wp.vec3(offset, 0.0, z0)
+        bend_damping = 2.0e1
 
-                wav = 0.5
-                twist = 0.0
+        # The bundled USD asset captures the authored default layout (no slope,
+        # 10x10). Load it only when opted in via --load-usd and the config matches
+        # that default; otherwise build the layered lanes procedurally.
+        use_usd_asset = self.load_usd and not slope_enabled and self.layers == 10 and self.lanes_per_layer == 10
+        if use_usd_asset:
+            result = builder.add_usd(newton.examples.get_asset("cable_pile.usda"))
+            for layer in range(self.layers):
+                for lane in range(self.lanes_per_layer):
+                    rod_bodies, rod_joints = result["path_cable_map"][f"/World/Cable_l{layer}_{lane}"]
+                    # Bend damping is not part of the base USD curve material.
+                    for j in rod_joints:
+                        builder.joint_target_kd[builder.joint_qd_start[j] + 1] = bend_damping
+                    rod_bodies_all.extend(rod_bodies)
+        else:
+            # Build layered lanes of cables with alternating orientations
+            for layer in range(self.layers):
+                orient = "x" if (layer % 2 == 0) else "y"
+                z0 = 0.3 + layer * layer_gap
+                for lane in range(self.lanes_per_layer):
+                    offset = (lane - (self.lanes_per_layer - 1) * 0.5) * lane_spacing
+                    if orient == "x":
+                        start = wp.vec3(0.0, offset, z0)
+                    else:
+                        start = wp.vec3(offset, 0.0, z0)
 
-                dir_vec = wp.vec3(1.0, 0.0, 0.0) if orient == "x" else wp.vec3(0.0, 1.0, 0.0)
-                ortho_vec = wp.vec3(0.0, 1.0, 0.0) if orient == "x" else wp.vec3(1.0, 0.0, 0.0)
+                    wav = 0.5
+                    twist = 0.0
 
-                cable_length = float(self.cable_length)
-                start0 = start - 0.5 * cable_length * dir_vec
-                pts = newton.utils.create_straight_cable_points(
-                    start=start0,
-                    direction=dir_vec,
-                    length=cable_length,
-                    num_segments=int(self.num_elements),
-                )
+                    dir_vec = wp.vec3(1.0, 0.0, 0.0) if orient == "x" else wp.vec3(0.0, 1.0, 0.0)
+                    ortho_vec = wp.vec3(0.0, 1.0, 0.0) if orient == "x" else wp.vec3(1.0, 0.0, 0.0)
 
-                # Sinusoidal waviness along orthogonal axis
-                cycles = 2.0
-                waviness_scale = 0.05
-                if wav > 0.0:
-                    for i in range(len(pts)):
-                        t = i / self.num_elements
-                        phase = 2.0 * math.pi * cycles * t
-                        amp = wav * cable_length * waviness_scale
-                        pts[i] = pts[i] + ortho_vec * (amp * math.sin(phase))
+                    cable_length = float(self.cable_length)
+                    start0 = start - 0.5 * cable_length * dir_vec
+                    pts = newton.utils.create_straight_cable_points(
+                        start=start0,
+                        direction=dir_vec,
+                        length=cable_length,
+                        num_segments=int(self.num_elements),
+                    )
 
-                edge_q = newton.utils.create_parallel_transport_cable_quaternions(pts, twist_total=float(twist))
+                    # Sinusoidal waviness along orthogonal axis
+                    cycles = 2.0
+                    waviness_scale = 0.05
+                    if wav > 0.0:
+                        for i in range(len(pts)):
+                            t = i / self.num_elements
+                            phase = 2.0 * math.pi * cycles * t
+                            amp = wav * cable_length * waviness_scale
+                            pts[i] = pts[i] + ortho_vec * (amp * math.sin(phase))
 
-                rod_bodies, _rod_joints = builder.add_rod(
-                    positions=pts,
-                    quaternions=edge_q,
-                    radius=cable_radius,
-                    cfg=cable_shape_cfg,
-                    stretch_stiffness=stretch_stiffness,
-                    bend_stiffness=bend_stiffness,
-                    bend_damping=2.0e1,
-                    label=f"cable_l{layer}_{lane}",
-                    body_frame_origin="com",
-                )
-                rod_bodies_all.extend(rod_bodies)
+                    edge_q = newton.utils.create_parallel_transport_cable_quaternions(pts, twist_total=float(twist))
+
+                    rod_bodies, _rod_joints = builder.add_rod(
+                        positions=pts,
+                        quaternions=edge_q,
+                        radius=cable_radius,
+                        cfg=cable_shape_cfg,
+                        stretch_stiffness=stretch_stiffness,
+                        bend_stiffness=bend_stiffness,
+                        bend_damping=bend_damping,
+                        label=f"cable_l{layer}_{lane}",
+                        body_frame_origin="com",
+                    )
+                    rod_bodies_all.extend(rod_bodies)
 
         builder.color()
 
@@ -262,7 +280,20 @@ class Example:
 
             assert (np.abs(body_velocities) < 5e2).all(), "Velocities too large"
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        parser.add_argument(
+            "--load-usd",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Load the default cable-pile layout from the bundled USD asset instead of building it procedurally.",
+        )
+        return parser
+
 
 if __name__ == "__main__":
-    viewer, args = newton.examples.init()
+    parser = Example.create_parser()
+    viewer, args = newton.examples.init(parser)
+
     newton.examples.run(Example(viewer, args), args)
