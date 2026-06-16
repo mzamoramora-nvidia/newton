@@ -12,6 +12,8 @@
 #
 ###########################################################################
 
+import argparse
+
 import numpy as np
 import warp as wp
 
@@ -153,6 +155,7 @@ class Example:
         eps_max = args.eps_max
         tau = args.tau
         with_dahl = not args.no_dahl and eps_max > 0.0 and tau > 0.0
+        self.load_usd = bool(getattr(args, "load_usd", False))
 
         # Simulation cadence
         self.fps = 60
@@ -193,33 +196,48 @@ class Example:
         # Obstacle capsule center is at z=0.3, align cable with this
         start_z = 0.3
 
-        # Create bundle cross-section layout
-        bundle_positions = self.bundle_start_offsets_yz(self.num_cables, self.cable_radius, self.cable_gap_multiplier)
+        # The default bundle (7 cables, 40 segments) is published as a USD asset;
+        # with --load-usd, load it to exercise the cable importer when the config
+        # matches the authored default. Otherwise build the bundle procedurally.
         cable_body_ids: list[int] = []
-
-        # Build each cable in the bundle
-        for i in range(self.num_cables):
-            off_y, off_z = bundle_positions[i]
-            cable_start = wp.vec3(start_x, start_y + off_y, start_z + off_z)
-
-            points, quats = newton.utils.create_straight_cable_points_and_quaternions(
-                start=cable_start,
-                direction=wp.vec3(1.0, 0.0, 0.0),
-                length=float(self.cable_length),
-                num_segments=int(self.num_elements),
-                twist_total=0.0,
+        use_usd_asset = self.load_usd and self.num_cables == 7 and self.num_elements == 40
+        if use_usd_asset:
+            result = builder.add_usd(newton.examples.get_asset("cable_bundle.usda"))
+            for i in range(self.num_cables):
+                rod_bodies, rod_joints = result["path_cable_map"][f"/World/bundle_cable_{i}"]
+                # Bend damping is not part of the base USD curve material.
+                for j in rod_joints:
+                    builder.joint_target_kd[builder.joint_qd_start[j] + 1] = bend_damping
+                cable_body_ids.extend(rod_bodies)
+        else:
+            # Create bundle cross-section layout
+            bundle_positions = self.bundle_start_offsets_yz(
+                self.num_cables, self.cable_radius, self.cable_gap_multiplier
             )
 
-            rod_bodies, _rod_joints = builder.add_rod(
-                positions=points,
-                quaternions=quats,
-                radius=self.cable_radius,
-                bend_stiffness=bend_stiffness,
-                bend_damping=bend_damping,
-                label=f"bundle_cable_{i}",
-                body_frame_origin="com",
-            )
-            cable_body_ids.extend(rod_bodies)
+            # Build each cable in the bundle
+            for i in range(self.num_cables):
+                off_y, off_z = bundle_positions[i]
+                cable_start = wp.vec3(start_x, start_y + off_y, start_z + off_z)
+
+                points, quats = newton.utils.create_straight_cable_points_and_quaternions(
+                    start=cable_start,
+                    direction=wp.vec3(1.0, 0.0, 0.0),
+                    length=float(self.cable_length),
+                    num_segments=int(self.num_elements),
+                    twist_total=0.0,
+                )
+
+                rod_bodies, _rod_joints = builder.add_rod(
+                    positions=points,
+                    quaternions=quats,
+                    radius=self.cable_radius,
+                    bend_stiffness=bend_stiffness,
+                    bend_damping=bend_damping,
+                    label=f"bundle_cable_{i}",
+                    body_frame_origin="com",
+                )
+                cable_body_ids.extend(rod_bodies)
 
         # Create moving obstacles (capsules arranged along X axis)
         obstacle_cfg = newton.ModelBuilder.ShapeConfig(
@@ -414,6 +432,12 @@ class Example:
         parser.add_argument("--no-dahl", action="store_true", help="Disable Dahl friction (purely elastic)")
         parser.add_argument("--eps-max", type=float, default=2.0, help="Maximum plastic strain [rad]")
         parser.add_argument("--tau", type=float, default=0.1, help="Memory decay length [rad]")
+        parser.add_argument(
+            "--load-usd",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Load the default cable-bundle layout from the bundled USD asset instead of building it procedurally.",
+        )
         return parser
 
 

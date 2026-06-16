@@ -12,6 +12,8 @@
 #
 ###########################################################################
 
+import argparse
+
 import numpy as np
 import warp as wp
 
@@ -110,6 +112,7 @@ class Example:
         # Store viewer and arguments
         self.viewer = viewer
         self.args = args
+        self.load_usd = bool(getattr(args, "load_usd", False))
 
         # Simulation cadence
         self.fps = 60
@@ -148,32 +151,45 @@ class Example:
 
         y_separation = 3.0
 
+        # Load the authored cables from USD once; the per-cable loop recovers them below.
+        if self.load_usd:
+            result = builder.add_usd(newton.examples.get_asset("cable_twist.usda"))
+
         # Create 3 cables in a row along the y-axis, centered around origin
         for i, bend_stiffness in enumerate(bend_stiffness_values):
-            # Center cables around origin: vary by y_separation
-            y_pos = (i - (self.num_cables - 1) / 2.0) * y_separation
+            if self.load_usd:
+                rod_bodies, rod_joints = result["path_cable_map"][f"/World/Cable_{i}"]
 
-            # All cables are untwisted with zigzag path and increasing stiffness
-            # Cables start at ground level (z=0) to lay flat on ground
-            start_pos = wp.vec3(-self.cable_length * 0.25, y_pos, cable_radius)
+                # Bend damping is not part of the base USD curve material; apply it to
+                # each cable joint's bend DOF (index 1: linear stretch, angular bend).
+                bend_damping = 1.0e-2 * bend_stiffness
+                for j in rod_joints:
+                    builder.joint_target_kd[builder.joint_qd_start[j] + 1] = bend_damping
+            else:
+                # Center cables around origin: vary by y_separation
+                y_pos = (i - (self.num_cables - 1) / 2.0) * y_separation
 
-            cable_points, cable_edge_q = self.create_cable_geometry_with_turns(
-                pos=start_pos,
-                num_elements=self.num_elements,
-                length=self.cable_length,
-                twisting_angle=0.0,
-            )
+                # All cables are untwisted with zigzag path and increasing stiffness
+                # Cables start at ground level (z=0) to lay flat on ground
+                start_pos = wp.vec3(-self.cable_length * 0.25, y_pos, cable_radius)
 
-            rod_bodies, _rod_joints = builder.add_rod(
-                positions=cable_points,
-                quaternions=cable_edge_q,
-                radius=cable_radius,
-                stretch_stiffness=stretch_stiffness,
-                bend_stiffness=bend_stiffness,
-                bend_damping=1.0e-2 * bend_stiffness,
-                label=f"cable_{i}",
-                body_frame_origin="com",
-            )
+                cable_points, cable_edge_q = self.create_cable_geometry_with_turns(
+                    pos=start_pos,
+                    num_elements=self.num_elements,
+                    length=self.cable_length,
+                    twisting_angle=0.0,
+                )
+
+                rod_bodies, _rod_joints = builder.add_rod(
+                    positions=cable_points,
+                    quaternions=cable_edge_q,
+                    radius=cable_radius,
+                    stretch_stiffness=stretch_stiffness,
+                    bend_stiffness=bend_stiffness,
+                    bend_damping=1.0e-2 * bend_stiffness,
+                    label=f"cable_{i}",
+                    body_frame_origin="com",
+                )
 
             # Fix the first body to make it kinematic
             first_body = rod_bodies[0]
@@ -275,6 +291,17 @@ class Example:
         self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        parser.add_argument(
+            "--load-usd",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Load cable geometry from the bundled USD asset instead of building it procedurally.",
+        )
+        return parser
+
     def test_final(self):
         """Test cable twist simulation for stability and correctness (called after simulation)."""
 
@@ -318,7 +345,8 @@ class Example:
 
 if __name__ == "__main__":
     # Parse arguments and initialize viewer
-    viewer, args = newton.examples.init()
+    parser = Example.create_parser()
+    viewer, args = newton.examples.init(parser)
 
     # Create example and run
     newton.examples.run(Example(viewer, args), args)
