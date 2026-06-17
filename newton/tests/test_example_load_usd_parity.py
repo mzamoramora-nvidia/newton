@@ -168,7 +168,10 @@ def _check_load_usd_parity(test: unittest.TestCase, device, module_path: str):
         for key in ("tri_material", "tet_material", "edge_bending"):
             if key in proc.files:
                 np.testing.assert_allclose(
-                    _sorted_rows(usd[key]), _sorted_rows(proc[key]), rtol=1e-3, atol=1e-6,
+                    _sorted_rows(usd[key]),
+                    _sorted_rows(proc[key]),
+                    rtol=1e-3,
+                    atol=1e-6,
                     err_msg=f"{module_path}: {key} (stiffness) differs",
                 )
         if "joint_target_ke" in proc.files:
@@ -178,7 +181,10 @@ def _check_load_usd_parity(test: unittest.TestCase, device, module_path: str):
             # to set its uniform stiffness directly, so allow a loose tolerance here -
             # it still catches gross (e.g. 2x) conversion errors.
             np.testing.assert_allclose(
-                np.sort(usd["joint_target_ke"]), np.sort(proc["joint_target_ke"]), rtol=5e-2, atol=1e-6,
+                np.sort(usd["joint_target_ke"]),
+                np.sort(proc["joint_target_ke"]),
+                rtol=5e-2,
+                atol=1e-6,
                 err_msg=f"{module_path}: joint_target_ke (stiffness) differs",
             )
 
