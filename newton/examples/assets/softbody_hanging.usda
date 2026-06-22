@@ -7,7 +7,9 @@
 
 def Xform "World"
 {
-    def Material "SoftMat"
+    def Material "SoftMat" (
+        prepend apiSchemas = ["PhysicsVolumeDeformableMaterialAPI"]
+    )
     {
         custom float physics:density = 1000
         custom float physics:poissonsRatio = 0.25
