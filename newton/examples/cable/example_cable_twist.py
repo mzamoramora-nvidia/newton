@@ -159,6 +159,9 @@ class Example:
         for i, bend_stiffness in enumerate(bend_stiffness_values):
             if self.load_usd:
                 rod_bodies, rod_joints = result["path_cable_map"][f"/World/Cable_{i}"]
+                # Imported cables are unwrapped; wrap each into its own articulation
+                # (the procedural path does this via add_rod's default wrapping).
+                builder.add_articulation(rod_joints, label=f"/World/Cable_{i}_articulation")
 
                 # Bend damping is not part of the base USD curve material; apply it to
                 # each cable joint's bend DOF (index 1: linear stretch, angular bend).
