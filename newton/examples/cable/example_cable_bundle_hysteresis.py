@@ -205,6 +205,9 @@ class Example:
             result = builder.add_usd(newton.examples.get_asset("cable_bundle.usda"))
             for i in range(self.num_cables):
                 rod_bodies, rod_joints = result["path_cable_map"][f"/World/bundle_cable_{i}"]
+                # Imported cables are unwrapped; wrap each into its own articulation
+                # (the procedural path does this via add_rod's default wrapping).
+                builder.add_articulation(rod_joints, label=f"/World/bundle_cable_{i}_articulation")
                 # Bend damping is not part of the base USD curve material.
                 for j in rod_joints:
                     builder.joint_target_kd[builder.joint_qd_start[j] + 1] = bend_damping

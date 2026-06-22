@@ -121,6 +121,9 @@ class Example:
             for layer in range(self.layers):
                 for lane in range(self.lanes_per_layer):
                     rod_bodies, rod_joints = result["path_cable_map"][f"/World/Cable_l{layer}_{lane}"]
+                    # Imported cables are unwrapped; wrap each into its own articulation
+                    # (the procedural path does this via add_rod's default wrapping).
+                    builder.add_articulation(rod_joints, label=f"/World/Cable_l{layer}_{lane}_articulation")
                     # Bend damping is not part of the base USD curve material.
                     for j in rod_joints:
                         builder.joint_target_kd[builder.joint_qd_start[j] + 1] = bend_damping

@@ -683,10 +683,11 @@ class Example:
         cable_cfg.gap = 2.0 * cable_radius
 
         if self.load_usd:
-            # Load the straight build pose from USD (the asset sets
-            # cableWrapInArticulation=false so the loop closes with ball joints
-            # below); the pulley-wrapped route stays programmatic and is applied
-            # to the state after finalize, since it depends on the pulley layout.
+            # Load the straight build pose from USD. Imported cables are unwrapped, so
+            # the cable joints are wrapped together with the loop-closing ball joints
+            # into a single articulation below; the pulley-wrapped route stays
+            # programmatic and is applied to the state after finalize, since it depends
+            # on the pulley layout.
             result = builder.add_usd(newton.examples.get_asset("cable_cross_slide_table.usda"))
             self.cable_bodies, cable_joints = result["path_cable_map"]["/World/Cable"]
 
