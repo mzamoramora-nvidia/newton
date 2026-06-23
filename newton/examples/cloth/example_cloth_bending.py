@@ -47,11 +47,12 @@ class Example:
         builder.default_shape_cfg.mu = contact_mu
 
         if self.load_usd:
-            # Damping is solver tuning, not part of the AOUSD deformable schema
-            # (which carries only elastic stiffness), so it cannot be read from the
-            # asset. Supply it procedurally to match the non-USD build; a future
-            # Newton material extension parsed via the schema resolver could instead
-            # carry it through USD and let us drop these defaults.
+            # Damping and area-preservation (tri_ka / Poisson) are solver tuning, not
+            # part of the AOUSD deformable schema (which carries only elastic stiffness),
+            # so they cannot be read from the asset. Supply them procedurally to match the
+            # non-USD build; a future Newton material extension parsed via the schema
+            # resolver could instead carry them through USD and let us drop these defaults.
+            builder.default_tri_ka = 5.0e1
             builder.default_tri_kd = 5.0e0
             builder.default_edge_kd = 1.0e1
             # World-space cloth baked from the same procedural build below.
