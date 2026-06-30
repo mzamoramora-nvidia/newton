@@ -302,8 +302,6 @@ class Example:
         self._setup_ik()
         self._setup_state_machine()
         self.control = self.model.control()
-        self.joint_target_shape = self.control.joint_target_pos.reshape((self.world_count, -1)).shape
-        self.joint_targets_2d = wp.zeros(self.joint_target_shape, dtype=wp.float32)
         self.graph_ik = None
 
         self._setup_mujoco_ctrl()
@@ -346,7 +344,7 @@ class Example:
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
-        self._set_joint_targets()
+        self._set_actuator_targets()
         if self.graph_sim is not None:
             wp.capture_launch(self.graph_sim)
         else:
@@ -480,7 +478,6 @@ class Example:
             7.8549200e-01,
         ]
         builder.joint_q[0:7] = init_q
-        builder.joint_target_pos[0:7] = init_q
 
         # Snapshot before attaching the gripper -- IK runs on the arm chain only,
         # with link_offset mapping the EE link to the TCP.
@@ -1122,8 +1119,8 @@ class Example:
         if hasattr(self.viewer, "picking") and self.viewer.picking is not None:
             self.viewer.picking.world_offsets = self.viewer.world_offsets
 
-    def _set_joint_targets(self):
-        """Compute IK targets from state machine and solve IK each frame."""
+    def _set_actuator_targets(self):
+        """Compute IK targets and write the direct MuJoCo actuator controls."""
         # 1. Compute targets from state machine (with interpolation)
         wp.launch(
             set_target_pose_kernel,
@@ -1158,22 +1155,7 @@ class Example:
         else:
             self.ik_solver.step(self.joint_q_ik, self.joint_q_ik, iterations=self.ik_iters)
 
-        # 4. Write IK arm solution + gripper target to joint_targets
-        wp.launch(
-            write_gripper_targets_kernel,
-            dim=self.world_count,
-            inputs=[
-                self.joint_q_ik,
-                self.gripper_target,
-                self.joint_targets_2d,
-                self.arm_dof_count,
-                self.gripper_dof_start,
-                self.gripper_dof_count,
-            ],
-        )
-        wp.copy(self.control.joint_target_pos, self.joint_targets_2d.flatten())
-
-        # Write arm + gripper to mujoco ctrl (CTRL_DIRECT for all MJCF general actuators)
+        # 4. Write arm + gripper to MuJoCo ctrl (CTRL_DIRECT for all MJCF general actuators)
         wp.launch(
             write_mujoco_ctrl_kernel,
             dim=self.world_count,
@@ -1498,28 +1480,6 @@ def extract_ee_pos_kernel(
     body_idx = ee_body_global_indices[tid]
     tcp_pos_offset = wp.vec3(0.0, 0.0, wp.static(_ROBOTIQ_TCP_OFFSET_M))
     ee_pos_actual[tid] = wp.transform_point(body_q[body_idx], tcp_pos_offset)
-
-
-@wp.kernel(enable_backward=False)
-def write_gripper_targets_kernel(
-    ik_solution: wp.array2d[wp.float32],
-    gripper_target: wp.array[wp.float32],
-    joint_targets: wp.array2d[wp.float32],
-    arm_dof_count: int,
-    gripper_dof_start: int,
-    gripper_dof_count: int,
-):
-    """Copy IK arm solution + gripper target to joint_targets 2D array."""
-    tid = wp.tid()
-
-    # Copy arm DOFs from IK solution
-    for j in range(arm_dof_count):
-        joint_targets[tid, j] = ik_solution[tid, j]
-
-    # Write gripper DOFs: all gripper joints get the same control value
-    ctrl = gripper_target[tid]
-    for j in range(gripper_dof_count):
-        joint_targets[tid, gripper_dof_start + j] = ctrl
 
 
 @wp.kernel(enable_backward=False)
