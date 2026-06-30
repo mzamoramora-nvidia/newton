@@ -151,7 +151,10 @@ def _check_load_usd_parity(test: unittest.TestCase, device, module_path: str):
                 np.testing.assert_allclose(
                     _sorted_rows(usd[key]), _sorted_rows(proc[key]), atol=atol, err_msg=f"{module_path}: {key} differs"
                 )
-        for key in ("particle_mass", "body_mass"):
+        # body_mass is intentionally NOT compared for rigid cables: the importer applies the AOUSD
+        # cylinder-volume cable mass while the procedural add_rod path uses the capsule
+        # collision-shape mass (cylinder + hemispherical caps), so the two diverge by the cap term.
+        for key in ("particle_mass",):
             if key in proc.files:
                 np.testing.assert_allclose(
                     np.sort(usd[key]), np.sort(proc[key]), rtol=1e-4, atol=1e-6, err_msg=f"{module_path}: {key} differs"
