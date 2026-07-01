@@ -123,13 +123,17 @@ class Example:
             # so they cannot be read from the asset. Supply them procedurally to match the
             # non-USD build; a future Newton material extension parsed via the schema
             # resolver could instead carry them through USD and let us drop these defaults.
-            builder.default_tri_ka = 1.0e3
             builder.default_tri_kd = 1.0e2
             builder.default_edge_kd = 0.0
             # World-space cloth baked from the procedural grid below.
             builder.add_usd(newton.examples.get_asset("cloth_hanging.usda"))
             c = builder.cloth_label.index("/World/Cloth")
             p0, p1 = builder.cloth_particle_start[c], builder.cloth_particle_end[c]
+            # The importer sets tri_ka=0 (no schema attribute), so apply the procedural
+            # build's area term to the imported cloth's triangles for parity.
+            for t in range(builder.cloth_tri_start[c], builder.cloth_tri_end[c]):
+                ke, _ka, kd, drag, lift = builder.tri_materials[t]
+                builder.tri_materials[t] = (ke, 1.0e3, kd, drag, lift)
 
             # The base USD schema cannot express pinned particles, so re-pin the
             # fixed column like fix_left did. The grid is rotated 90 deg about Z,

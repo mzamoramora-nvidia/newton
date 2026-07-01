@@ -52,11 +52,16 @@ class Example:
             # so they cannot be read from the asset. Supply them procedurally to match the
             # non-USD build; a future Newton material extension parsed via the schema
             # resolver could instead carry them through USD and let us drop these defaults.
-            builder.default_tri_ka = 5.0e1
             builder.default_tri_kd = 5.0e0
             builder.default_edge_kd = 1.0e1
             # World-space cloth baked from the same procedural build below.
             builder.add_usd(newton.examples.get_asset("cloth_bending.usda"))
+            # The importer sets tri_ka=0 (no schema attribute), so apply the procedural
+            # build's area term to the imported cloth's triangles for parity.
+            c = builder.cloth_label.index("/World/Cloth")
+            for t in range(builder.cloth_tri_start[c], builder.cloth_tri_end[c]):
+                ke, _ka, kd, drag, lift = builder.tri_materials[t]
+                builder.tri_materials[t] = (ke, 5.0e1, kd, drag, lift)
         else:
             usd_stage = Usd.Stage.Open(newton.examples.get_asset("curvedSurface.usd"))
             usd_prim = usd_stage.GetPrimAtPath("/root/cloth")
