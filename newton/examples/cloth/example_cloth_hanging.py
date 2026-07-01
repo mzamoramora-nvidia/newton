@@ -127,8 +127,9 @@ class Example:
             builder.default_tri_kd = 1.0e2
             builder.default_edge_kd = 0.0
             # World-space cloth baked from the procedural grid below.
-            result = builder.add_usd(newton.examples.get_asset("cloth_hanging.usda"))
-            p0, p1 = result["path_cloth_map"]["/World/Cloth"]["particle"]
+            builder.add_usd(newton.examples.get_asset("cloth_hanging.usda"))
+            c = builder.cloth_label.index("/World/Cloth")
+            p0, p1 = builder.cloth_particle_start[c], builder.cloth_particle_end[c]
 
             # The base USD schema cannot express pinned particles, so re-pin the
             # fixed column like fix_left did. The grid is rotated 90 deg about Z,

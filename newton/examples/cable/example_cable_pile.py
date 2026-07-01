@@ -117,13 +117,12 @@ class Example:
         # that default; otherwise build the layered lanes procedurally.
         use_usd_asset = self.load_usd and not slope_enabled and self.layers == 10 and self.lanes_per_layer == 10
         if use_usd_asset:
-            result = builder.add_usd(newton.examples.get_asset("cable_pile.usda"))
+            builder.add_usd(newton.examples.get_asset("cable_pile.usda"))
             for layer in range(self.layers):
                 for lane in range(self.lanes_per_layer):
-                    rod_bodies, rod_joints = result["path_cable_map"][f"/World/Cable_l{layer}_{lane}"]
-                    # Imported cables are unwrapped; wrap each into its own articulation
-                    # (the procedural path does this via add_rod's default wrapping).
-                    builder.add_articulation(rod_joints, label=f"/World/Cable_l{layer}_{lane}_articulation")
+                    c = builder.cable_label.index(f"/World/Cable_l{layer}_{lane}")
+                    rod_bodies = list(range(builder.cable_body_start[c], builder.cable_body_end[c]))
+                    rod_joints = list(range(builder.cable_joint_start[c], builder.cable_joint_end[c]))
                     # Bend damping is not part of the base USD curve material.
                     for j in rod_joints:
                         builder.joint_target_kd[builder.joint_qd_start[j] + 1] = bend_damping

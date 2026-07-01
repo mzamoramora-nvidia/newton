@@ -683,13 +683,16 @@ class Example:
         cable_cfg.gap = 2.0 * cable_radius
 
         if self.load_usd:
-            # Load the straight build pose from USD. Imported cables are unwrapped, so
-            # the cable joints are wrapped together with the loop-closing ball joints
-            # into a single articulation below; the pulley-wrapped route stays
-            # programmatic and is applied to the state after finalize, since it depends
-            # on the pulley layout.
-            result = builder.add_usd(newton.examples.get_asset("cable_cross_slide_table.usda"))
-            self.cable_bodies, cable_joints = result["path_cable_map"]["/World/Cable"]
+            # Wrap the table mechanism into its own articulation BEFORE importing the cable:
+            # add_usd wraps the imported cable in its own articulation, and articulation_start
+            # must stay monotonic in first-joint index (the table joints precede the cable's).
+            # The pulley-wrapped route stays programmatic and is applied to the state after
+            # finalize, since it depends on the pulley layout.
+            builder.add_articulation([*table_articulation_joints], label="xy_table_cross_slide")
+            builder.add_usd(newton.examples.get_asset("cable_cross_slide_table.usda"))
+            c = builder.cable_label.index("/World/Cable")
+            self.cable_bodies = list(range(builder.cable_body_start[c], builder.cable_body_end[c]))
+            cable_joints = list(range(builder.cable_joint_start[c], builder.cable_joint_end[c]))
 
             # Per-shape collision gap and bend damping are not part of the base
             # USD curve material; apply them after loading.
@@ -760,10 +763,14 @@ class Example:
             friction=0.0,
             label="right_bottom_cable_fix_loop",
         )
-        builder.add_articulation(
-            [*table_articulation_joints, *cable_joints, left_anchor_joint],
-            label="xy_table_cable_cross_slide",
-        )
+        if not self.load_usd:
+            # Procedural cable joints are unwrapped, so wrap table + cable + one anchor into a
+            # single articulation. (On the load_usd path the table and cable already have their
+            # own articulations and both end ball joints are loop-closing.)
+            builder.add_articulation(
+                [*table_articulation_joints, *cable_joints, left_anchor_joint],
+                label="xy_table_cable_cross_slide",
+            )
 
         kinematic_body_indices = driven_pulley_bodies
         kinematic_body_base_xforms = [builder.body_q[body] for body in kinematic_body_indices]
