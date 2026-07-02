@@ -1457,6 +1457,11 @@ def test_mujoco_hydroelastic_force_space_mapping(test, device):
     active = np.flatnonzero(stiffness > 0.0)
     test.assertGreater(len(active), 0)
     test.assertTrue(np.all(mapping[active] == HydroelasticSDF.Config.StiffnessMapping.FORCE_SPACE))
+    test.assertEqual(
+        np.count_nonzero(mapping == HydroelasticSDF.Config.StiffnessMapping.FORCE_SPACE),
+        len(active),
+        "Stiffness mapping metadata must remain associated with hydroelastic contacts after sorting",
+    )
 
     solver = newton.solvers.SolverMuJoCo(model, use_mujoco_contacts=False, njmax=500, nconmax=500, iterations=1)
     solver.step(state_in, model.state(), model.control(), contacts, 1.0 / 600.0)
@@ -1525,6 +1530,13 @@ class TestHydroelastic(unittest.TestCase):
     def test_stiffness_mapping_defaults_to_raw(self):
         config = HydroelasticSDF.Config()
         self.assertEqual(config.stiffness_mapping, HydroelasticSDF.Config.StiffnessMapping.RAW)
+
+    def test_stiffness_mapping_validation(self):
+        config = HydroelasticSDF.Config(stiffness_mapping=1)
+        self.assertIs(config.stiffness_mapping, HydroelasticSDF.Config.StiffnessMapping.FORCE_SPACE)
+
+        with self.assertRaisesRegex(ValueError, "stiffness_mapping"):
+            HydroelasticSDF.Config(stiffness_mapping=2)
 
     def test_mc_edge_clamp_min_validation(self):
         """``HydroelasticSDF.Config.mc_edge_clamp_min`` validates its range at construction.

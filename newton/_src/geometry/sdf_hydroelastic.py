@@ -377,6 +377,12 @@ class HydroelasticSDF:
         bias measurably damps the contact response."""
 
         def __post_init__(self):
+            try:
+                self.stiffness_mapping = self.StiffnessMapping(self.stiffness_mapping)
+            except ValueError as error:
+                raise ValueError(
+                    f"HydroelasticSDF.Config.stiffness_mapping must be a StiffnessMapping value, got {self.stiffness_mapping}"
+                ) from error
             # NaN fails both bounds (NaN comparisons return False) and lands here too.
             if not (0.0 <= float(self.mc_edge_clamp_min) <= 0.5):
                 raise ValueError(
