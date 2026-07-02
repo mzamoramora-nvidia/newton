@@ -13,6 +13,10 @@ import warp as wp
 SHAPE_PAIR_HFIELD_BIT = wp.int32(1 << 30)
 SHAPE_PAIR_INDEX_MASK = wp.int32((1 << 30) - 1)
 
+# Per-contact stiffness conversion modes used by solver adapters.
+CONTACT_STIFFNESS_MAPPING_RAW = wp.constant(0)
+CONTACT_STIFFNESS_MAPPING_FORCE_SPACE = wp.constant(1)
+
 
 @wp.struct
 class ContactData:
@@ -35,6 +39,7 @@ class ContactData:
         shape_b: Index of the second shape in the collision pair
         gap_sum: Pairwise summed contact gap threshold that determines if a contact should be written
         contact_stiffness: Contact stiffness. 0.0 means no stiffness was set.
+        contact_stiffness_mapping: Solver conversion mode for contact stiffness.
         contact_damping: Contact damping scale. 0.0 means no damping was set.
         contact_friction_scale: Friction scaling factor. 0.0 means no friction was set.
         sort_sub_key: Sub-key for deterministic contact sorting (encodes edge/triangle/vertex index).
@@ -51,6 +56,7 @@ class ContactData:
     shape_b: int
     gap_sum: float
     contact_stiffness: float
+    contact_stiffness_mapping: int
     contact_damping: float
     contact_friction_scale: float
     sort_sub_key: int

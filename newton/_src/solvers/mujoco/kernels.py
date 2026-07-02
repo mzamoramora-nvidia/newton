@@ -10,6 +10,7 @@ from typing import Any
 import warp as wp
 
 from ...core.types import vec5
+from ...geometry.contact_data import CONTACT_STIFFNESS_MAPPING_FORCE_SPACE
 from ...sim import BodyFlags, EqType, JointTargetMode, JointType
 from ...sim.contacts import contact_surface_point, contact_surface_separation
 from .constants import (
@@ -256,6 +257,7 @@ def convert_newton_contacts_to_mjwarp_kernel(
     rigid_contact_margin0: wp.array[wp.float32],
     rigid_contact_margin1: wp.array[wp.float32],
     rigid_contact_stiffness: wp.array[wp.float32],
+    rigid_contact_stiffness_mapping: wp.array[wp.int32],
     rigid_contact_damping: wp.array[wp.float32],
     rigid_contact_friction: wp.array[wp.float32],
     shape_margin: wp.array[float],
@@ -447,8 +449,20 @@ def convert_newton_contacts_to_mjwarp_kernel(
             if contact_ke > 0.0:
                 imp = solimp[1]
                 solimp = vec5(imp, imp, 0.001, 1.0, 0.5)
-                contact_ke = contact_ke * (1.0 - imp)
+                stiffness_factor = 1.0 - imp
                 kd = rigid_contact_damping[tid]
+                if rigid_contact_stiffness_mapping[tid] == CONTACT_STIFFNESS_MAPPING_FORCE_SPACE:
+                    invw_a = float(0.0)
+                    invw_b = float(0.0)
+                    if body_a >= 0:
+                        invw_a = body_invweight0[worldid, mj_body_a][0]
+                    if body_b >= 0:
+                        invw_b = body_invweight0[worldid, mj_body_b][0]
+                    m_inv = invw_a + invw_b
+                    if m_inv > 0.0:
+                        stiffness_factor = stiffness_factor * m_inv
+                        kd = kd * stiffness_factor
+                contact_ke = contact_ke * stiffness_factor
                 if kd > 0.0:
                     timeconst = 2.0 / kd
                     dampratio = wp.sqrt(1.0 / (timeconst * timeconst * contact_ke))

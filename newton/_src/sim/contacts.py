@@ -267,6 +267,8 @@ class Contacts:
             if self.per_contact_shape_properties:
                 self.rigid_contact_stiffness = wp.zeros(rigid_contact_max, dtype=wp.float32)
                 """Per-contact stiffness [N/m], shape (rigid_contact_max,), dtype float."""
+                self.rigid_contact_stiffness_mapping = wp.zeros(rigid_contact_max, dtype=wp.int32)
+                """Per-contact stiffness conversion mode, shape (rigid_contact_max,), dtype int."""
                 self.rigid_contact_damping = wp.zeros(rigid_contact_max, dtype=wp.float32)
                 """Per-contact damping [N·s/m], shape (rigid_contact_max,), dtype float."""
                 self.rigid_contact_friction = wp.zeros(rigid_contact_max, dtype=wp.float32)
@@ -274,6 +276,8 @@ class Contacts:
             else:
                 self.rigid_contact_stiffness = None
                 """Per-contact stiffness [N/m], shape (rigid_contact_max,), dtype float."""
+                self.rigid_contact_stiffness_mapping = None
+                """Per-contact stiffness conversion mode, shape (rigid_contact_max,), dtype int."""
                 self.rigid_contact_damping = None
                 """Per-contact damping [N·s/m], shape (rigid_contact_max,), dtype float."""
                 self.rigid_contact_friction = None
@@ -396,6 +400,7 @@ class Contacts:
 
             if self.per_contact_shape_properties:
                 self.rigid_contact_stiffness.zero_()
+                self.rigid_contact_stiffness_mapping.zero_()
                 self.rigid_contact_damping.zero_()
                 self.rigid_contact_friction.zero_()
 

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import Any
 
 import numpy as np
@@ -259,6 +260,19 @@ class HydroelasticSDF:
     class Config:
         """Controls properties of SDF hydroelastic collision handling."""
 
+        class StiffnessMapping(IntEnum):
+            """MuJoCo conversion applied to hydroelastic contact stiffness."""
+
+            RAW = 0
+            """Use hydroelastic stiffness directly as MuJoCo constraint stiffness."""
+            FORCE_SPACE = 1
+            """Mass-normalize hydroelastic stiffness before MuJoCo conversion."""
+
+        stiffness_mapping: StiffnessMapping = StiffnessMapping.RAW
+        """Conversion applied to hydroelastic per-contact stiffness by MuJoCo.
+
+        The default preserves the existing raw hydroelastic mapping.
+        """
         reduce_contacts: bool = True
         """Whether to reduce contacts to a smaller representative set per shape pair.
         When False, all generated contacts are passed through without reduction."""
@@ -529,6 +543,7 @@ class HydroelasticSDF:
                     normal_matching=self.config.normal_matching,
                     anchor_contact=self.config.anchor_contact,
                     moment_matching=self.config.moment_matching,
+                    stiffness_mapping=int(self.config.stiffness_mapping),
                     margin_contact_area=self.config.margin_contact_area,
                     hashtable_size_factor=self.config.contact_reduction_hashtable_size_factor,
                 )
@@ -548,6 +563,7 @@ class HydroelasticSDF:
                     device=device,
                     writer_func=writer_func,
                     config=HydroelasticReductionConfig(
+                        stiffness_mapping=int(self.config.stiffness_mapping),
                         margin_contact_area=self.config.margin_contact_area,
                         hashtable_size_factor=self.config.contact_reduction_hashtable_size_factor,
                     ),
@@ -556,6 +572,7 @@ class HydroelasticSDF:
                 )
                 self.decode_contacts_kernel = get_decode_contacts_kernel(
                     self.config.margin_contact_area,
+                    int(self.config.stiffness_mapping),
                     writer_func,
                     self.pressure_func,
                 )
@@ -1360,6 +1377,7 @@ def create_mc_iterate_voxel_vertices_func(pressure_func: Any):
 
 def get_decode_contacts_kernel(
     margin_contact_area: float = 1e-4,
+    stiffness_mapping: int = 0,
     writer_func: Any = None,
     pressure_func: Any = None,
 ):
@@ -1372,6 +1390,7 @@ def get_decode_contacts_kernel(
 
     Args:
         margin_contact_area: Contact area used for non-penetrating contacts at the margin.
+        stiffness_mapping: Solver conversion mode for exported contact stiffness.
         writer_func: Warp function for writing decoded contacts.
         pressure_func: Warp function defining the user pressure law. Required.
 
@@ -1482,6 +1501,7 @@ def get_decode_contacts_kernel(
             contact_data.shape_b = shape_b
             contact_data.gap_sum = gap_sum
             contact_data.contact_stiffness = c_stiffness
+            contact_data.contact_stiffness_mapping = wp.static(stiffness_mapping)
 
             writer_func(contact_data, writer_data, output_index)
 

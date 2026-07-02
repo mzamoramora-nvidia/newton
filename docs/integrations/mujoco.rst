@@ -234,6 +234,14 @@ combine, with the same three states as joint limits:
   in to force-space scaling by setting
   ``model.mujoco.solref_mode[shape] = SOLREF_MODE_FORCE_SPACE``.
 
+Hydroelastic contacts carry their own stiffness-mapping choice, configured by
+:attr:`~newton.geometry.HydroelasticSDF.Config.stiffness_mapping`. The default
+``RAW`` mode preserves the direct per-contact mapping. ``FORCE_SPACE`` applies
+the same two-body inverse-mass factor described above to hydroelastic contact
+stiffness and damping. This hydroelastic-specific option does not alter
+ordinary SDF contacts or require all shapes to share a
+``model.mujoco.solref_mode`` value.
+
 .. note::
 
    ``use_mujoco_contacts=True`` and the MuJoCo CPU backend do not

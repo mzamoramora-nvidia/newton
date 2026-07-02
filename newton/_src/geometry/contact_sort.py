@@ -121,6 +121,7 @@ class _FullContactArrays:
     margin1: wp.array[float]
     tids: wp.array[wp.int32]
     stiffness: wp.array[float]
+    stiffness_mapping: wp.array[wp.int32]
     damping: wp.array[float]
     friction: wp.array[float]
     match_index: wp.array[wp.int32]
@@ -135,6 +136,7 @@ class _FullContactArrays:
     margin1_buf: wp.array[float]
     tids_buf: wp.array[wp.int32]
     stiffness_buf: wp.array[float]
+    stiffness_mapping_buf: wp.array[wp.int32]
     damping_buf: wp.array[float]
     friction_buf: wp.array[float]
     match_index_buf: wp.array[wp.int32]
@@ -160,6 +162,7 @@ def _backup_full_kernel(data: _FullContactArrays, count: wp.array[int]):
     data.tids_buf[i] = data.tids[i]
     if data.has_shape_props != 0:
         data.stiffness_buf[i] = data.stiffness[i]
+        data.stiffness_mapping_buf[i] = data.stiffness_mapping[i]
         data.damping_buf[i] = data.damping[i]
         data.friction_buf[i] = data.friction[i]
     if data.has_match_index != 0:
@@ -185,6 +188,7 @@ def _gather_full_kernel(data: _FullContactArrays, perm: wp.array[wp.int32], coun
     data.tids[i] = data.tids_buf[p]
     if data.has_shape_props != 0:
         data.stiffness[i] = data.stiffness_buf[p]
+        data.stiffness_mapping[i] = data.stiffness_mapping_buf[p]
         data.damping[i] = data.damping_buf[p]
         data.friction[i] = data.friction_buf[p]
     if data.has_match_index != 0:
@@ -234,10 +238,12 @@ class ContactSorter:
             self._full_tids_buf = wp.zeros(capacity, dtype=wp.int32)
             if per_contact_shape_properties:
                 self._full_stiffness_buf = wp.zeros(capacity, dtype=float)
+                self._full_stiffness_mapping_buf = wp.zeros(capacity, dtype=wp.int32)
                 self._full_damping_buf = wp.zeros(capacity, dtype=float)
                 self._full_friction_buf = wp.zeros(capacity, dtype=float)
             else:
                 self._full_stiffness_buf = wp.zeros(0, dtype=float)
+                self._full_stiffness_mapping_buf = wp.zeros(0, dtype=wp.int32)
                 self._full_damping_buf = wp.zeros(0, dtype=float)
                 self._full_friction_buf = wp.zeros(0, dtype=float)
             self._full_match_index_buf = wp.zeros(capacity, dtype=wp.int32)
@@ -317,6 +323,7 @@ class ContactSorter:
         margin1: wp.array,
         tids: wp.array,
         stiffness: wp.array | None = None,
+        stiffness_mapping: wp.array | None = None,
         damping: wp.array | None = None,
         friction: wp.array | None = None,
         match_index: wp.array | None = None,
@@ -340,6 +347,7 @@ class ContactSorter:
             margin1: float surface thickness for shape 1.
             tids: int tid array.
             stiffness: Optional float per-contact stiffness.
+            stiffness_mapping: Optional int per-contact stiffness conversion mode.
             damping: Optional float per-contact damping.
             friction: Optional float per-contact friction.
             match_index: Optional int32 array of per-contact match indices
@@ -367,6 +375,11 @@ class ContactSorter:
         data.stiffness = (
             stiffness if has_props and stiffness is not None and stiffness.shape[0] > 0 else self._full_stiffness_buf
         )
+        data.stiffness_mapping = (
+            stiffness_mapping
+            if has_props and stiffness_mapping is not None and stiffness_mapping.shape[0] > 0
+            else self._full_stiffness_mapping_buf
+        )
         data.damping = damping if has_props and damping is not None and damping.shape[0] > 0 else self._full_damping_buf
         data.friction = (
             friction if has_props and friction is not None and friction.shape[0] > 0 else self._full_friction_buf
@@ -383,6 +396,7 @@ class ContactSorter:
         data.margin1_buf = self._full_margin1_buf
         data.tids_buf = self._full_tids_buf
         data.stiffness_buf = self._full_stiffness_buf
+        data.stiffness_mapping_buf = self._full_stiffness_mapping_buf
         data.damping_buf = self._full_damping_buf
         data.friction_buf = self._full_friction_buf
         data.match_index_buf = self._full_match_index_buf

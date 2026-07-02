@@ -470,6 +470,7 @@ def _create_accumulate_moments_kernel(normal_matching: bool = True):
 def create_export_hydroelastic_reduced_contacts_kernel(
     writer_func: Any,
     margin_contact_area: float,
+    stiffness_mapping: int = 0,
     normal_matching: bool = True,
     anchor_contact: bool = False,
     moment_matching: bool = False,
@@ -500,6 +501,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
     Args:
         writer_func: A warp function with signature (ContactData, writer_data, int) -> None
         margin_contact_area: Contact area to use for non-penetrating contacts at the margin
+        stiffness_mapping: Solver conversion mode for exported contact stiffness.
         normal_matching: If True, rotate contact normals so their weighted sum aligns with aggregate force
         anchor_contact: If True, add an anchor contact at the center of pressure for each entry
         moment_matching: If True, adjust per-contact friction scales so that
@@ -901,6 +903,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 contact_data.shape_b = shape_b
                 contact_data.gap_sum = gap_sum
                 contact_data.contact_stiffness = c_stiffness
+                contact_data.contact_stiffness_mapping = wp.static(stiffness_mapping)
                 contact_data.contact_friction_scale = wp.float32(c_friction_scale)
 
                 # Call the writer function
@@ -927,6 +930,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 contact_data.shape_b = shape_b_first
                 contact_data.gap_sum = gap_sum
                 contact_data.contact_stiffness = shared_stiffness
+                contact_data.contact_stiffness_mapping = wp.static(stiffness_mapping)
                 contact_data.contact_friction_scale = wp.float32(anchor_friction_scale)
 
                 # Call the writer function for anchor
@@ -953,6 +957,7 @@ class HydroelasticReductionConfig:
             maximum friction moment per normal bin is preserved between reduced
             and unreduced contacts. Automatically enables ``anchor_contact``.
         margin_contact_area: Contact area used for non-penetrating contacts at the margin.
+        stiffness_mapping: Solver conversion mode for exported contact stiffness.
         hashtable_size_factor: Multiplier applied to the contact buffer capacity
             when allocating the reduction hashtable. Must be positive.
     """
@@ -960,6 +965,7 @@ class HydroelasticReductionConfig:
     normal_matching: bool = True
     anchor_contact: bool = False
     moment_matching: bool = False
+    stiffness_mapping: int = 0
     margin_contact_area: float = 1e-2
     hashtable_size_factor: float = 0.25
 
@@ -1077,6 +1083,7 @@ class HydroelasticContactReduction:
         self._export_kernel = create_export_hydroelastic_reduced_contacts_kernel(
             writer_func=writer_func,
             margin_contact_area=config.margin_contact_area,
+            stiffness_mapping=config.stiffness_mapping,
             normal_matching=config.normal_matching,
             anchor_contact=config.anchor_contact,
             moment_matching=config.moment_matching,

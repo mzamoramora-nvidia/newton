@@ -4515,6 +4515,7 @@ class TestMuJoCoSolverNewtonContacts(unittest.TestCase):
             "rigid_contact_margin0",
             "rigid_contact_margin1",
             "rigid_contact_stiffness",
+            "rigid_contact_stiffness_mapping",
             "rigid_contact_damping",
             "rigid_contact_friction",
         ):

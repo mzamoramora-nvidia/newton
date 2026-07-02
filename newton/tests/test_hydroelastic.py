@@ -1437,6 +1437,53 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
         )
 
 
+def test_mujoco_hydroelastic_force_space_mapping(test, device):
+    """Force-space hydro stiffness uses the contact pair's inverse mass."""
+    model, state_in, upper_body, rest_z = _build_cube_cube_scene(device)
+    wp.launch(_set_body_z_kernel, dim=1, inputs=[state_in.body_q, upper_body, rest_z - 1.0e-3], device=device)
+
+    config = HydroelasticSDF.Config(
+        stiffness_mapping=HydroelasticSDF.Config.StiffnessMapping.FORCE_SPACE,
+    )
+    pipeline = newton.CollisionPipeline(
+        model, rigid_contact_max=500, sdf_hydroelastic_config=config, deterministic=True
+    )
+    contacts = pipeline.contacts()
+    pipeline.collide(state_in, contacts)
+
+    contact_count = int(contacts.rigid_contact_count.numpy()[0])
+    stiffness = contacts.rigid_contact_stiffness.numpy()[:contact_count]
+    mapping = contacts.rigid_contact_stiffness_mapping.numpy()[:contact_count]
+    active = np.flatnonzero(stiffness > 0.0)
+    test.assertGreater(len(active), 0)
+    test.assertTrue(np.all(mapping[active] == HydroelasticSDF.Config.StiffnessMapping.FORCE_SPACE))
+
+    solver = newton.solvers.SolverMuJoCo(model, use_mujoco_contacts=False, njmax=500, nconmax=500, iterations=1)
+    solver.step(state_in, model.state(), model.control(), contacts, 1.0 / 600.0)
+    tid_to_cid = solver._contact_tid_to_cid.numpy()[:contact_count]
+    tid = next((int(i) for i in active if tid_to_cid[i] >= 0), None)
+    test.assertIsNotNone(tid, "Expected an exported MuJoCo hydroelastic contact")
+    cid = int(tid_to_cid[tid])
+
+    shape_a = int(contacts.rigid_contact_shape0.numpy()[tid])
+    shape_b = int(contacts.rigid_contact_shape1.numpy()[tid])
+    shape_to_geom = solver.newton_shape_to_mjc_geom.numpy()
+    geom_body = solver.mjw_model.geom_bodyid.numpy()
+    mj_body_a = int(geom_body[int(shape_to_geom[shape_a])])
+    mj_body_b = int(geom_body[int(shape_to_geom[shape_b])])
+    invweight = solver.mjw_model.body_invweight0.numpy()[0]
+    invw_a = float(invweight[mj_body_a, 0]) if mj_body_a >= 0 else 0.0
+    invw_b = float(invweight[mj_body_b, 0]) if mj_body_b >= 0 else 0.0
+    imp = float(solver.mjw_data.contact.solimp.numpy()[cid, 1])
+    factor = (invw_a + invw_b) * (1.0 - imp)
+    test.assertGreater(factor, 0.0)
+
+    expected_timeconst = np.sqrt(1.0 / (float(stiffness[tid]) * factor))
+    actual_solref = solver.mjw_data.contact.solref.numpy()[cid]
+    test.assertAlmostEqual(float(actual_solref[0]), expected_timeconst, delta=expected_timeconst * 1.0e-4)
+    test.assertAlmostEqual(float(actual_solref[1]), 1.0, delta=1.0e-5)
+
+
 def test_convex_mesh_hydroelastic_contacts(test, device):
     """SDF-backed convex meshes should be valid hydroelastic shapes."""
     cube_mesh = newton.Mesh.create_box(
@@ -1475,6 +1522,10 @@ def test_convex_mesh_hydroelastic_contacts(test, device):
 
 
 class TestHydroelastic(unittest.TestCase):
+    def test_stiffness_mapping_defaults_to_raw(self):
+        config = HydroelasticSDF.Config()
+        self.assertEqual(config.stiffness_mapping, HydroelasticSDF.Config.StiffnessMapping.RAW)
+
     def test_mc_edge_clamp_min_validation(self):
         """``HydroelasticSDF.Config.mc_edge_clamp_min`` validates its range at construction.
 
@@ -1581,6 +1632,13 @@ add_function_test(
     TestHydroelastic,
     "test_mujoco_hydroelastic_penetration_depth",
     test_mujoco_hydroelastic_penetration_depth,
+    devices=cuda_devices,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_mujoco_hydroelastic_force_space_mapping",
+    test_mujoco_hydroelastic_force_space_mapping,
     devices=cuda_devices,
 )
 

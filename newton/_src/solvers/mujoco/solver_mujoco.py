@@ -3735,6 +3735,7 @@ class SolverMuJoCo(SolverBase):
                 contacts.rigid_contact_margin0,
                 contacts.rigid_contact_margin1,
                 contacts.rigid_contact_stiffness,
+                contacts.rigid_contact_stiffness_mapping,
                 contacts.rigid_contact_damping,
                 contacts.rigid_contact_friction,
                 model.shape_margin,

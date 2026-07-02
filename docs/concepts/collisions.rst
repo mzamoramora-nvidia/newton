@@ -1561,6 +1561,30 @@ When ``is_hydroelastic=True`` on **both** shapes in a pair, the system generates
 
 The ``kh`` parameter on each shape controls area-dependent contact stiffness. For a pair, the effective stiffness is computed as the harmonic mean: ``k_eff = 2 * k_a * k_b / (k_a + k_b)``. Tune this for desired penetration behavior.
 
+When hydroelastic contacts are passed to
+:class:`~newton.solvers.SolverMuJoCo`,
+:attr:`~geometry.HydroelasticSDF.Config.stiffness_mapping` controls how
+their per-contact stiffness is converted to MuJoCo ``solref``:
+
+* :attr:`~geometry.HydroelasticSDF.Config.StiffnessMapping.RAW` preserves
+  the direct constraint-stiffness mapping and is the default.
+* :attr:`~geometry.HydroelasticSDF.Config.StiffnessMapping.FORCE_SPACE`
+  multiplies stiffness and damping by
+  ``(body_invweight0[A] + body_invweight0[B]) * (1 - dmax)`` before
+  conversion. This makes the hydroelastic pressure response behave as a
+  force-space material law across bodies with different masses.
+
+This option applies only to stiffness carried by hydroelastic contacts. It
+does not change ordinary SDF contacts or the per-shape
+``model.mujoco.solref_mode`` setting. It requires Newton-generated contacts
+(``SolverMuJoCo(..., use_mujoco_contacts=False)``).
+
+.. code-block:: python
+
+    config = HydroelasticSDF.Config(
+        stiffness_mapping=HydroelasticSDF.Config.StiffnessMapping.FORCE_SPACE,
+    )
+
 **Custom pressure laws:**
 
 The contact patch is the iso-pressure surface ``p_a == p_b``. ``signed_depth``

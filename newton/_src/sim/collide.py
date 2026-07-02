@@ -67,6 +67,7 @@ class ContactWriterData:
     # Per-contact shape properties, empty arrays if not enabled.
     # Zero-values indicate that no per-contact shape properties are set for this contact
     out_stiffness: wp.array[float]
+    out_stiffness_mapping: wp.array[int]
     out_damping: wp.array[float]
     out_friction: wp.array[float]
     out_sort_key: wp.array[wp.int64]
@@ -151,6 +152,7 @@ def write_contact(
     # Write stiffness/damping/friction only if per-contact shape properties are enabled
     if writer_data.out_stiffness.shape[0] > 0:
         writer_data.out_stiffness[index] = contact_data.contact_stiffness
+        writer_data.out_stiffness_mapping[index] = contact_data.contact_stiffness_mapping
         writer_data.out_damping[index] = contact_data.contact_damping
         writer_data.out_friction[index] = contact_data.contact_friction_scale
 
@@ -1193,6 +1195,7 @@ class CollisionPipeline:
         writer_data.out_tids = contacts.rigid_contact_tids
 
         writer_data.out_stiffness = contacts.rigid_contact_stiffness
+        writer_data.out_stiffness_mapping = contacts.rigid_contact_stiffness_mapping
         writer_data.out_damping = contacts.rigid_contact_damping
         writer_data.out_friction = contacts.rigid_contact_friction
         if self.deterministic and contacts.rigid_contact_max != self._sort_key_array.shape[0]:
@@ -1267,6 +1270,7 @@ class CollisionPipeline:
                 margin1=contacts.rigid_contact_margin1,
                 tids=contacts.rigid_contact_tids,
                 stiffness=contacts.rigid_contact_stiffness,
+                stiffness_mapping=contacts.rigid_contact_stiffness_mapping,
                 damping=contacts.rigid_contact_damping,
                 friction=contacts.rigid_contact_friction,
                 match_index=contacts.rigid_contact_match_index,
