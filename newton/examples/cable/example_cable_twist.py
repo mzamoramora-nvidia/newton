@@ -153,7 +153,7 @@ class Example:
 
         # Load the authored cables from USD once; the per-cable loop recovers them below.
         if self.load_usd:
-            usd_result = builder.add_usd(newton.examples.get_asset("cable_twist.usda"))
+            usd_result = builder.add_usd(newton.examples.get_asset("cable_twist.usda"), deformable_results=True)
 
         # Create 3 cables in a row along the y-axis, centered around origin
         for i, bend_stiffness in enumerate(bend_stiffness_values):

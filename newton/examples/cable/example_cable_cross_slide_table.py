@@ -689,7 +689,9 @@ class Example:
             # The pulley-wrapped route stays programmatic and is applied to the state after
             # finalize, since it depends on the pulley layout.
             builder.add_articulation([*table_articulation_joints], label="xy_table_cross_slide")
-            usd_result = builder.add_usd(newton.examples.get_asset("cable_cross_slide_table.usda"))
+            usd_result = builder.add_usd(
+                newton.examples.get_asset("cable_cross_slide_table.usda"), deformable_results=True
+            )
             cable_bodies, cable_joints = usd_result["path_cable_map"]["/World/Cable"]
             self.cable_bodies = list(cable_bodies)
 

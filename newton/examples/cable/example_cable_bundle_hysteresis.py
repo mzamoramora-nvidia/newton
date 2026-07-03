@@ -202,7 +202,7 @@ class Example:
         cable_body_ids: list[int] = []
         use_usd_asset = self.load_usd and self.num_cables == 7 and self.num_elements == 40
         if use_usd_asset:
-            usd_result = builder.add_usd(newton.examples.get_asset("cable_bundle.usda"))
+            usd_result = builder.add_usd(newton.examples.get_asset("cable_bundle.usda"), deformable_results=True)
             for i in range(self.num_cables):
                 rod_bodies, rod_joints = usd_result["path_cable_map"][f"/World/bundle_cable_{i}"]
                 # Bend damping is not part of the base USD curve material.

@@ -154,7 +154,9 @@ class Example:
             # The bundled asset stores the soft grid as a TetMesh prim with a bound
             # physics material (E, nu, density). k_damp is not part of that base
             # schema, so re-apply it per element after import.
-            usd_result = builder.add_usd(newton.examples.get_asset("rigid_soft_contact_soft.usda"))
+            usd_result = builder.add_usd(
+                newton.examples.get_asset("rigid_soft_contact_soft.usda"), deformable_results=True
+            )
             t_start, t_end = usd_result["path_soft_map"]["/World/SoftBody"]["tet"]
             for t in range(t_start, t_end):
                 k_mu, k_lambda, _ = builder.tet_materials[t]
