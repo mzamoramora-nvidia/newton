@@ -203,6 +203,62 @@ repository examples spend tuning effort, not a shared solver API.
        Examples construct and pass a ``Config`` object, often with
        ``Config.from_model``.
 
+VBD Particle Contacts: Radius vs. Margin
+----------------------------------------
+
+Particle objects are VBD's deformables (cloths and volumetric soft bodies,
+both simulated as particle meshes). :class:`~newton.solvers.SolverVBD`
+handles their contacts, within one object and between objects, through two
+distances that must be tuned asymmetrically:
+
+- ``particle_self_contact_radius``: **keep it small.** This is where pairs
+  start to interact, i.e. the effective contact thickness of the particle
+  surface. A large radius holds interacting objects visibly apart.
+- ``particle_self_contact_margin``: **keep it generous, at least the radius**
+  (the constructor rejects smaller values). The margin only gates candidate
+  generation, so a larger margin costs candidate buffers and runtime, not
+  stiffness. Candidates refresh only every
+  ``particle_collision_detection_interval`` steps, so when multiple particle
+  objects interact, approaching surfaces must enter the candidate list while
+  still far apart or they penetrate before the next detection pass. Start at
+  1.5-2x the radius; increase for fast-approaching objects or infrequent
+  detection.
+
+By default, self-contact between neighboring vertices of the same deformable
+is disabled: ``particle_topological_contact_filter_threshold`` discards
+candidate pairs within that many mesh rings (default ``2``); contacts between
+separate objects are unaffected. On a high-resolution mesh, more than two
+rings of neighbors can lie within the contact radius, producing spurious
+self-contacts even at rest. Raise the ring threshold to keep the contact
+radius (values above ``3`` are significantly more expensive) or reduce the
+radius.
+
+AVBD Penalty Ramping (``beta``)
+-------------------------------
+
+AVBD enforces each rigid constraint (joints and body contacts) with a penalty
+stiffness :math:`k`. With ``beta = 0`` (the default), :math:`k` is fixed at
+the constraint's ``ke`` ceiling (contact material ``ke`` or joint
+linear/angular ``ke``). With a positive ``rigid_avbd_beta``, :math:`k` starts
+from the ``k_start`` seeds and each solver iteration applies
+
+.. math::
+
+   k \leftarrow \min\left(k_{\max},\; k + \beta \, \lvert C \rvert\right)
+
+with :math:`\lvert C \rvert` the constraint violation (penetration depth for
+contacts) and :math:`k_{\max}` the same ``ke`` ceiling; satisfied constraints
+stop ramping.
+
+- **Prefer** ``beta = 0``. Raise it only if constraints stay visibly violated
+  (joint drift, contact penetration) after a fair ``iterations`` sweep.
+- **Tune linear and angular betas separately.** ``rigid_avbd_linear_beta``
+  and ``rigid_avbd_angular_beta`` ramp against different units (meters vs.
+  radians); contacts use only the linear beta.
+- ``rigid_avbd_gamma`` decays the ramped stiffness across steps. It also
+  decays the persisted hard-mode Lagrange multipliers, so it is active even
+  at ``beta = 0``.
+
 Drive Gain Sanity Checks
 ------------------------
 
