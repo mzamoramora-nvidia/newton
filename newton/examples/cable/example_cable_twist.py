@@ -153,14 +153,12 @@ class Example:
 
         # Load the authored cables from USD once; the per-cable loop recovers them below.
         if self.load_usd:
-            builder.add_usd(newton.examples.get_asset("cable_twist.usda"))
+            usd_result = builder.add_usd(newton.examples.get_asset("cable_twist.usda"))
 
         # Create 3 cables in a row along the y-axis, centered around origin
         for i, bend_stiffness in enumerate(bend_stiffness_values):
             if self.load_usd:
-                c = builder.cable_label.index(f"/World/Cable_{i}")
-                rod_bodies = list(range(builder.cable_body_start[c], builder.cable_body_end[c]))
-                rod_joints = list(range(builder.cable_joint_start[c], builder.cable_joint_end[c]))
+                rod_bodies, rod_joints = usd_result["path_cable_map"][f"/World/Cable_{i}"]
 
                 # Bend damping is not part of the base USD curve material; apply it to
                 # each cable joint's bend DOF (index 1: linear stretch, angular bend).

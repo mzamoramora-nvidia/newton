@@ -55,11 +55,11 @@ class Example:
             builder.default_tri_kd = 5.0e0
             builder.default_edge_kd = 1.0e1
             # World-space cloth baked from the same procedural build below.
-            builder.add_usd(newton.examples.get_asset("cloth_bending.usda"))
+            usd_result = builder.add_usd(newton.examples.get_asset("cloth_bending.usda"))
             # The importer sets tri_ka=0 (no schema attribute), so apply the procedural
             # build's area term to the imported cloth's triangles for parity.
-            c = builder.cloth_label.index("/World/Cloth")
-            for t in range(builder.cloth_tri_start[c], builder.cloth_tri_end[c]):
+            t0, t1 = usd_result["path_cloth_map"]["/World/Cloth"]["tri"]
+            for t in range(t0, t1):
                 ke, _ka, kd, drag, lift = builder.tri_materials[t]
                 builder.tri_materials[t] = (ke, 5.0e1, kd, drag, lift)
         else:
