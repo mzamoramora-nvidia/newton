@@ -30,6 +30,7 @@ as external references.
 
    simulation_tuning_solvers
    simulation_tuning_mujoco
+   simulation_tuning_porting
 
 Diagnose Before Tuning
 ----------------------
@@ -132,6 +133,16 @@ Symptom Table
      - Use richer contact geometry; raise solver convergence work if supported;
        tune torsional and rolling friction where relevant.
      - Runtime
+   * - Object ejected or dropped when the robot interacts (rate rises as the
+       controller improves at making contact)
+     - Check drive overshoot and joint velocity limits: verify the target
+       solver actually enforces the velocity/effort limits the task was tuned
+       under, and overlay joint-velocity traces across backends. Then check
+       contact stiffness under the real pinch force. See
+       :ref:`Tuning Solver Porting`.
+     - Raise drive damping; stiffen contact for the pinch load; expect both
+       fixes to be needed together for grasp-and-move tasks.
+     - Fidelity; setup effort
    * - Slow or inaccurate drive tracking
      - Tune ``joint_target_ke`` and ``joint_target_kd``; clamp control
        effort in controller code or with MuJoCo effort limits where supported;
@@ -158,3 +169,6 @@ Going Deeper
   math.
 - :ref:`Tuning MuJoCo` — the MuJoCo-Warp constraint model, ``ke``/``kd`` to
   ``solref``/``solimp`` mapping, and task templates.
+- :ref:`Tuning Solver Porting` — porting a task between backends, the
+  feature-parity audit, worst-case validation, and powered-grasp starting
+  magnitudes.
