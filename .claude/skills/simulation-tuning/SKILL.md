@@ -55,6 +55,7 @@ or from this guide without having opened the code that defines it.
 | Workflow, principles, symptom table | `docs/concepts/simulation_tuning.rst` |
 | Supported knobs per solver, sanity-check math | `docs/concepts/simulation_tuning_solvers.rst` |
 | MuJoCo-Warp constraint model, ke/kd↔solref/solimp, task templates | `docs/concepts/simulation_tuning_mujoco.rst` |
+| Porting a task between solvers, feature-parity audit, worst-case validation, powered-grasp magnitudes | `docs/concepts/simulation_tuning_porting.rst` |
 | Which joint features each solver supports ("Joint feature support" table) | `docs/api/newton_solvers.rst` |
 
 ## Key facts
@@ -67,3 +68,12 @@ or from this guide without having opened the code that defines it.
   number.
 - Reduce `dt` / add substeps before raising stiffness — usually the most
   reliable stability fix.
+- Porting a task between solvers? Run the feature-parity audit FIRST (which
+  limits does the target solver actually enforce — joint velocity limits
+  especially) and overlay identical-action trajectories across backends before
+  tuning anything. See the solver-porting page.
+- A learning policy adversarially amplifies solver gaps: random-motion tests
+  understate problems; judge fixes against worst-case/bang-bang inputs and
+  replayed exploit action sequences. Compound failures (drive x contact) need
+  knob PAIRS validated in a scripted repro; single-knob sweeps wrongly reject
+  both.

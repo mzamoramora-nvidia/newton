@@ -99,7 +99,14 @@ frequency and ``kd / (2√ke)`` the nominal damping ratio. To compare damping at
 fixed stiffness, hold ``ke`` and set ``kd = 2·ζ·√ke``; do not raise ``ke``
 or ``kd`` alone. (Newton's
 ``convert_solref`` carries internal ``d_width``/``d_r`` arguments, but they are
-fixed at ``1`` on every current path, so they are not tuning knobs.) The realized
+fixed at ``1`` on every current path, so they are not tuning knobs.) When raising
+stiffness along this path, keep the resulting ``timeconst`` at or above twice the
+solver substep ``dt``: by default the solver silently clamps it to that floor
+(the ``refsafe`` integrator safety, ``timeconst >= 2 * timestep``), so further
+increases of ``ke``/``kd`` at a fixed damping ratio have no effect. Only
+``timeconst`` is clamped, not ``dampratio``, so raising ``ke`` alone still
+stiffens the contact but leaves the effective damping saturated. With ``refsafe``
+disabled, MuJoCo documents that the system can go unstable. The realized
 response still depends on ``solimp``, ``dmax``, the current impedance ``d(r)``,
 constraint inverse inertia, the friction cone, solver convergence, and the
 timestep.
