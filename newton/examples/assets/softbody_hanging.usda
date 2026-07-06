@@ -17,7 +17,7 @@ def Xform "World"
     }
 
     def TetMesh "SoftBody_0" (
-        prepend apiSchemas = ["MaterialBindingAPI", "PhysicsVolumeDeformableSimAPI"]
+        prepend apiSchemas = ["MaterialBindingAPI", "PhysicsVolumeDeformableSimAPI", "PhysicsCollisionAPI"]
     )
     {
         rel material:binding:physics = </World/SoftMat> (
@@ -29,7 +29,7 @@ def Xform "World"
     }
 
     def TetMesh "SoftBody_1" (
-        prepend apiSchemas = ["MaterialBindingAPI", "PhysicsVolumeDeformableSimAPI"]
+        prepend apiSchemas = ["MaterialBindingAPI", "PhysicsVolumeDeformableSimAPI", "PhysicsCollisionAPI"]
     )
     {
         rel material:binding:physics = </World/SoftMat> (
@@ -41,7 +41,7 @@ def Xform "World"
     }
 
     def TetMesh "SoftBody_2" (
-        prepend apiSchemas = ["MaterialBindingAPI", "PhysicsVolumeDeformableSimAPI"]
+        prepend apiSchemas = ["MaterialBindingAPI", "PhysicsVolumeDeformableSimAPI", "PhysicsCollisionAPI"]
     )
     {
         rel material:binding:physics = </World/SoftMat> (
@@ -53,7 +53,7 @@ def Xform "World"
     }
 
     def TetMesh "SoftBody_3" (
-        prepend apiSchemas = ["MaterialBindingAPI", "PhysicsVolumeDeformableSimAPI"]
+        prepend apiSchemas = ["MaterialBindingAPI", "PhysicsVolumeDeformableSimAPI", "PhysicsCollisionAPI"]
     )
     {
         rel material:binding:physics = </World/SoftMat> (

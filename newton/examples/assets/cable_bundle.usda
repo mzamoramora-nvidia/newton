@@ -20,7 +20,7 @@ def Xform "World"
     }
 
     def BasisCurves "bundle_cable_0" (
-        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI"]
+        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI", "PhysicsCollisionAPI"]
     )
     {
         int[] curveVertexCounts = [41]
@@ -32,7 +32,7 @@ def Xform "World"
     }
 
     def BasisCurves "bundle_cable_1" (
-        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI"]
+        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI", "PhysicsCollisionAPI"]
     )
     {
         int[] curveVertexCounts = [41]
@@ -44,7 +44,7 @@ def Xform "World"
     }
 
     def BasisCurves "bundle_cable_2" (
-        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI"]
+        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI", "PhysicsCollisionAPI"]
     )
     {
         int[] curveVertexCounts = [41]
@@ -56,7 +56,7 @@ def Xform "World"
     }
 
     def BasisCurves "bundle_cable_3" (
-        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI"]
+        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI", "PhysicsCollisionAPI"]
     )
     {
         int[] curveVertexCounts = [41]
@@ -68,7 +68,7 @@ def Xform "World"
     }
 
     def BasisCurves "bundle_cable_4" (
-        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI"]
+        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI", "PhysicsCollisionAPI"]
     )
     {
         int[] curveVertexCounts = [41]
@@ -80,7 +80,7 @@ def Xform "World"
     }
 
     def BasisCurves "bundle_cable_5" (
-        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI"]
+        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI", "PhysicsCollisionAPI"]
     )
     {
         int[] curveVertexCounts = [41]
@@ -92,7 +92,7 @@ def Xform "World"
     }
 
     def BasisCurves "bundle_cable_6" (
-        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI"]
+        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI", "PhysicsCollisionAPI"]
     )
     {
         int[] curveVertexCounts = [41]

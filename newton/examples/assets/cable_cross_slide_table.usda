@@ -22,7 +22,7 @@ def Xform "World"
     }
 
     def BasisCurves "Cable" (
-        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI"]
+        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI", "PhysicsCollisionAPI"]
     )
     {
         int[] curveVertexCounts = [107]

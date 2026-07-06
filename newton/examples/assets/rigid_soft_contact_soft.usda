@@ -17,7 +17,7 @@ def Xform "World"
     }
 
     def TetMesh "SoftBody" (
-        prepend apiSchemas = ["MaterialBindingAPI", "PhysicsVolumeDeformableSimAPI"]
+        prepend apiSchemas = ["MaterialBindingAPI", "PhysicsVolumeDeformableSimAPI", "PhysicsCollisionAPI"]
     )
     {
         rel material:binding:physics = </World/SoftMat> (

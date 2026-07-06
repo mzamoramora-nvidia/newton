@@ -21,7 +21,7 @@ def Xform "World"
     }
 
     def BasisCurves "Cable_0" (
-        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI"]
+        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI", "PhysicsCollisionAPI"]
     )
     {
         int[] curveVertexCounts = [65]
@@ -42,7 +42,7 @@ def Xform "World"
     }
 
     def BasisCurves "Cable_1" (
-        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI"]
+        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI", "PhysicsCollisionAPI"]
     )
     {
         int[] curveVertexCounts = [65]
@@ -63,7 +63,7 @@ def Xform "World"
     }
 
     def BasisCurves "Cable_2" (
-        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI"]
+        apiSchemas = ["PhysicsCurvesDeformableSimAPI", "MaterialBindingAPI", "PhysicsCollisionAPI"]
     )
     {
         int[] curveVertexCounts = [65]
