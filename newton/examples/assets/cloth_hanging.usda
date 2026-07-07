@@ -11,9 +11,10 @@ def Xform "World"
         prepend apiSchemas = ["PhysicsSurfaceDeformableMaterialAPI"]
     )
     {
-        custom float physics:bendStiffness = 10
-        custom float physics:shearStiffness = 1000
-        custom float physics:stretchStiffness = 1000
+        custom float physics:bendStiffness = 10000
+        custom float physics:shearStiffness = 10000
+        custom float physics:stretchStiffness = 10000
+        custom float physics:thickness = 0.1
     }
 
     def Mesh "Cloth" (
