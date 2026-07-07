@@ -53,7 +53,7 @@ class Example:
             # The bundled asset stores the four soft grids as TetMesh prims with a
             # bound physics material (E, nu, density). k_damp and fix_left are not
             # part of that base schema, so re-apply them per body after import.
-            usd_result = builder.add_usd(newton.examples.get_asset("softbody_hanging.usda"), deformable_results=True)
+            usd_result = builder.add_usd(newton.examples.get_asset("softbody_hanging.usda"), return_deformable_results=True)
             for i, k_damp in enumerate(damping_values):
                 soft_ranges = usd_result["path_soft_map"][f"/World/SoftBody_{i}"]
                 p_start, p_end = soft_ranges["particle"]

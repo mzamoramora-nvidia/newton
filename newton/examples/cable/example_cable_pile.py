@@ -117,7 +117,7 @@ class Example:
         # that default; otherwise build the layered lanes procedurally.
         use_usd_asset = self.load_usd and not slope_enabled and self.layers == 10 and self.lanes_per_layer == 10
         if use_usd_asset:
-            usd_result = builder.add_usd(newton.examples.get_asset("cable_pile.usda"), deformable_results=True)
+            usd_result = builder.add_usd(newton.examples.get_asset("cable_pile.usda"), return_deformable_results=True)
             for layer in range(self.layers):
                 for lane in range(self.lanes_per_layer):
                     cable_path = f"/World/Cable_l{layer}_{lane}"
