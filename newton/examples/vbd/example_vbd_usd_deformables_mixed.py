@@ -58,6 +58,9 @@ class Example:
         self.control = self.model.control()
 
         self.viewer.set_model(self.model)
+        renderer = getattr(self.viewer, "renderer", None)
+        if renderer is not None and hasattr(renderer, "draw_edges"):
+            renderer.draw_edges = True
         self.viewer.set_camera(
             pos=wp.vec3(2.0, -2.0, 1.5),
             pitch=-15.0,
