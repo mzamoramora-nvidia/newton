@@ -40,6 +40,7 @@ newton.geometry
    compute_inertia_shape
    compute_offset_mesh
    create_empty_sdf_data
+   hydroelastic_pressure_law_linear
    sdf_box
    sdf_capsule
    sdf_cone

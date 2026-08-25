@@ -104,7 +104,8 @@ FIXED_TOTAL_NORMAL = wp.constant(11)  # 3 components
 FIXED_MOMENT_UNREDUCED = wp.constant(14)
 FIXED_MOMENT_REDUCED = wp.constant(15)
 FIXED_MOMENT2_REDUCED = wp.constant(16)
-NUM_FIXED_SLOTS = 17
+FIXED_TANGENT_STIFFNESS = wp.constant(17)
+NUM_FIXED_SLOTS = 18
 
 # Scale families, laid out ``family * ht_capacity + entry``.  Quantities that
 # share a physical scale share a family so they stay mutually consistent.
@@ -115,7 +116,8 @@ SCALE_REDUCED_DEPTH = wp.constant(3)  # total_depth_reduced, total_normal_reduce
 SCALE_MOMENT_UNREDUCED = wp.constant(4)
 SCALE_MOMENT_REDUCED = wp.constant(5)
 SCALE_MOMENT2_REDUCED = wp.constant(6)
-NUM_SCALE_FAMILIES = 7
+SCALE_TANGENT_STIFFNESS = wp.constant(7)
+NUM_SCALE_FAMILIES = 8
 
 # Accumulation phases for the two-pass (scale, then add) accumulators.
 PHASE_SCALE = 0
@@ -125,6 +127,16 @@ PHASE_ACCUMULATE = 1
 FINALIZE_UNREDUCED = 0
 FINALIZE_REDUCED_DEPTH = 1
 FINALIZE_MOMENTS = 2
+
+
+@wp.func
+def _rich_contact_linearization(area: float, pressure: float, tangent_stiffness: float) -> wp.vec2:
+    """Return the stiffness and solver distance that preserve pressure force.
+
+    Rich-law faces are validated before entering the reducer, so
+    ``tangent_stiffness`` is finite and strictly positive here.
+    """
+    return wp.vec2(tangent_stiffness, -area * pressure / tangent_stiffness)
 
 
 def _fixed_mantissa_bits(max_terms: int) -> int:
@@ -345,6 +357,7 @@ def export_hydroelastic_contact_to_buffer(
     pair_separation: float,
     area: float,
     pressure: float,
+    tangent_stiffness: float,
     fingerprint: int,
     reducer_data: GlobalContactReducerData,
 ) -> int:
@@ -361,6 +374,7 @@ def export_hydroelastic_contact_to_buffer(
         pair_separation: Margin-relative pair separation.
         area: Force-bearing area when penetrating, or full face area when speculative.
         pressure: Current pressure on the face.
+        tangent_stiffness: Rich-law tangent stiffness [N/m], or zero when unused.
         fingerprint: Stable geometric identifier for deterministic reduction.
         reducer_data: GlobalContactReducerData with all arrays
 
@@ -380,6 +394,8 @@ def export_hydroelastic_contact_to_buffer(
     if contact_id >= 0:
         reducer_data.contact_area[contact_id] = area
         reducer_data.contact_pressure[contact_id] = pressure
+        if reducer_data.contact_tangent_stiffness.shape[0] > 0:
+            reducer_data.contact_tangent_stiffness[contact_id] = tangent_stiffness
 
     return contact_id
 
@@ -443,6 +459,9 @@ def _create_unreduced_aggregate_kernel(mantissa_bits: int):
             area = reducer_data.contact_area[contact_id]
             force_weight = area * reducer_data.contact_pressure[contact_id]
             depth_volume = (area * (-depth)) * normal
+            tangent_stiffness = float(0.0)
+            if reducer_data.contact_tangent_stiffness.shape[0] > 0:
+                tangent_stiffness = reducer_data.contact_tangent_stiffness[contact_id]
 
             if phase == wp.static(PHASE_SCALE):
                 # |normal| == 1, so force_weight already bounds force_weight * normal.
@@ -455,6 +474,14 @@ def _create_unreduced_aggregate_kernel(mantissa_bits: int):
                     force_weight * _max_abs_component(position),
                 )
                 _record_scale(fixed_scale, SCALE_DEPTH_VOLUME, entry_idx, ht_capacity, _max_abs_component(depth_volume))
+                if reducer_data.contact_tangent_stiffness.shape[0] > 0:
+                    _record_scale(
+                        fixed_scale,
+                        SCALE_TANGENT_STIFFNESS,
+                        entry_idx,
+                        ht_capacity,
+                        tangent_stiffness,
+                    )
                 continue
 
             # One shift per scale family, not per component: see ``_fixed_shift``.
@@ -466,6 +493,19 @@ def _create_unreduced_aggregate_kernel(mantissa_bits: int):
             _add_fixed(fixed_accum, FIXED_WEIGHT_SUM, entry_idx, ht_capacity, force_weight, shift_force)
             _add_fixed_vec(fixed_accum, FIXED_WEIGHTED_POS, entry_idx, ht_capacity, force_weight * position, shift_pos)
             _add_fixed_vec(fixed_accum, FIXED_DEPTH_VOLUME, entry_idx, ht_capacity, depth_volume, shift_vol)
+            if reducer_data.contact_tangent_stiffness.shape[0] > 0:
+                shift_tangent = _fixed_shift(
+                    fixed_scale[wp.static(SCALE_TANGENT_STIFFNESS) * ht_capacity + entry_idx],
+                    mb,
+                )
+                _add_fixed(
+                    fixed_accum,
+                    FIXED_TANGENT_STIFFNESS,
+                    entry_idx,
+                    ht_capacity,
+                    tangent_stiffness,
+                    shift_tangent,
+                )
 
     return accumulate_unreduced_aggregates_kernel
 
@@ -560,6 +600,12 @@ def _create_finalize_fixed_kernel(mantissa_bits: int):
             reducer_data.agg_depth_volume[entry_idx] = _read_fixed_vec(
                 fixed_accum, FIXED_DEPTH_VOLUME, entry_idx, ht_capacity, shift_vol
             )
+            if reducer_data.agg_tangent_stiffness.shape[0] > 0:
+                reducer_data.agg_tangent_stiffness[entry_idx] = _from_fixed(
+                    fixed_accum[wp.static(FIXED_TANGENT_STIFFNESS) * ht_capacity + entry_idx],
+                    fixed_scale[wp.static(SCALE_TANGENT_STIFFNESS) * ht_capacity + entry_idx],
+                    mb,
+                )
         elif group == wp.static(FINALIZE_REDUCED_DEPTH):
             shift_depth = _fixed_shift(fixed_scale[wp.static(SCALE_REDUCED_DEPTH) * ht_capacity + entry_idx], mb)
             reducer_data.total_depth_reduced[entry_idx] = _from_fixed_scaled(
@@ -777,6 +823,7 @@ def _create_accumulate_reduced_depth_kernel(deterministic: bool = False, mantiss
         contact_nbin_entry: wp.array[wp.int32],
         total_depth_reduced: wp.array[wp.float32],
         total_normal_reduced: wp.array[wp.vec3],
+        total_contact_count_reduced: wp.array[wp.int32],
         fixed_accum: wp.array[wp.int64],
         fixed_scale: wp.array[wp.int32],
         phase: int,
@@ -823,6 +870,8 @@ def _create_accumulate_reduced_depth_kernel(deterministic: bool = False, mantiss
                     else:
                         nbin_idx = contact_nbin_entry[contact_id]
                     if nbin_idx >= 0:
+                        if phase == wp.static(PHASE_ACCUMULATE) and total_contact_count_reduced.shape[0] > 0:
+                            wp.atomic_add(total_contact_count_reduced, nbin_idx, 1)
                         pen_mag = -depth
                         contact_normal = decode_oct(normal[contact_id])
                         if wp.static(deterministic):
@@ -987,6 +1036,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
     anchor_contact: bool = False,
     moment_matching: bool = False,
     deterministic_sort_keys: bool = False,
+    use_pressure_law: bool = False,
 ):
     """Create a kernel that exports reduced hydroelastic contacts using a custom writer function.
 
@@ -1020,6 +1070,8 @@ def create_export_hydroelastic_reduced_contacts_kernel(
             reduced and unreduced contacts.
         deterministic_sort_keys: Whether to tag normal-bin and voxel-bin
             exports so deterministic contact sort keys remain unique.
+        use_pressure_law: Whether to preserve a projected rich-law tangent
+            budget in addition to aggregate force.
 
     Returns:
         A warp kernel that can be launched to export reduced hydroelastic contacts.
@@ -1041,6 +1093,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
         ht_active_slots: wp.array[wp.int32],
         # Aggregate data per entry (from generate kernel)
         agg_force: wp.array[wp.vec3],
+        agg_tangent_stiffness: wp.array[wp.float32],
         agg_depth_volume: wp.array[wp.vec3],
         weighted_pos_sum: wp.array[wp.vec3],
         weight_sum: wp.array[wp.float32],
@@ -1051,12 +1104,14 @@ def create_export_hydroelastic_reduced_contacts_kernel(
         contact_fingerprints: wp.array[wp.int32],
         contact_area: wp.array[wp.float32],
         contact_pressure: wp.array[wp.float32],
+        contact_tangent_stiffness: wp.array[wp.float32],
         shape_material_k_hydro: wp.array[wp.float32],
         contact_nbin_entry: wp.array[wp.int32],
         # Pre-accumulated total depth of winning contacts per normal bin
         total_depth_reduced: wp.array[wp.float32],
         # Pre-accumulated depth-weighted normal sum of winning contacts per normal bin
         total_normal_reduced: wp.array[wp.vec3],
+        total_contact_count_reduced: wp.array[wp.int32],
         # Pre-accumulated friction moments per normal bin (for moment matching)
         agg_moment_unreduced: wp.array[wp.float32],
         agg_moment_reduced: wp.array[wp.float32],
@@ -1086,10 +1141,9 @@ def create_export_hydroelastic_reduced_contacts_kernel(
         for i in range(tid, num_active, total_num_threads):
             # Get the hashtable entry index
             entry_idx = ht_active_slots[i]
-            is_voxel_entry = False
-            if wp.static(deterministic_sort_keys):
-                bin_id = int((ht_keys[entry_idx] >> wp.uint64(55)) & wp.uint64(0xFF))
-                is_voxel_entry = bin_id >= wp.static(NUM_NORMAL_BINS)
+            bin_id = int((ht_keys[entry_idx] >> wp.uint64(55)) & wp.uint64(0xFF))
+            is_normal_entry = bin_id < wp.static(NUM_NORMAL_BINS)
+            is_voxel_entry = not is_normal_entry
 
             # === First pass: collect unique contacts and compute aggregates ===
             exported_ids = exported_ids_vec()
@@ -1169,7 +1223,12 @@ def create_export_hydroelastic_reduced_contacts_kernel(
             anchor_pos = wp.vec3(0.0, 0.0, 0.0)
             add_anchor = 0
             entry_weight_sum = weight_sum[entry_idx]
-            if wp.static(anchor_contact) and has_reliable_agg_direction and max_pen_depth > 0.0:
+            if (
+                wp.static(anchor_contact)
+                and has_reliable_agg_direction
+                and (is_normal_entry or not wp.static(use_pressure_law))
+                and max_pen_depth > 0.0
+            ):
                 if entry_weight_sum > wp.static(EPS_SMALL):
                     anchor_pos = weighted_pos_sum[entry_idx] / entry_weight_sum
                     add_anchor = 1
@@ -1214,6 +1273,14 @@ def create_export_hydroelastic_reduced_contacts_kernel(
             shared_stiffness = float(0.0)
             if agg_force_mag > wp.static(EPS_SMALL) and total_depth_with_anchor > 0.0:
                 shared_stiffness = agg_force_mag / total_depth_with_anchor
+            distance_scale = float(1.0)
+            if wp.static(use_pressure_law) and is_normal_entry:
+                output_count = total_contact_count_reduced[entry_idx] + add_anchor
+                tangent_budget = agg_tangent_stiffness[entry_idx]
+                if output_count > 0 and tangent_budget > wp.static(EPS_SMALL):
+                    shared_stiffness = tangent_budget / float(output_count)
+                    if agg_force_mag > wp.static(EPS_SMALL) and total_depth_with_anchor > wp.static(EPS_SMALL):
+                        distance_scale = agg_force_mag / (shared_stiffness * total_depth_with_anchor)
 
             # Moment matching: hybrid uniform / per-contact strategy.
             moment_alpha = float(0.0)
@@ -1275,10 +1342,11 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 pressure_i = contact_pressure[contact_id]
 
                 c_friction_scale = float(1.0)
+                solver_distance = depth
 
-                if has_reliable_agg_direction:
+                if has_reliable_agg_direction or (wp.static(use_pressure_law) and is_normal_entry):
                     # --- Normal-bin entry ---
-                    if wp.static(normal_matching) and depth < 0.0:
+                    if wp.static(normal_matching) and has_reliable_agg_direction and depth < 0.0:
                         final_normal = wp.normalize(wp.quat_rotate(rotation_q, contact_normal))
                     c_stiffness = shared_stiffness
                     if shared_stiffness == 0.0:
@@ -1287,9 +1355,18 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                         # equals area * pressure. Speculative activation uses
                         # geometric area and the pair material slope.
                         if depth < 0.0:
-                            c_stiffness = area_i * pressure_i / wp.max(-depth, wp.static(EPS_SMALL))
+                            if wp.static(use_pressure_law):
+                                rich_pair = _rich_contact_linearization(
+                                    area_i, pressure_i, contact_tangent_stiffness[contact_id]
+                                )
+                                c_stiffness = rich_pair[0]
+                                solver_distance = rich_pair[1]
+                            else:
+                                c_stiffness = area_i * pressure_i / wp.max(-depth, wp.static(EPS_SMALL))
                         else:
                             c_stiffness = wp.static(margin_contact_area) * k_eff_first
+                    elif wp.static(use_pressure_law) and depth < 0.0:
+                        solver_distance = distance_scale * depth
 
                     # Moment matching friction adjustment
                     if wp.static(moment_matching) and depth < 0.0:
@@ -1331,6 +1408,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                             nbin_effective_depth_no_anchor = total_depth_reduced[nbin_entry_idx]
                         nbin_effective_depth = nbin_effective_depth_no_anchor
                         nbin_anchor_depth = float(0.0)
+                        nbin_add_anchor = int(0)
                         if wp.static(anchor_contact) and nbin_dir_reliable:
                             nbin_max_depth_value = ht_values[
                                 wp.static(NUM_SPATIAL_DIRECTIONS) * ht_capacity + nbin_entry_idx
@@ -1343,8 +1421,29 @@ def create_export_hydroelastic_reduced_contacts_kernel(
 
                             if weight_sum[nbin_entry_idx] > wp.static(EPS_SMALL) and nbin_anchor_depth > 0.0:
                                 nbin_effective_depth = nbin_effective_depth_no_anchor + nbin_anchor_depth
+                                nbin_add_anchor = 1
 
-                        if nbin_agg_mag > wp.static(EPS_SMALL) and nbin_effective_depth > 0.0:
+                        if wp.static(use_pressure_law):
+                            nbin_output_count = total_contact_count_reduced[nbin_entry_idx] + nbin_add_anchor
+                            nbin_tangent_budget = agg_tangent_stiffness[nbin_entry_idx]
+                            if nbin_output_count > 0 and nbin_tangent_budget > wp.static(EPS_SMALL):
+                                c_stiffness = nbin_tangent_budget / float(nbin_output_count)
+                                if nbin_agg_mag > wp.static(EPS_SMALL) and nbin_effective_depth > wp.static(EPS_SMALL):
+                                    nbin_distance_scale = nbin_agg_mag / (c_stiffness * nbin_effective_depth)
+                                    solver_distance = nbin_distance_scale * depth
+                                else:
+                                    rich_pair = _rich_contact_linearization(
+                                        area_i, pressure_i, contact_tangent_stiffness[contact_id]
+                                    )
+                                    c_stiffness = rich_pair[0]
+                                    solver_distance = rich_pair[1]
+                            else:
+                                rich_pair = _rich_contact_linearization(
+                                    area_i, pressure_i, contact_tangent_stiffness[contact_id]
+                                )
+                                c_stiffness = rich_pair[0]
+                                solver_distance = rich_pair[1]
+                        elif nbin_agg_mag > wp.static(EPS_SMALL) and nbin_effective_depth > 0.0:
                             c_stiffness = nbin_agg_mag / nbin_effective_depth
                         else:
                             c_stiffness = area_i * pressure_i / wp.max(-depth, wp.static(EPS_SMALL))
@@ -1386,7 +1485,14 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                                             1.0 + voxel_alpha * (voxel_lever - voxel_L_avg) / voxel_L_avg,
                                         )
                     elif depth < 0.0:
-                        c_stiffness = area_i * pressure_i / wp.max(-depth, wp.static(EPS_SMALL))
+                        if wp.static(use_pressure_law):
+                            rich_pair = _rich_contact_linearization(
+                                area_i, pressure_i, contact_tangent_stiffness[contact_id]
+                            )
+                            c_stiffness = rich_pair[0]
+                            solver_distance = rich_pair[1]
+                        else:
+                            c_stiffness = area_i * pressure_i / wp.max(-depth, wp.static(EPS_SMALL))
                     else:
                         c_stiffness = wp.static(margin_contact_area) * k_eff_first
 
@@ -1404,7 +1510,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 contact_data = ContactData()
                 contact_data.contact_point_center = pos_world
                 contact_data.contact_normal_a_to_b = normal_world
-                contact_data.contact_distance = depth
+                contact_data.contact_distance = solver_distance
                 contact_data.radius_eff_a = 0.0
                 contact_data.radius_eff_b = 0.0
                 contact_data.margin_a = 0.0
@@ -1437,7 +1543,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 contact_data = ContactData()
                 contact_data.contact_point_center = anchor_pos_world
                 contact_data.contact_normal_a_to_b = anchor_normal_world
-                contact_data.contact_distance = -anchor_depth
+                contact_data.contact_distance = -distance_scale * anchor_depth
                 contact_data.radius_eff_a = 0.0
                 contact_data.radius_eff_b = 0.0
                 contact_data.margin_a = 0.0
@@ -1552,6 +1658,7 @@ class HydroelasticContactReduction:
         writer_func: Any = None,
         config: HydroelasticReductionConfig | None = None,
         deterministic: bool = False,
+        store_tangent_data: bool = False,
     ):
         """Initialize the hydroelastic contact reduction system.
 
@@ -1564,6 +1671,8 @@ class HydroelasticContactReduction:
             deterministic: Whether to use fingerprint-based winner selection and
                 int64 fixed-point aggregate accumulation, making results
                 independent of GPU thread scheduling.
+            store_tangent_data: Whether to allocate projected pressure-law
+                tangent storage and aggregates.
         """
         if config is None:
             config = HydroelasticReductionConfig()
@@ -1573,11 +1682,13 @@ class HydroelasticContactReduction:
         self.config = config
         self.device = device
         self.deterministic = deterministic
+        self.store_tangent_data = store_tangent_data
         # Create the underlying reducer with hydroelastic data storage enabled
         self.reducer = GlobalContactReducer(
             capacity=capacity,
             device=device,
             store_hydroelastic_data=True,
+            store_hydroelastic_tangent_data=store_tangent_data,
             store_moment_data=config.moment_matching,
             deterministic=deterministic,
             hashtable_size_factor=config.hashtable_size_factor,
@@ -1630,6 +1741,7 @@ class HydroelasticContactReduction:
             anchor_contact=config.anchor_contact,
             moment_matching=config.moment_matching,
             deterministic_sort_keys=deterministic,
+            use_pressure_law=store_tangent_data,
         )
 
     @property
@@ -1803,6 +1915,7 @@ class HydroelasticContactReduction:
                     self.reducer.contact_nbin_entry,
                     self.reducer.total_depth_reduced,
                     self.reducer.total_normal_reduced,
+                    self.reducer.total_contact_count_reduced,
                     self._fixed_accum,
                     self._fixed_scale,
                     phase,
@@ -1851,6 +1964,7 @@ class HydroelasticContactReduction:
                 self.reducer.ht_values,
                 self.reducer.hashtable.active_slots,
                 self.reducer.agg_force,
+                self.reducer.agg_tangent_stiffness,
                 self.reducer.agg_depth_volume,
                 self.reducer.weighted_pos_sum,
                 self.reducer.weight_sum,
@@ -1860,10 +1974,12 @@ class HydroelasticContactReduction:
                 self.reducer.contact_fingerprints,
                 self.reducer.contact_area,
                 self.reducer.contact_pressure,
+                self.reducer.contact_tangent_stiffness,
                 shape_material_k_hydro,
                 self.reducer.contact_nbin_entry,
                 self.reducer.total_depth_reduced,
                 self.reducer.total_normal_reduced,
+                self.reducer.total_contact_count_reduced,
                 self.reducer.agg_moment_unreduced,
                 self.reducer.agg_moment_reduced,
                 self.reducer.agg_moment2_reduced,

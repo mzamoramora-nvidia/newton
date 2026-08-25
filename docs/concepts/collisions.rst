@@ -1934,6 +1934,55 @@ individual SDF depth. Speculative contacts do not use this stored pressure;
 their activation stiffness uses the declared ``kh`` values and the deprecated
 ``margin_contact_area`` compatibility setting.
 
+The scalar callback is a compatibility path: Newton keeps the geometric pair
+separation as the solver distance and chooses a secant stiffness that reproduces
+the current pressure force. Applications that also need the local derivative
+of that force can instead select the experimental ``pressure_law_func``:
+
+.. code-block:: python
+
+    from newton.geometry import (
+        HydroelasticSDF,
+        hydroelastic_pressure_law_linear,
+    )
+
+    config = HydroelasticSDF.Config(
+        pressure_law_func=hydroelastic_pressure_law_linear,
+    )
+
+This callback returns ``wp.vec2f(pressure, compression_slope)``, where
+``compression_slope = -dp/dd`` is nonnegative and has units Pa/m. It is
+mutually exclusive with ``pressure_func``. Custom rich laws use the same
+``signed_depth``, ``shape_idx``, and ``pressure_data`` arguments as scalar laws,
+and must provide finite values throughout the callback domain. An accepted
+penetrating face additionally requires strictly positive projected slopes from
+both shapes; otherwise Newton omits that face.
+
+For a penetrating face, Newton projects each material's compression slope onto
+the contact normal using the raw gradient of the trilinearly interpolated SDF.
+The two projected slopes are combined in series. If ``A`` is the face force
+area, ``p`` the balanced pressure, and ``g`` the combined projected slope, the
+solver receives the tangent-equivalent pair:
+
+.. code-block:: text
+
+    stiffness       = A * g
+    solver_distance = -p / g
+    force            = stiffness * (-solver_distance) = A * p
+
+Newton deliberately does not normalize the SDF gradients on this path: their
+magnitude is part of the derivative of pressure with respect to contact-normal
+motion. Normalizing them would silently change the tangent for discretized,
+scaled, or non-exact signed-distance fields.
+
+The original pair separation still determines whether a face is penetrating,
+speculative, or outside the gap, and remains the value used for contact-surface
+visualization. Only the penetrating solver points are shifted to encode
+``solver_distance``. Speculative contacts retain the scalar activation behavior.
+Contact reduction preserves the aggregate pressure force and one scalar
+normal-tangent budget per normal bin; it does not export a full constitutive
+tensor.
+
 See :github:`newton/examples/contacts/example_nut_bolt_hydro.py` for a worked
 example.
 

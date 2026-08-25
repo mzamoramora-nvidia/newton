@@ -715,6 +715,8 @@ class GlobalContactReducerData:
     contact_area: wp.array[wp.float32]
     # contact_pressure: current pressure evaluated once during contact generation
     contact_pressure: wp.array[wp.float32]
+    # Rich-law tangent stiffness per penetrating source face [N/m]
+    contact_tangent_stiffness: wp.array[wp.float32]
 
     # Cached normal-bin hashtable entry index per contact
     contact_nbin_entry: wp.array[wp.int32]
@@ -723,6 +725,9 @@ class GlobalContactReducerData:
     # Used for hydroelastic stiffness calculation: c_stiffness = |agg_force| / total_depth
     # Accumulates sum(area * pressure * normal) for all penetrating contacts per entry
     agg_force: wp.array[wp.vec3]
+
+    # Aggregate rich-law tangent stiffness per normal-bin entry [N/m]
+    agg_tangent_stiffness: wp.array[wp.float32]
 
     # Aggregate geometric depth-volume per hashtable entry: sum(area * |depth| * normal)
     # for all penetrating contacts. Unlike ``agg_force`` this is independent of the
@@ -744,6 +749,9 @@ class GlobalContactReducerData:
 
     # Total depth-weighted normal of reduced (winning) contacts per normal bin entry.
     total_normal_reduced: wp.array[wp.vec3]
+
+    # Number of penetrating reduced winners assigned to each normal-bin entry
+    total_contact_count_reduced: wp.array[wp.int32]
 
     # Hashtable arrays
     ht_keys: wp.array[wp.uint64]
@@ -768,11 +776,13 @@ def _clear_active_kernel(
     ht_active_slots: wp.array[wp.int32],
     # Hydroelastic per-entry arrays
     agg_force: wp.array[wp.vec3],
+    agg_tangent_stiffness: wp.array[wp.float32],
     agg_depth_volume: wp.array[wp.vec3],
     weighted_pos_sum: wp.array[wp.vec3],
     weight_sum: wp.array[wp.float32],
     total_depth_reduced: wp.array[wp.float32],
     total_normal_reduced: wp.array[wp.vec3],
+    total_contact_count_reduced: wp.array[wp.int32],
     agg_moment_unreduced: wp.array[wp.float32],
     agg_moment_reduced: wp.array[wp.float32],
     agg_moment2_reduced: wp.array[wp.float32],
@@ -825,11 +835,15 @@ def _clear_active_kernel(
                 ht_keys[entry_idx] = HASHTABLE_EMPTY_KEY
                 if agg_force.shape[0] > 0:
                     agg_force[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
+                    if agg_tangent_stiffness.shape[0] > 0:
+                        agg_tangent_stiffness[entry_idx] = 0.0
                     agg_depth_volume[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
                     weighted_pos_sum[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
                     weight_sum[entry_idx] = 0.0
                     total_depth_reduced[entry_idx] = 0.0
                     total_normal_reduced[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
+                    if total_contact_count_reduced.shape[0] > 0:
+                        total_contact_count_reduced[entry_idx] = 0
                     if agg_moment_unreduced.shape[0] > 0:
                         agg_moment_unreduced[entry_idx] = 0.0
                         agg_moment_reduced[entry_idx] = 0.0
@@ -846,11 +860,15 @@ def _clear_active_kernel(
             ht_keys[entry_idx] = HASHTABLE_EMPTY_KEY
             if agg_force.shape[0] > 0:
                 agg_force[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
+                if agg_tangent_stiffness.shape[0] > 0:
+                    agg_tangent_stiffness[entry_idx] = 0.0
                 agg_depth_volume[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
                 weighted_pos_sum[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
                 weight_sum[entry_idx] = 0.0
                 total_depth_reduced[entry_idx] = 0.0
                 total_normal_reduced[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
+                if total_contact_count_reduced.shape[0] > 0:
+                    total_contact_count_reduced[entry_idx] = 0
                 if agg_moment_unreduced.shape[0] > 0:
                     agg_moment_unreduced[entry_idx] = 0.0
                     agg_moment_reduced[entry_idx] = 0.0
@@ -940,6 +958,7 @@ class GlobalContactReducer:
         capacity: int,
         device: str | None = None,
         store_hydroelastic_data: bool = False,
+        store_hydroelastic_tangent_data: bool = False,
         store_moment_data: bool = False,
         deterministic: bool = False,
         hashtable_size_factor: float = 0.25,
@@ -951,6 +970,8 @@ class GlobalContactReducer:
             capacity: Maximum number of contacts to store
             device: Warp device (e.g., "cuda:0", "cpu")
             store_hydroelastic_data: If True, allocate hydroelastic contact and aggregate arrays.
+            store_hydroelastic_tangent_data: If True, allocate rich pressure-law
+                tangent arrays. Requires ``store_hydroelastic_data``.
             store_moment_data: If True, allocate moment accumulator arrays for friction
                 moment matching. Only needed when ``moment_matching=True``.
             deterministic: If True, use deterministic fingerprint-based tiebreaking
@@ -964,6 +985,8 @@ class GlobalContactReducer:
         hashtable_size_factor = float(hashtable_size_factor)
         if not hashtable_size_factor > 0.0:
             raise ValueError(f"hashtable_size_factor must be > 0.0, got {hashtable_size_factor}")
+        if store_hydroelastic_tangent_data and not store_hydroelastic_data:
+            raise ValueError("Hydroelastic tangent storage requires hydroelastic data storage.")
 
         # Predictive entries reserve packed ID zero for provisional winners.
         max_det_contacts = 1 << int(CONTACT_ID_BITS)
@@ -977,6 +1000,7 @@ class GlobalContactReducer:
         self.capacity = capacity
         self.device = device
         self.store_hydroelastic_data = store_hydroelastic_data
+        self.store_hydroelastic_tangent_data = store_hydroelastic_tangent_data
         self.deterministic = deterministic
         self.hashtable_size_factor = hashtable_size_factor
         self.enable_contact_reclamation = enable_contact_reclamation
@@ -1001,6 +1025,10 @@ class GlobalContactReducer:
             self.contact_area = wp.zeros(0, dtype=wp.float32, device=device)
             self.contact_pressure = wp.zeros(0, dtype=wp.float32, device=device)
             self.contact_nbin_entry = wp.zeros(0, dtype=wp.int32, device=device)
+        if store_hydroelastic_data and store_hydroelastic_tangent_data:
+            self.contact_tangent_stiffness = wp.zeros(buffer_size, dtype=wp.float32, device=device)
+        else:
+            self.contact_tangent_stiffness = wp.zeros(0, dtype=wp.float32, device=device)
 
         # Generic reduction deduplicates cross-entry winners during export.
         # Hydroelastic reduction intentionally preserves and source-tags them.
@@ -1039,6 +1067,12 @@ class GlobalContactReducer:
             self.total_depth_reduced = wp.zeros(self.hashtable.capacity, dtype=wp.float32, device=device)
             # Total depth-weighted normal of reduced contacts per normal bin
             self.total_normal_reduced = wp.zeros(self.hashtable.capacity, dtype=wp.vec3, device=device)
+            if store_hydroelastic_tangent_data:
+                self.agg_tangent_stiffness = wp.zeros(self.hashtable.capacity, dtype=wp.float32, device=device)
+                self.total_contact_count_reduced = wp.zeros(self.hashtable.capacity, dtype=wp.int32, device=device)
+            else:
+                self.agg_tangent_stiffness = wp.zeros(0, dtype=wp.float32, device=device)
+                self.total_contact_count_reduced = wp.zeros(0, dtype=wp.int32, device=device)
             # Moment accumulators for moment matching (friction scale adjustment)
             if store_moment_data:
                 self.agg_moment_unreduced = wp.zeros(self.hashtable.capacity, dtype=wp.float32, device=device)
@@ -1055,6 +1089,8 @@ class GlobalContactReducer:
             self.weight_sum = wp.zeros(0, dtype=wp.float32, device=device)
             self.total_depth_reduced = wp.zeros(0, dtype=wp.float32, device=device)
             self.total_normal_reduced = wp.zeros(0, dtype=wp.vec3, device=device)
+            self.agg_tangent_stiffness = wp.zeros(0, dtype=wp.float32, device=device)
+            self.total_contact_count_reduced = wp.zeros(0, dtype=wp.int32, device=device)
             self.agg_moment_unreduced = wp.zeros(0, dtype=wp.float32, device=device)
             self.agg_moment_reduced = wp.zeros(0, dtype=wp.float32, device=device)
             self.agg_moment2_reduced = wp.zeros(0, dtype=wp.float32, device=device)
@@ -1067,6 +1103,8 @@ class GlobalContactReducer:
         self.ht_insert_failures.zero_()
         self.hashtable.clear()
         self.ht_values.zero_()
+        self.agg_tangent_stiffness.zero_()
+        self.total_contact_count_reduced.zero_()
 
     def clear_active(self):
         """Clear only the active entries (efficient for sparse usage).
@@ -1096,11 +1134,13 @@ class GlobalContactReducer:
                 self.ht_values,
                 self.hashtable.active_slots,
                 self.agg_force,
+                self.agg_tangent_stiffness,
                 self.agg_depth_volume,
                 self.weighted_pos_sum,
                 self.weight_sum,
                 self.total_depth_reduced,
                 self.total_normal_reduced,
+                self.total_contact_count_reduced,
                 self.agg_moment_unreduced,
                 self.agg_moment_reduced,
                 self.agg_moment2_reduced,
@@ -1142,13 +1182,16 @@ class GlobalContactReducer:
         data.contact_fingerprints = self.contact_fingerprints
         data.contact_area = self.contact_area
         data.contact_pressure = self.contact_pressure
+        data.contact_tangent_stiffness = self.contact_tangent_stiffness
         data.contact_nbin_entry = self.contact_nbin_entry
         data.agg_force = self.agg_force
+        data.agg_tangent_stiffness = self.agg_tangent_stiffness
         data.agg_depth_volume = self.agg_depth_volume
         data.weighted_pos_sum = self.weighted_pos_sum
         data.weight_sum = self.weight_sum
         data.total_depth_reduced = self.total_depth_reduced
         data.total_normal_reduced = self.total_normal_reduced
+        data.total_contact_count_reduced = self.total_contact_count_reduced
         data.ht_keys = self.hashtable.keys
         data.ht_values = self.ht_values
         data.ht_active_slots = self.hashtable.active_slots
