@@ -1886,8 +1886,9 @@ is the shape-margin-adjusted SDF value and follows the SDF sign convention:
 negative inside the inflated surface, positive outside.
 The default linear law ``p = -kh * signed_depth`` is positive when penetrating
 and continues with negative pressure values just outside the surface. Supply
-``pressure_func`` and ``pressure_data`` on :class:`~geometry.HydroelasticSDF.Config`
-to use a different law, for example a stiffer-with-depth response.
+``pressure_law_func`` and ``pressure_data`` on
+:class:`~geometry.HydroelasticSDF.Config` to use a different law, for example a
+stiffer-with-depth response.
 
 The callback is evaluated on both sides of the contact boundary during
 iso-voxel pruning and marching-cubes interpolation, so it must be finite and
@@ -1918,7 +1919,10 @@ remove that crossing. Extend the law into the non-contact side instead:
     data.shape_kh = model.shape_material_kh
     data.depth_ref_m = 0.001
     data.exponent = 2.0
-    config = HydroelasticSDF.Config(pressure_func=power_pressure, pressure_data=data)
+    config = HydroelasticSDF.Config(
+        pressure_law_func=power_pressure,
+        pressure_data=data,
+    )
 
 If ``pressure_data`` stores finalized model arrays such as
 ``model.shape_material_kh``, build the config after ``builder.finalize()``.
@@ -1934,10 +1938,10 @@ individual SDF depth. Speculative contacts do not use this stored pressure;
 their activation stiffness uses the declared ``kh`` values and the deprecated
 ``margin_contact_area`` compatibility setting.
 
-The scalar callback is a compatibility path: Newton keeps the geometric pair
-separation as the solver distance and chooses a secant stiffness that reproduces
-the current pressure force. Applications that also need the local derivative
-of that force can instead select the experimental ``pressure_law_func``:
+The pressure-only callback contract is the default formulation. Newton keeps
+the geometric pair separation as the solver distance and chooses a secant
+stiffness that reproduces the current pressure force. The equivalent built-in
+selection is:
 
 .. code-block:: python
 
@@ -1950,13 +1954,32 @@ of that force can instead select the experimental ``pressure_law_func``:
         pressure_law_func=hydroelastic_pressure_law_linear,
     )
 
+Applications that also need the local derivative of that force can select the
+experimental tangent-returning built-in:
+
+.. code-block:: python
+
+    from newton.geometry import (
+        HydroelasticSDF,
+        hydroelastic_pressure_law_linear_tangent,
+    )
+
+    config = HydroelasticSDF.Config(
+        pressure_law_func=hydroelastic_pressure_law_linear_tangent,
+    )
+
 This callback returns ``wp.vec2f(pressure, compression_slope)``, where
-``compression_slope = -dp/dd`` is nonnegative and has units Pa/m. It is
-mutually exclusive with ``pressure_func``. Custom rich laws use the same
-``signed_depth``, ``shape_idx``, and ``pressure_data`` arguments as scalar laws,
-and must provide finite values throughout the callback domain. An accepted
-penetrating face additionally requires strictly positive projected slopes from
-both shapes; otherwise Newton omits that face.
+``compression_slope = -dp/dd`` is nonnegative and has units Pa/m. Custom
+tangent-returning laws use the same ``signed_depth``, ``shape_idx``, and
+``pressure_data`` arguments, return the same two components, and set
+``pressure_law_returns_tangent=True``. They must provide finite values
+throughout the callback domain. An accepted penetrating face additionally
+requires strictly positive projected slopes from both shapes; otherwise Newton
+omits that face.
+
+``pressure_func`` is a deprecated pressure-only alias for
+``pressure_law_func``. It remains functional during its deprecation window but
+cannot be supplied together with the canonical field.
 
 For a penetrating face, Newton projects each material's compression slope onto
 the contact normal using the raw gradient of the trilinearly interpolated SDF.

@@ -1,6 +1,6 @@
 # Hydroelastic pressure-law and series-gradient implementation plan
 
-Status: implemented locally; focused validation complete
+Status: physics and flat public interface implemented locally; full-suite verification pending
 Issue: [newton-physics/newton#3503](https://github.com/newton-physics/newton/issues/3503)
 Rebased on Newton commit: `e5cc054bb95a6ba8889da983b0fdab3d977d32c9`
 Feature branch: `mzamoramora/hydro-series-gradient`
@@ -8,50 +8,74 @@ Worktree: `/home/mzamoramora/build_playground/newton/hydro-private/newton-hydro-
 
 ## Executive decision
 
-Do not add a closed `PAIR_SEPARATION` / `SERIES_GRADIENT` enum. Instead, add a
-richer optional pressure-law callback alongside the existing scalar-pressure
-callback:
+Do not add a pressure-law descriptor class and do not add a closed
+`PAIR_SEPARATION` / `SERIES_GRADIENT` enum. Newton generally favors flat Config
+data and Warp callbacks, so expose one canonical callback field plus explicit
+host-static callback-contract metadata:
 
 ```python
 @dataclass
 class HydroelasticSDF.Config:
-    pressure_func: Any = None
     pressure_law_func: Any = None
     pressure_data: Any = None
+    pressure_law_returns_tangent: bool | None = None
+    pressure_func: Any = None  # Deprecated transition alias.
 ```
 
-The two callbacks have deliberately different contracts:
+`pressure_law_func` accepts one of two documented Warp callback contracts:
 
 ```python
-pressure_func(signed_depth, shape_idx, pressure_data) -> pressure
+pressure_law_func(signed_depth, shape_idx, pressure_data) -> pressure
 
 pressure_law_func(signed_depth, shape_idx, pressure_data) \
     -> wp.vec2f(pressure, compression_slope)
 ```
 
-Here `compression_slope = -dp/dd` is positive for a monotonically increasing
+`pressure_law_returns_tangent` describes which callback contract is supplied;
+it is not a solver mode and cannot vary per contact. For Newton's public
+built-ins, `None` resolves from the exact built-in function identity. For a
+custom callback, `None` means pressure-only and a tangent-returning callback
+must set the field to `True`. This avoids relying on unstable Warp return-type
+introspection or a numerical sentinel such as zero or NaN.
+
+Here `compression_slope = -dp/dd` is nonnegative for a monotonically increasing
 pressure under compression and has units Pa/m.
 
-The scalar-pressure path preserves current behavior and remains the default.
-Selecting `pressure_law_func` opts penetrating contacts into the
-Masterjohn/Drake velocity-level tangent computed from both projected pressure
-gradients. Provide a public built-in rich linear law so users can request this
-behavior without writing a callback:
+Provide two flat public built-ins with distinct, prefix-clustered names:
 
 ```python
 from newton.geometry import (
     HydroelasticSDF,
     hydroelastic_pressure_law_linear,
+    hydroelastic_pressure_law_linear_tangent,
 )
 
-hydro_config = HydroelasticSDF.Config(
+# Default pair-separation/secant formulation, written explicitly.
+default_config = HydroelasticSDF.Config(
     pressure_law_func=hydroelastic_pressure_law_linear,
+)
+
+# Projected-series tangent formulation requested by issue #3503.
+tangent_config = HydroelasticSDF.Config(
+    pressure_law_func=hydroelastic_pressure_law_linear_tangent,
 )
 ```
 
-This is an open constitutive-law interface rather than a list of solver modes.
-Users can define linear, power, cubic, or other differentiable pressure laws;
-Newton remains responsible for mapping their pressure and slope to contacts.
+`Config()` remains exactly equivalent to the first form. The pair-separation
+secant formulation is the supported default path. The tangent formulation is an
+opt-in alternative.
+
+Both built-ins represent the same constitutive law, `p = -kh*d`. Their names
+distinguish the information returned to Newton and therefore the solver
+linearization Newton can construct. Custom linear, power, cubic, or other laws
+use the same flat fields; Newton remains responsible for mapping pressure and
+optional slope to contacts.
+
+The already-released `pressure_func` field cannot disappear immediately.
+Deprecate it for at least one full minor release and resolve it internally as a
+pressure-only `pressure_law_func`. Supplying both names raises `ValueError`.
+The branch-local tangent-returning `pressure_law_func` interface has not
+shipped, so it may be reshaped directly before upstreaming.
 
 The implementation must keep two different quantities separate:
 
@@ -59,8 +83,8 @@ The implementation must keep two different quantities separate:
   speculative, and rejected faces;
 - `solver_distance`: the signed distance encoded in the solver contact points.
 
-They are identical on the scalar-pressure path. They differ for penetrating
-faces on the rich-law/projected-gradient path.
+They are identical on the default pressure-only path. They differ for
+penetrating faces when the selected law returns a tangent.
 
 This plan supersedes earlier plans that describe Newton's current penetrating
 distance as `2*d_B`. Margin/gap work in PR #3719 has already replaced that
@@ -177,11 +201,15 @@ not change the SDF gradient.
 
 ## Public interface
 
-Keep the existing callback unchanged:
+Replace the canonical `pressure_func` name with the more accurate
+`pressure_law_func` name. Keep the shipped name temporarily as a deprecated
+Config alias, but resolve both names to the same private flat state.
+
+The pressure-only callback contract is:
 
 ```python
 @wp.func
-def my_pressure_func(
+def my_pressure_law(
     signed_depth: float,
     shape_idx: int,
     pressure_data: MyPressureData,
@@ -189,11 +217,11 @@ def my_pressure_func(
     ...
 ```
 
-Add a mutually exclusive richer callback:
+The pressure-and-tangent contract uses the same field and arguments:
 
 ```python
 @wp.func
-def my_pressure_law(
+def my_pressure_law_with_tangent(
     signed_depth: float,
     shape_idx: int,
     pressure_data: MyPressureData,
@@ -225,17 +253,39 @@ For nonnegative `kh` and `c`, this remains finite and monotone over positive and
 negative signed depths, which is important because extraction evaluates the law
 on both sides of the nominal surface.
 
-The configuration field is:
+The flat Config fields are:
 
 ```python
 pressure_law_func: Any = None
+pressure_data: Any = None
+pressure_law_returns_tangent: bool | None = None
 ```
 
-Return `wp.vec2f` rather than a tuple or struct so the function is straightforward
-to call from generated Warp kernels. Name and document the two components at the
-Python API boundary; do not make callers infer their order from examples alone.
+`pressure_law_returns_tangent` is callback ABI metadata resolved once during
+pipeline construction. It is not a per-contact switch or a closed physics mode.
+The resolution rules are:
 
-Export a supported public built-in:
+```text
+Config()                                      built-in linear, pressure-only
+public linear law, metadata=None              pressure-only
+public linear-tangent law, metadata=None      pressure-and-tangent
+custom law, metadata=None/False               pressure-only
+custom law, metadata=True                     pressure-and-tangent
+deprecated pressure_func                      pressure-only adapter + warning
+deprecated and canonical callbacks together  ValueError
+custom callback without pressure_data         ValueError
+```
+
+Reject an explicit `pressure_law_returns_tangent` value that contradicts either
+public built-in. This catches configuration mistakes without introspecting an
+arbitrary Warp function's return type.
+
+The pressure-and-tangent contract returns `wp.vec2f` rather than a tuple or
+struct so it is straightforward to call from generated Warp kernels. Name and
+document the two components at the Python interface; do not make callers infer
+their order from examples alone.
+
+Export two supported public built-ins:
 
 ```python
 @wp.func
@@ -243,14 +293,23 @@ def hydroelastic_pressure_law_linear(
     signed_depth: float,
     shape_idx: int,
     pressure_data: LinearPressureData,
+) -> float:
+    ...
+
+
+@wp.func
+def hydroelastic_pressure_law_linear_tangent(
+    signed_depth: float,
+    shape_idx: int,
+    pressure_data: LinearPressureData,
 ) -> wp.vec2f:
     ...
 ```
 
-Expose it canonically from `newton.geometry`. When this exact built-in function
-is selected and `pressure_data` is omitted, construct the existing internal
-`LinearPressureData` from `shape_material_kh`, just as the current built-in
-scalar law does. A custom rich law requires explicit `pressure_data`.
+Expose both canonically from `newton.geometry`. When either exact built-in is
+selected and `pressure_data` is omitted, construct the existing internal
+`LinearPressureData` from `shape_material_kh`. A custom law requires explicit
+`pressure_data`.
 
 ### Why the callback returns pressure and slope, not `(k, phi)`
 
@@ -278,38 +337,30 @@ determinism details. It would also allow callbacks to violate force consistency.
 Keeping those concerns inside Newton makes the module deeper and lets the
 reducer preserve a single well-defined tangent budget.
 
-The richer callback also avoids finite-differencing arbitrary `pressure_func`
-implementations in contact kernels. Nonlinear custom laws provide their
-analytical local slope directly.
+The tangent callback avoids finite-differencing arbitrary pressure-only laws in
+contact kernels. Nonlinear custom laws provide their analytical local slope
+directly.
 
 Resolve the callback choice during `HydroelasticSDF` construction and specialize
-generated kernels statically. The scalar-pressure specialization must not sample
-gradients, allocate projected-tangent hot-path storage, or execute runtime
-callback-choice branches.
+generated kernels statically from `pressure_law_returns_tangent`. The
+pressure-only specialization must not sample gradients, allocate
+projected-tangent hot-path storage, or execute runtime callback-choice branches.
 
-### Initial configuration rules
+The default pressure-only path keeps pair separation as its solver distance and
+uses the pressure-force secant stiffness. Do not infer its derivative with
+finite differences. Do not call it legacy or compatibility behavior in code,
+documentation, tests, or the changelog.
 
-```text
-neither callback                         current built-in scalar path
-pressure_func only                       current custom scalar path
-pressure_law_func=public linear law      built-in projected-gradient path
-pressure_law_func=custom rich law        custom projected-gradient path
-pressure_func + pressure_law_func        ValueError
-custom pressure_law_func without data    ValueError
-```
+A tangent-returning law must return finite pressure and a finite, nonnegative
+compression slope for every sampled signed depth. The pressure must remain
+monotonically non-increasing in signed depth over the law's supported domain.
+Debug validation can check sampled values, but the API contract must state
+these requirements because a kernel cannot prove global monotonicity.
 
-The existing `pressure_func` remains source-compatible and keeps pair separation
-as its solver distance. Do not infer its derivative with finite differences.
-
-The rich law must return finite pressure and a finite, nonnegative compression
-slope for every sampled signed depth. The pressure must remain monotonically
-non-increasing in signed depth over the law's supported domain. Debug validation
-can check sampled values, but the API contract must state these requirements
-because a kernel cannot prove global monotonicity.
-
-At marching-cubes corners and other pressure-only call sites, use a private
-adapter that returns `pressure_law_func(...)[0]`. At accepted penetrating face
-centroids, evaluate the rich law for both shapes to obtain their separate slopes.
+For a tangent-returning callback, use a private adapter returning
+`pressure_law_func(...)[0]` at marching-cubes corners and other pressure-only
+call sites. At accepted penetrating face centroids, evaluate the callback for
+both shapes to obtain their separate slopes.
 
 At a numerically imperfect equal-pressure face, define the face pressure
 symmetrically:
@@ -320,8 +371,8 @@ p_0 = 0.5 (p_A + p_B)
 
 For the built-in linear law, `p_A` and `p_B` should agree up to extraction
 tolerance. The symmetric definition avoids choosing a privileged shape for
-custom or numerically imperfect laws. The scalar-pressure path continues using
-its current pressure evaluation exactly.
+custom or numerically imperfect laws. The default pressure-only path continues
+using its current pressure evaluation exactly.
 
 ## Behavioral invariants
 
@@ -333,7 +384,7 @@ k_i and phi_i are finite
 k_i (-phi_i) = A_i p_i
 ```
 
-Additional rich-law/projected-gradient invariants are:
+Additional tangent-returning/projected-gradient invariants are:
 
 ```text
 k_i = A_i g_i
@@ -379,9 +430,9 @@ It remains the source of truth for:
 - pre-pruning and reduction selection;
 - contact-surface visualization;
 - geometric depth-volume reliability checks; and
-- compatibility behavior on the scalar-pressure path.
+- solver mapping on the default pressure-only path.
 
-Add a rich-law-only per-face value:
+Add a tangent-path-only per-face value:
 
 ```text
 contact_tangent_stiffness = A_i g_i  [N/m]
@@ -405,7 +456,7 @@ the number of penetrating outputs that share the bin budget. Speculative
 representatives are excluded.
 
 Prefer empty arrays plus static kernel specialization for projected-tangent
-storage on the scalar-pressure path.
+storage on the default pressure-only path.
 
 ## Implementation stages
 
@@ -421,46 +472,52 @@ Before changing implementation code:
    `g_B`.
 4. Add an oblique or conforming pipeline fixture in which at least one projected
    gradient differs materially from one.
-5. Add callback-contract tests for a custom rich linear law and a nonlinear law
-   with a known analytical compression slope.
+5. Add callback-contract tests for a custom tangent-returning linear law and a
+   nonlinear law with a known analytical compression slope.
 6. Confirm that the discriminating projected-gradient test fails on unmodified
    main.
-7. Preserve existing margin/gap, custom-scalar-pressure, deterministic,
+7. Preserve existing margin/gap, custom pressure-only, deterministic,
    reduced-force, and moment-matching tests.
 
 The unequal-material head-on case remains useful, but it must not be presented
 as the primary regression because current main already handles it.
 
-### Stage 1: add the richer pressure-law seam
+### Stage 1: flatten the pressure-law seam
 
 In `newton/_src/geometry/sdf_hydroelastic.py`:
 
-1. Add and document `pressure_law_func` on `HydroelasticSDF.Config`.
-2. Add the public `hydroelastic_pressure_law_linear` Warp function and export it
-   from `newton.geometry`.
-3. Validate mutual exclusion with `pressure_func` and the `pressure_data` rules
-   during construction. Warp validates the callback signature when it
-   specializes the pressure-only adapter; preflight signature introspection is
-   deferred until Warp exposes a stable public callable-inspection API.
-4. Recognize the public built-in rich linear law and synthesize its internal
-   `LinearPressureData` from `shape_material_kh` when data is omitted.
-5. Resolve a private pressure-only adapter for marching-cubes and pruning call
-   sites and a rich-law adapter for accepted penetrating faces.
-6. Statically specialize generation, decode, and reduction kernel factories on
-   whether a rich law is present.
-7. During development, reject `pressure_law_func` with
-   `reduce_contacts=True` until the tangent-aware reducer is complete.
+1. Make `pressure_law_func` the canonical Config callback field.
+2. Add `pressure_law_returns_tangent` as flat, host-static callback-contract
+   metadata. Do not expose a descriptor class or solver-mode enum.
+3. Keep `pressure_data` flat and shared by both callback contracts.
+4. Rename the current scalar built-in to the public
+   `hydroelastic_pressure_law_linear` and rename the branch's
+   tangent-returning built-in to `hydroelastic_pressure_law_linear_tangent`;
+   export both from `newton.geometry`.
+5. Infer callback-contract metadata for those exact built-ins. Require custom
+   tangent-returning callbacks to set `pressure_law_returns_tangent=True`.
+6. Retain `pressure_func` as a deprecated Config alias for at least one full
+   minor release. Emit a migration warning, reject simultaneous old/new names,
+   and resolve the alias into the canonical pressure-only state.
+7. Synthesize internal `LinearPressureData` from `shape_material_kh` when either
+   built-in is selected and data is omitted.
+8. Resolve a private pressure-only adapter for marching-cubes and pruning call
+   sites when the selected callback returns a tangent.
+9. Statically specialize generation, decode, allocation, and reduction on the
+   resolved callback-contract Boolean.
 
-Neither-callback default behavior and every existing `pressure_func` use must
-produce identical output to current main.
+`Config()` and every deprecated `pressure_func` use must produce identical
+output to current main. The existing physics implementation should be retained;
+this stage changes ownership and naming at the public seam.
 
 ### Stage 2: implement unreduced projected-series contacts
 
-Only after a face is classified as penetrating on the rich-law path:
+Only after a face is classified as penetrating and the selected law returns a
+tangent:
 
 1. Recover or retain both margin-adjusted centroid depths. If only `d_B` and
    `d_pair` are currently retained, compute `d_A = d_pair - d_B`.
-2. Evaluate `pressure_law_func(d_A, shape_A, data)` and
+2. Evaluate the tangent-returning `pressure_law_func(d_A, shape_A, data)` and
    `pressure_law_func(d_B, shape_B, data)`.
 3. Form `p_0 = 0.5*(p_A + p_B)` and retain each returned compression slope.
 4. Sample both SDF gradients at the accepted face centroid.
@@ -494,14 +551,15 @@ software trilinear interpolant and is documented as the accuracy-oriented
 hydroelastic stress-integration path. Benchmark hardware finite-difference
 sampling separately; do not make it the initial reference.
 
-Do not use the rich law's corner pressure as the accepted face pressure. Evaluate
-both shapes at the accepted centroid as above; corner evaluation remains an
-extraction/pruning concern. The scalar-pressure path retains its current
-face-pressure behavior exactly.
+Do not use the tangent-returning law's corner pressure as the accepted face
+pressure. Evaluate both shapes at the accepted centroid as above; corner
+evaluation remains an extraction/pruning concern. The default pressure-only
+path retains its current face-pressure behavior exactly.
 
 ### Stage 3: accumulate the source tangent through reduction
 
-For each valid rich-law penetrating source face, before pre-pruning:
+For each valid tangent-returning-law penetrating source face, before
+pre-pruning:
 
 ```text
 F_bin = sum_i A_i p_i n_i
@@ -610,11 +668,11 @@ current limitation on exact vector-force direction.
 Voxel-bin copies must consume their owning normal bin's budget and must be
 included in `N_bin`; they must not independently reproduce all of `K_bin`.
 
-If a rich-law penetrating fallback has no valid normal-bin aggregate, use its
-stored per-face tangent and per-face solver distance. Never invent a
-pair-separation secant after a rich law has explicitly supplied a derivative.
+If a tangent-returning penetrating fallback has no valid normal-bin aggregate,
+use its stored per-face tangent and per-face solver distance. Never invent a
+pair-separation secant after a law has explicitly supplied a derivative.
 
-After reduced tests pass, remove the temporary rich-law/reduction configuration
+After reduced tests pass, remove the temporary tangent-path/reduction configuration
 error.
 
 ### Stage 5: leave speculative margin/gap contacts unchanged
@@ -643,7 +701,7 @@ regularization. Revisit that behavior when the deprecated
 
 Verify:
 
-- the default and custom scalar-pressure paths perform no new gradient samples;
+- the default and custom pressure-only paths perform no new gradient samples;
 - CPU and CUDA agreement where supported;
 - CUDA graph capture performs no launch-time allocation;
 - deterministic output remains bit-exact across repeated runs on the same GPU;
@@ -670,27 +728,33 @@ separate future work.
 
 ### Interface and compatibility
 
-- `Config()` preserves current built-in scalar behavior exactly.
-- Existing custom scalar linear, power, cubic, and decoupled `pressure_func`
-  laws are unchanged.
-- The public `hydroelastic_pressure_law_linear` works without explicitly
-  supplying `pressure_data`.
-- A custom rich linear law matches the public built-in rich law.
-- A custom nonlinear rich law uses its supplied analytical slope.
-- Supplying both callbacks raises clearly at construction.
+- `Config()` preserves the current default pair-separation/secant behavior
+  exactly.
+- Existing custom pressure-only linear, power, cubic, and decoupled laws are
+  unchanged through the deprecated `pressure_func` alias and match their
+  canonical `pressure_law_func` configurations.
+- Both public linear built-ins work without explicitly supplying
+  `pressure_data`.
+- A custom tangent-returning linear law matches the public linear-tangent law.
+- A custom nonlinear tangent-returning law uses its supplied analytical slope.
+- Supplying deprecated `pressure_func` with canonical `pressure_law_func`
+  raises clearly at construction.
 - A custom `pressure_law_func` without `pressure_data` raises clearly.
+- A custom tangent-returning callback without
+  `pressure_law_returns_tangent=True` fails with a callback-contract error.
 - Non-finite pressure, non-finite slope, and negative compression slope are
   rejected without emitting invalid contacts.
-- Margin and gap classification is unchanged across scalar and rich-law paths.
+- Margin and gap classification is unchanged across pressure-only and tangent
+  paths.
 
 ### Unreduced physics
 
 - Unequal-material planar contact characterizes current material-series behavior.
-- Equal-material planar contact agrees between scalar and rich-law paths within
-  SDF tolerance.
+- Equal-material planar contact agrees between pressure-only and tangent paths
+  within SDF tolerance.
 - Oblique/conforming contact asserts projected tangent and solver distance.
 - Shape A/B swap preserves physical results.
-- Static face force is identical between scalar and rich-law linear paths.
+- Static face force is identical between the two built-in linear paths.
 - Invalid gradients produce no NaN, infinity, or negative stiffness.
 - At least two SDF resolutions exercise gradient convergence.
 
@@ -704,16 +768,16 @@ separate future work.
 - Anchor enabled and disabled.
 - Moment matching enabled.
 - Voxel-bin duplicate paths spend the tangent budget once.
-- Missing-bin fallback uses the stored per-face rich-law pair.
+- Missing-bin fallback uses the stored per-face tangent pair.
 
 ### Determinism
 
-- Repeated reduced rich-law runs are bit-exact.
-- Repeated unreduced rich-law runs are bit-exact after contact sorting.
+- Repeated reduced tangent-path runs are bit-exact.
+- Repeated unreduced tangent-path runs are bit-exact after contact sorting.
 - Fixed-point `K_bin` agrees with the unreduced reference within its quantization
   tolerance.
 - Anchor and moment-matching deterministic cases remain covered.
-- Rich-law-path fingerprints and sort subkeys remain stable.
+- Tangent-path fingerprints and sort subkeys remain stable.
 
 ### Solver integration
 
@@ -728,14 +792,15 @@ separate future work.
 ## Expected file changes
 
 - `newton/_src/geometry/sdf_hydroelastic.py`
-  - richer callback field, resolution, and validation;
-  - public built-in rich linear law implementation;
+  - flat callback fields, contract resolution, deprecation, and validation;
+  - public pressure-only and tangent-returning linear built-ins;
   - private pressure-only adapter and static kernel selection;
   - penetrating gradient sampling;
   - per-face tangent storage;
   - unreduced solver mapping.
 - `newton/geometry.py`
-  - canonical public export of `hydroelastic_pressure_law_linear`.
+  - canonical public exports of `hydroelastic_pressure_law_linear` and
+    `hydroelastic_pressure_law_linear_tangent`.
 - `newton/_src/geometry/contact_reduction_global.py`
   - tangent and winner-count arrays;
   - data-struct, allocation, clear, and empty-array plumbing.
@@ -746,28 +811,38 @@ separate future work.
 - `newton/tests/test_hydroelastic.py`
   - characterization, regression, reduction, margin/gap, and determinism tests.
 - `docs/concepts/collisions.rst`
-  - scalar and rich pressure-law interfaces, raw-gradient policy, and reduction
-    limitation.
+  - default pressure-only and tangent-returning interfaces, deprecation
+    migration, raw-gradient policy, and reduction limitation;
+  - consistently call pair-separation/secant the default path, never legacy.
 - `changelog/+hydro-series-gradient-<id>.added.md`
-  - Towncrier fragment for the opt-in richer pressure-law callback and built-in
-    linear law.
+  - Towncrier fragment for the flat pressure-law callback, both linear
+    built-ins, and the opt-in tangent formulation.
 
-The new public function requires an explicit `newton.geometry` export. Follow
-the public-interface documentation procedure, update `__all__`, and run API
+The two public functions require explicit `newton.geometry` exports. Follow the
+public-interface documentation procedure, update `__all__`, and run API
 generation to verify the generated reference output.
 
 ## Development sequence
 
-Suggested commits:
+The physics implementation is already present in the local feature commit. The
+next local changes should be reviewable as an interface-focused commit:
 
-1. `Add hydro pressure law callback`
-2. `Implement unreduced series gradients`
-3. `Preserve series tangent in reduction`
-4. `Document hydro series gradients`
+1. `Flatten hydro pressure law interface`
+   - add the canonical flat fields and both built-ins;
+   - resolve one private pressure-only/tangent capability Boolean;
+   - adapt the shipped `pressure_func` name with a deprecation warning;
+   - update existing tests without changing contact physics.
+2. `Document hydro pressure law choices`
+   - describe the default and tangent formulations as peers;
+   - add migration guidance and update the Towncrier fragment;
+   - regenerate the public interface reference.
+3. `Expand hydro tangent verification`
+   - add the remaining shape-swap, resolution, deterministic, and solver cases
+     before proposing the branch upstream.
 
 These are development checkpoints, not separately advertised releases. Do not
-advertise the richer pressure-law callback or public built-in law until both
-reduced and unreduced paths are complete.
+advertise the flat interface until both reduced and unreduced tangent paths use
+the same resolved callback contract.
 
 For each behavior change:
 
@@ -790,24 +865,39 @@ pinned Towncrier version specified by the repository workflow instructions.
 
 ## Definition of done
 
-- [x] The default and custom scalar-pressure paths are behaviorally and
+- [x] `pressure_law_func`, `pressure_data`, and
+      `pressure_law_returns_tangent` are the canonical flat Config fields.
+- [x] No public pressure-law descriptor class or closed solver-mode enum is
+      introduced.
+- [x] `hydroelastic_pressure_law_linear` selects the explicit default
+      pressure-only formulation.
+- [x] `hydroelastic_pressure_law_linear_tangent` selects the projected-series
+      tangent formulation without an extra flag at the common call site.
+- [x] Custom tangent callbacks declare
+      `pressure_law_returns_tangent=True`; no numerical sentinel or Warp
+      return-type introspection selects the path.
+- [x] The shipped `pressure_func` field remains functional with a documented
+      deprecation warning and exact canonical replacement.
+- [x] The default and custom pressure-only paths are behaviorally and
       performance compatible with current main.
 - [x] The issue's oblique/conforming regression fails before and passes after
       the change.
-- [x] The public built-in rich linear law exports unreduced `k=A*g` and
+- [x] The tangent-returning linear law exports unreduced `k=A*g` and
       `phi=-p/g`.
-- [x] A custom nonlinear rich law uses its analytical compression slope and
-      exports the expected projected tangent.
-- [x] Reduced rich-law contacts preserve aggregate force and scalar tangent.
-- [x] Deterministic rich-law reduction uses fixed-point tangent accumulation.
+- [x] A custom nonlinear tangent-returning law uses its analytical compression
+      slope and exports the expected projected tangent.
+- [x] Reduced tangent-path contacts preserve aggregate force and scalar tangent.
+- [x] Deterministic tangent reduction uses fixed-point tangent accumulation.
 - [x] Pair separation remains the source of truth for margin/gap classification.
 - [x] Speculative activation behavior remains unchanged and documented.
-- [x] Existing custom `pressure_func` behavior remains unchanged.
-- [x] Callback mutual exclusion and custom-data validation are covered.
+- [x] Deprecated/canonical callback conflict, custom data, and callback-contract
+      metadata validation are covered.
 - [x] All emitted stiffnesses and distances are finite with positive
       penetrating stiffness.
-- [x] Documentation and a Towncrier fragment describe the opt-in behavior.
-- [x] Focused hydroelastic tests and pre-commit pass.
+- [x] Documentation and the Towncrier fragment use “default” rather than
+      “legacy” or “compatibility” for the pair-separation/secant formulation.
+- [x] Focused hydroelastic tests and pre-commit pass after the flat-interface
+      refactor.
 - [ ] The full repository suite passes without infrastructure errors. The
       6,342-test run completed with 6,177 passes, 164 skips, and one CUDA
       kernel-build/cache error in
@@ -818,7 +908,8 @@ pinned Towncrier version specified by the repository workflow instructions.
 
 - Add shape-swap and multi-resolution convergence coverage.
 - Add repeated deterministic unreduced and fixed-point quantization checks.
-- Exercise the rich callback through each supported solver integration.
+- Exercise the tangent-returning callback through each supported solver
+  integration.
 - Benchmark gradient sampling on representative hydroelastic scenes.
 - Revisit callback preflight validation and invalid-face counters when Warp and
   the collision diagnostics API provide stable extension points.
