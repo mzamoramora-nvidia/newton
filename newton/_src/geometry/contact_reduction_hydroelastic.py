@@ -130,10 +130,10 @@ FINALIZE_MOMENTS = 2
 
 
 @wp.func
-def _rich_contact_linearization(area: float, pressure: float, tangent_stiffness: float) -> wp.vec2:
+def _tangent_contact_linearization(area: float, pressure: float, tangent_stiffness: float) -> wp.vec2:
     """Return the stiffness and solver distance that preserve pressure force.
 
-    Rich-law faces are validated before entering the reducer, so
+    Tangent-returning pressure-law faces are validated before entering the reducer, so
     ``tangent_stiffness`` is finite and strictly positive here.
     """
     return wp.vec2(tangent_stiffness, -area * pressure / tangent_stiffness)
@@ -1036,7 +1036,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
     anchor_contact: bool = False,
     moment_matching: bool = False,
     deterministic_sort_keys: bool = False,
-    use_pressure_law: bool = False,
+    use_pressure_tangent: bool = False,
 ):
     """Create a kernel that exports reduced hydroelastic contacts using a custom writer function.
 
@@ -1050,7 +1050,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
 
     This ensures the total contact force from the K reduced contacts equals the
     aggregate force from all original contacts under any user-supplied
-    ``pressure_func``. Speculative contact activation stiffness uses the
+    pressure law. Speculative contact activation stiffness uses the
     configured compatibility area and the pair's series-combined material slope.
 
     .. important::
@@ -1070,7 +1070,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
             reduced and unreduced contacts.
         deterministic_sort_keys: Whether to tag normal-bin and voxel-bin
             exports so deterministic contact sort keys remain unique.
-        use_pressure_law: Whether to preserve a projected rich-law tangent
+        use_pressure_tangent: Whether to preserve a projected pressure-law tangent
             budget in addition to aggregate force.
 
     Returns:
@@ -1226,7 +1226,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
             if (
                 wp.static(anchor_contact)
                 and has_reliable_agg_direction
-                and (is_normal_entry or not wp.static(use_pressure_law))
+                and (is_normal_entry or not wp.static(use_pressure_tangent))
                 and max_pen_depth > 0.0
             ):
                 if entry_weight_sum > wp.static(EPS_SMALL):
@@ -1274,7 +1274,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
             if agg_force_mag > wp.static(EPS_SMALL) and total_depth_with_anchor > 0.0:
                 shared_stiffness = agg_force_mag / total_depth_with_anchor
             distance_scale = float(1.0)
-            if wp.static(use_pressure_law) and is_normal_entry:
+            if wp.static(use_pressure_tangent) and is_normal_entry:
                 output_count = total_contact_count_reduced[entry_idx] + add_anchor
                 tangent_budget = agg_tangent_stiffness[entry_idx]
                 if output_count > 0 and tangent_budget > wp.static(EPS_SMALL):
@@ -1344,7 +1344,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 c_friction_scale = float(1.0)
                 solver_distance = depth
 
-                if has_reliable_agg_direction or (wp.static(use_pressure_law) and is_normal_entry):
+                if has_reliable_agg_direction or (wp.static(use_pressure_tangent) and is_normal_entry):
                     # --- Normal-bin entry ---
                     if wp.static(normal_matching) and has_reliable_agg_direction and depth < 0.0:
                         final_normal = wp.normalize(wp.quat_rotate(rotation_q, contact_normal))
@@ -1355,17 +1355,17 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                         # equals area * pressure. Speculative activation uses
                         # geometric area and the pair material slope.
                         if depth < 0.0:
-                            if wp.static(use_pressure_law):
-                                rich_pair = _rich_contact_linearization(
+                            if wp.static(use_pressure_tangent):
+                                tangent_pair = _tangent_contact_linearization(
                                     area_i, pressure_i, contact_tangent_stiffness[contact_id]
                                 )
-                                c_stiffness = rich_pair[0]
-                                solver_distance = rich_pair[1]
+                                c_stiffness = tangent_pair[0]
+                                solver_distance = tangent_pair[1]
                             else:
                                 c_stiffness = area_i * pressure_i / wp.max(-depth, wp.static(EPS_SMALL))
                         else:
                             c_stiffness = wp.static(margin_contact_area) * k_eff_first
-                    elif wp.static(use_pressure_law) and depth < 0.0:
+                    elif wp.static(use_pressure_tangent) and depth < 0.0:
                         solver_distance = distance_scale * depth
 
                     # Moment matching friction adjustment
@@ -1423,7 +1423,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                                 nbin_effective_depth = nbin_effective_depth_no_anchor + nbin_anchor_depth
                                 nbin_add_anchor = 1
 
-                        if wp.static(use_pressure_law):
+                        if wp.static(use_pressure_tangent):
                             nbin_output_count = total_contact_count_reduced[nbin_entry_idx] + nbin_add_anchor
                             nbin_tangent_budget = agg_tangent_stiffness[nbin_entry_idx]
                             if nbin_output_count > 0 and nbin_tangent_budget > wp.static(EPS_SMALL):
@@ -1432,17 +1432,17 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                                     nbin_distance_scale = nbin_agg_mag / (c_stiffness * nbin_effective_depth)
                                     solver_distance = nbin_distance_scale * depth
                                 else:
-                                    rich_pair = _rich_contact_linearization(
+                                    tangent_pair = _tangent_contact_linearization(
                                         area_i, pressure_i, contact_tangent_stiffness[contact_id]
                                     )
-                                    c_stiffness = rich_pair[0]
-                                    solver_distance = rich_pair[1]
+                                    c_stiffness = tangent_pair[0]
+                                    solver_distance = tangent_pair[1]
                             else:
-                                rich_pair = _rich_contact_linearization(
+                                tangent_pair = _tangent_contact_linearization(
                                     area_i, pressure_i, contact_tangent_stiffness[contact_id]
                                 )
-                                c_stiffness = rich_pair[0]
-                                solver_distance = rich_pair[1]
+                                c_stiffness = tangent_pair[0]
+                                solver_distance = tangent_pair[1]
                         elif nbin_agg_mag > wp.static(EPS_SMALL) and nbin_effective_depth > 0.0:
                             c_stiffness = nbin_agg_mag / nbin_effective_depth
                         else:
@@ -1485,12 +1485,12 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                                             1.0 + voxel_alpha * (voxel_lever - voxel_L_avg) / voxel_L_avg,
                                         )
                     elif depth < 0.0:
-                        if wp.static(use_pressure_law):
-                            rich_pair = _rich_contact_linearization(
+                        if wp.static(use_pressure_tangent):
+                            tangent_pair = _tangent_contact_linearization(
                                 area_i, pressure_i, contact_tangent_stiffness[contact_id]
                             )
-                            c_stiffness = rich_pair[0]
-                            solver_distance = rich_pair[1]
+                            c_stiffness = tangent_pair[0]
+                            solver_distance = tangent_pair[1]
                         else:
                             c_stiffness = area_i * pressure_i / wp.max(-depth, wp.static(EPS_SMALL))
                     else:
@@ -1741,7 +1741,7 @@ class HydroelasticContactReduction:
             anchor_contact=config.anchor_contact,
             moment_matching=config.moment_matching,
             deterministic_sort_keys=deterministic,
-            use_pressure_law=store_tangent_data,
+            use_pressure_tangent=store_tangent_data,
         )
 
     @property

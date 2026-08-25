@@ -215,7 +215,7 @@ class Example:
         pressure_data = LinearPressureData()
         pressure_data.shape_kh = self.model.shape_material_kh
         sdf_hydroelastic_config = HydroelasticSDF.Config(
-            pressure_func=linear_pressure,
+            pressure_law_func=linear_pressure,
             pressure_data=pressure_data,
             mc_edge_clamp_min=0.0,
         )

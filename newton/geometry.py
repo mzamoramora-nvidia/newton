@@ -25,7 +25,11 @@ from ._src.geometry.contact_match import MATCH_NOT_FOUND as _MATCH_NOT_FOUND
 from ._src.geometry.inertia import compute_inertia_shape, transform_inertia
 from ._src.geometry.kernels import sdf_box, sdf_capsule, sdf_cone, sdf_cylinder, sdf_mesh, sdf_plane, sdf_sphere
 from ._src.geometry.narrow_phase import NarrowPhase
-from ._src.geometry.sdf_hydroelastic import HydroelasticSDF, hydroelastic_pressure_law_linear
+from ._src.geometry.sdf_hydroelastic import (
+    HydroelasticSDF,
+    hydroelastic_pressure_law_linear,
+    hydroelastic_pressure_law_linear_tangent,
+)
 from ._src.geometry.sdf_utils import compute_offset_mesh, create_empty_sdf_data
 
 __all__ = [
@@ -50,6 +54,7 @@ __all__ = [
     "compute_offset_mesh",
     "create_empty_sdf_data",
     "hydroelastic_pressure_law_linear",
+    "hydroelastic_pressure_law_linear_tangent",
     "sdf_box",
     "sdf_capsule",
     "sdf_cone",

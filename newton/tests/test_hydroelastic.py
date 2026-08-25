@@ -1235,7 +1235,7 @@ def test_hydroelastic_margin_gap_bands(test, device, reduce_contacts):
 
 
 def test_pressure_law_preserves_margin_gap_classification(test, device, reduce_contacts):
-    """Use pair separation for rich-law contact bands and speculative distance."""
+    """Keep margin and gap classification stable with a tangent-returning law."""
     model, state, body_b = _build_margin_gap_boxes(device)
     pipeline = newton.CollisionPipeline(
         model,
@@ -1244,7 +1244,7 @@ def test_pressure_law_preserves_margin_gap_classification(test, device, reduce_c
         sdf_hydroelastic_config=HydroelasticSDF.Config(
             reduce_contacts=reduce_contacts,
             pre_prune_contacts=reduce_contacts,
-            pressure_law_func=newton.geometry.hydroelastic_pressure_law_linear,
+            pressure_law_func=newton.geometry.hydroelastic_pressure_law_linear_tangent,
             buffer_fraction=1.0,
         ),
     )
@@ -1252,7 +1252,7 @@ def test_pressure_law_preserves_margin_gap_classification(test, device, reduce_c
     voxel_size = max(model._texture_sdf_data.numpy()["voxel_size"][0])
     tolerance = 2.0 * voxel_size
 
-    # Penetrating pair separation: the rich law may encode a different solver
+    # Penetrating pair separation: the tangent-returning law may encode a different solver
     # distance, but the result must remain penetrating and force producing.
     wp.launch(
         kernel=_set_body_z_kernel,
@@ -1743,8 +1743,8 @@ def _power_pressure(signed_depth: wp.float32, shape_idx: wp.int32, data: _PowerP
     return kh * data.depth_ref_m * wp.pow(depth / data.depth_ref_m, data.exponent)
 
 
-def test_custom_pressure_func_matches_default_linear(test, device):
-    """User-supplied linear ``pressure_func`` must match the built-in default within 1%."""
+def test_pressure_func_deprecated_alias_matches_canonical(test, device):
+    """Keep the deprecated pressure callback behavior identical to its replacement."""
     model, state, upper_body, rest_z = _build_cube_cube_scene(device)
 
     pressure_data = _LinearPressureData()
@@ -1755,15 +1755,33 @@ def test_custom_pressure_func_matches_default_linear(test, device):
         reduce_contacts=False,
         anchor_contact=False,
     )
-    cfg_callback = HydroelasticSDF.Config(
+    cfg_canonical = HydroelasticSDF.Config(
         output_contact_surface=True,
         reduce_contacts=False,
         anchor_contact=False,
-        pressure_func=_linear_pressure,
+        pressure_law_func=_linear_pressure,
         pressure_data=pressure_data,
     )
-    (pipe_default, contacts_default), (pipe_callback, contacts_callback) = _make_pipelines(
-        model, [cfg_default, cfg_callback], [50000, 50000]
+    with test.assertWarnsRegex(DeprecationWarning, "pressure_func.*pressure_law_func"):
+        cfg_deprecated = HydroelasticSDF.Config(
+            output_contact_surface=True,
+            reduce_contacts=False,
+            anchor_contact=False,
+            pressure_func=_linear_pressure,
+            pressure_data=pressure_data,
+        )
+    (
+        (pipe_default, contacts_default),
+        (pipe_canonical, contacts_canonical),
+        (
+            pipe_deprecated,
+            contacts_deprecated,
+        ),
+    ) = _make_pipelines(
+        model,
+        [cfg_default, cfg_canonical, cfg_deprecated],
+        [50000, 50000, 50000],
+        deterministic=True,
     )
 
     for pen in [1e-4, 1e-3, 1e-2]:
@@ -1771,21 +1789,24 @@ def test_custom_pressure_func_matches_default_linear(test, device):
         wp.launch(_set_body_z_kernel, dim=1, inputs=[state.body_q, upper_body, upper_z], device=device)
 
         pipe_default.collide(state, contacts_default)
-        pipe_callback.collide(state, contacts_callback)
+        pipe_canonical.collide(state, contacts_canonical)
+        pipe_deprecated.collide(state, contacts_deprecated)
 
         f_default = _compute_net_force(contacts_default, model, state)
-        f_callback = _compute_net_force(contacts_callback, model, state)
+        f_canonical = _compute_net_force(contacts_canonical, model, state)
+        f_deprecated = _compute_net_force(contacts_deprecated, model, state)
 
         test.assertGreater(abs(f_default[2]), 0.0, f"pen={pen}: default Fz should be nonzero")
-        rel_z = abs(f_callback[2] - f_default[2]) / abs(f_default[2])
+        rel_z = abs(f_canonical[2] - f_default[2]) / abs(f_default[2])
         test.assertLess(
             rel_z,
             0.01,
-            f"pen={pen}: Fz mismatch {rel_z * 100:.2f}% (callback={f_callback[2]:.4f}, default={f_default[2]:.4f})",
+            f"pen={pen}: Fz mismatch {rel_z * 100:.2f}% (callback={f_canonical[2]:.4f}, default={f_default[2]:.4f})",
         )
+        np.testing.assert_array_equal(f_deprecated, f_canonical)
 
         for axis, label in [(0, "Fx"), (1, "Fy")]:
-            abs_diff = abs(f_callback[axis] - f_default[axis])
+            abs_diff = abs(f_canonical[axis] - f_default[axis])
             test.assertLess(
                 abs_diff / abs(f_default[2]),
                 0.01,
@@ -1793,7 +1814,7 @@ def test_custom_pressure_func_matches_default_linear(test, device):
             )
 
 
-def test_custom_pressure_func_matches_default_linear_with_stiffness_ratio(test, device):
+def test_custom_pressure_law_matches_default_linear_with_stiffness_ratio(test, device):
     """Exponent-1 power pressure must match the default for unequal stiffnesses."""
     model, state, upper_body, rest_z = _build_cube_cube_scene(device, kh_lower=1e9, kh_upper=1e10)
 
@@ -1811,7 +1832,7 @@ def test_custom_pressure_func_matches_default_linear_with_stiffness_ratio(test, 
         output_contact_surface=True,
         reduce_contacts=False,
         anchor_contact=False,
-        pressure_func=_power_pressure,
+        pressure_law_func=_power_pressure,
         pressure_data=pressure_data,
     )
     (pipe_default, contacts_default), (pipe_callback, contacts_callback) = _make_pipelines(
@@ -1878,19 +1899,20 @@ def test_custom_pressure_law_uses_analytic_cubic_slope(test, device):
     pressure_data = _CubicPressureData()
     pressure_data.shape_kh = model.shape_material_kh
 
-    scalar_config = HydroelasticSDF.Config(
+    pressure_only_config = HydroelasticSDF.Config(
         reduce_contacts=False,
-        pressure_func=_cubic_pressure,
+        pressure_law_func=_cubic_pressure,
         pressure_data=pressure_data,
     )
-    rich_config = HydroelasticSDF.Config(
+    tangent_config = HydroelasticSDF.Config(
         reduce_contacts=False,
         pressure_law_func=_cubic_pressure_law,
+        pressure_law_returns_tangent=True,
         pressure_data=pressure_data,
     )
-    (scalar_pipeline, scalar_contacts), (rich_pipeline, rich_contacts) = _make_pipelines(
+    (pressure_only_pipeline, pressure_only_contacts), (tangent_pipeline, tangent_contacts) = _make_pipelines(
         model,
-        [scalar_config, rich_config],
+        [pressure_only_config, tangent_config],
         [50000, 50000],
         deterministic=True,
     )
@@ -1901,49 +1923,51 @@ def test_custom_pressure_law_uses_analytic_cubic_slope(test, device):
         inputs=[state.body_q, upper_body, rest_z - 1.0e-3],
         device=device,
     )
-    scalar_pipeline.collide(state, scalar_contacts)
-    rich_pipeline.collide(state, rich_contacts)
+    pressure_only_pipeline.collide(state, pressure_only_contacts)
+    tangent_pipeline.collide(state, tangent_contacts)
 
-    scalar_count = int(scalar_contacts.rigid_contact_count.numpy()[0])
-    rich_count = int(rich_contacts.rigid_contact_count.numpy()[0])
-    test.assertGreater(scalar_count, 0)
-    test.assertEqual(rich_count, scalar_count)
+    pressure_only_count = int(pressure_only_contacts.rigid_contact_count.numpy()[0])
+    tangent_count = int(tangent_contacts.rigid_contact_count.numpy()[0])
+    test.assertGreater(pressure_only_count, 0)
+    test.assertEqual(tangent_count, pressure_only_count)
 
-    scalar_distance = _get_contact_distances(scalar_contacts, model, state)
-    rich_distance = _get_contact_distances(rich_contacts, model, state)
-    scalar_stiffness = scalar_contacts.rigid_contact_stiffness.numpy()[:scalar_count]
-    rich_stiffness = rich_contacts.rigid_contact_stiffness.numpy()[:rich_count]
-    scalar_shape0 = scalar_contacts.rigid_contact_shape0.numpy()[:scalar_count]
-    scalar_shape1 = scalar_contacts.rigid_contact_shape1.numpy()[:scalar_count]
-    rich_shape0 = rich_contacts.rigid_contact_shape0.numpy()[:rich_count]
-    rich_shape1 = rich_contacts.rigid_contact_shape1.numpy()[:rich_count]
-    scalar_pair = ((scalar_shape0 == 1) & (scalar_shape1 == 2)) | ((scalar_shape0 == 2) & (scalar_shape1 == 1))
-    rich_pair = ((rich_shape0 == 1) & (rich_shape1 == 2)) | ((rich_shape0 == 2) & (rich_shape1 == 1))
-    scalar_mask = scalar_pair & (scalar_distance < 0.0)
-    rich_mask = rich_pair & (rich_distance < 0.0)
-    test.assertGreater(np.count_nonzero(scalar_mask), 0)
-    test.assertEqual(np.count_nonzero(rich_mask), np.count_nonzero(scalar_mask))
-    scalar_distance = scalar_distance[scalar_mask]
-    rich_distance = rich_distance[rich_mask]
-    scalar_stiffness = scalar_stiffness[scalar_mask]
-    rich_stiffness = rich_stiffness[rich_mask]
+    pressure_only_distance = _get_contact_distances(pressure_only_contacts, model, state)
+    tangent_distance = _get_contact_distances(tangent_contacts, model, state)
+    pressure_only_stiffness = pressure_only_contacts.rigid_contact_stiffness.numpy()[:pressure_only_count]
+    tangent_stiffness = tangent_contacts.rigid_contact_stiffness.numpy()[:tangent_count]
+    pressure_only_shape0 = pressure_only_contacts.rigid_contact_shape0.numpy()[:pressure_only_count]
+    pressure_only_shape1 = pressure_only_contacts.rigid_contact_shape1.numpy()[:pressure_only_count]
+    tangent_shape0 = tangent_contacts.rigid_contact_shape0.numpy()[:tangent_count]
+    tangent_shape1 = tangent_contacts.rigid_contact_shape1.numpy()[:tangent_count]
+    pressure_only_pair = ((pressure_only_shape0 == 1) & (pressure_only_shape1 == 2)) | (
+        (pressure_only_shape0 == 2) & (pressure_only_shape1 == 1)
+    )
+    tangent_pair = ((tangent_shape0 == 1) & (tangent_shape1 == 2)) | ((tangent_shape0 == 2) & (tangent_shape1 == 1))
+    pressure_only_mask = pressure_only_pair & (pressure_only_distance < 0.0)
+    tangent_mask = tangent_pair & (tangent_distance < 0.0)
+    test.assertGreater(np.count_nonzero(pressure_only_mask), 0)
+    test.assertEqual(np.count_nonzero(tangent_mask), np.count_nonzero(pressure_only_mask))
+    pressure_only_distance = pressure_only_distance[pressure_only_mask]
+    tangent_distance = tangent_distance[tangent_mask]
+    pressure_only_stiffness = pressure_only_stiffness[pressure_only_mask]
+    tangent_stiffness = tangent_stiffness[tangent_mask]
 
     test.assertGreater(
-        np.sum(rich_stiffness),
-        2.0 * np.sum(scalar_stiffness),
+        np.sum(tangent_stiffness),
+        2.0 * np.sum(pressure_only_stiffness),
         "The supplied cubic slope must materially change tangent stiffness.",
     )
     test.assertLess(
-        abs(np.sum(rich_distance)),
-        0.5 * abs(np.sum(scalar_distance)),
-        "The force-equivalent rich-law distance must compensate for its larger tangent.",
+        abs(np.sum(tangent_distance)),
+        0.5 * abs(np.sum(pressure_only_distance)),
+        "The force-equivalent tangent distance must compensate for its larger stiffness.",
     )
-    rich_force = rich_stiffness * -rich_distance
-    test.assertTrue(np.all(np.isfinite(rich_force)))
-    test.assertTrue(np.all(rich_force > 0.0))
+    tangent_force = tangent_stiffness * -tangent_distance
+    test.assertTrue(np.all(np.isfinite(tangent_force)))
+    test.assertTrue(np.all(tangent_force > 0.0))
 
 
-def test_custom_pressure_func_force_scales_with_pressure_law(test, device):
+def test_custom_pressure_law_force_scales_with_depth(test, device):
     """Cubic pressure law must produce a steeper Fz(depth) curve than linear.
 
     The contact area in a cube-on-cube scene is itself depth-dependent, so the
@@ -1964,14 +1988,14 @@ def test_custom_pressure_func_force_scales_with_pressure_law(test, device):
         output_contact_surface=True,
         reduce_contacts=False,
         anchor_contact=False,
-        pressure_func=_cubic_pressure,
+        pressure_law_func=_cubic_pressure,
         pressure_data=cubic_data,
     )
     cfg_linear = HydroelasticSDF.Config(
         output_contact_surface=True,
         reduce_contacts=False,
         anchor_contact=False,
-        pressure_func=_linear_pressure,
+        pressure_law_func=_linear_pressure,
         pressure_data=linear_data,
     )
     (pipe_c, contacts_c), (pipe_l, contacts_l) = _make_pipelines(model, [cfg_cubic, cfg_linear], [50000, 50000])
@@ -1995,7 +2019,7 @@ def test_custom_pressure_func_force_scales_with_pressure_law(test, device):
 
     # Linear law's F-doubling ratio should be near 2 (force grows roughly with
     # depth at constant patch area). Cubic pressure must produce a substantially
-    # steeper curve — if pressure_func were ignored downstream we'd see the
+    # steeper curve — if the pressure law were ignored downstream we'd see the
     # same ratio as linear. Bounds are intentionally wide because MC vertex
     # interpolation under a non-linear law shifts vertex positions along
     # voxel edges, perturbing patch area in a depth-dependent way.
@@ -2005,11 +2029,11 @@ def test_custom_pressure_func_force_scales_with_pressure_law(test, device):
         cubic_ratio,
         4.0 * linear_ratio,
         f"cubic ratio {cubic_ratio:.2f} vs linear {linear_ratio:.2f}: "
-        f"pressure_func may not be applied to per-contact force",
+        "pressure law may not be applied to per-contact force",
     )
 
 
-def test_custom_pressure_func_reduced_matches_unreduced_cubic(test, device):
+def test_custom_pressure_law_reduced_matches_unreduced_cubic(test, device):
     """Under a cubic pressure law, reduced and unreduced net force must still agree."""
     model, state, upper_body, rest_z = _build_cube_cube_scene(device)
 
@@ -2020,14 +2044,14 @@ def test_custom_pressure_func_reduced_matches_unreduced_cubic(test, device):
         output_contact_surface=True,
         reduce_contacts=True,
         anchor_contact=False,
-        pressure_func=_cubic_pressure,
+        pressure_law_func=_cubic_pressure,
         pressure_data=pressure_data,
     )
     cfg_unr = HydroelasticSDF.Config(
         output_contact_surface=True,
         reduce_contacts=False,
         anchor_contact=False,
-        pressure_func=_cubic_pressure,
+        pressure_law_func=_cubic_pressure,
         pressure_data=pressure_data,
     )
     (pipe_red, contacts_red), (pipe_unr, contacts_unr) = _make_pipelines(model, [cfg_red, cfg_unr], [500, 50000])
@@ -2051,13 +2075,13 @@ def test_custom_pressure_func_reduced_matches_unreduced_cubic(test, device):
 
 
 def test_pressure_law_reduction_preserves_force_and_tangent(test, device, deterministic=False):
-    """Preserve rich-law force and scalar tangent during contact reduction."""
+    """Preserve pressure-law force and scalar tangent during contact reduction."""
     model, state, sphere_body, rest_z = _build_offset_cube_sphere_scene(
         device,
         kh=1.0e9,
         x_offset=0.1,
     )
-    builtin = newton.geometry.hydroelastic_pressure_law_linear
+    builtin = newton.geometry.hydroelastic_pressure_law_linear_tangent
     reduced_config = HydroelasticSDF.Config(
         reduce_contacts=True,
         anchor_contact=True,
@@ -2131,7 +2155,7 @@ def test_pressure_law_projects_oblique_sdf_gradients(test, device):
     scalar_config = HydroelasticSDF.Config(reduce_contacts=False)
     rich_config = HydroelasticSDF.Config(
         reduce_contacts=False,
-        pressure_law_func=newton.geometry.hydroelastic_pressure_law_linear,
+        pressure_law_func=newton.geometry.hydroelastic_pressure_law_linear_tangent,
     )
     (scalar_pipeline, scalar_contacts), (rich_pipeline, rich_contacts) = _make_pipelines(
         model,
@@ -2186,7 +2210,7 @@ class _DecoupledPressureData:
 @wp.func
 def _decoupled_pressure(signed_depth: wp.float32, shape_idx: wp.int32, data: _DecoupledPressureData) -> wp.float32:
     # Linear in penetration but with a coefficient that does NOT read
-    # shape_material_kh. Models the documented custom-pressure_func case where
+    # shape_material_kh. Models a custom pressure-law case where
     # the pressure magnitude is decoupled from the per-shape hydroelastic
     # stiffness. The direction-reliability gate must not assume otherwise.
     return -data.coeff * signed_depth
@@ -2235,7 +2259,7 @@ def test_reduction_preserves_force_at_high_kh_decoupled_pressure(test, device):
     any stiffness and for any pressure law. This guards against a regression to a
     pressure-scaled gate (e.g. dividing the aggregate force magnitude by
     ``shape_material_kh`` before the ``EPS_LARGE`` comparison): under a custom
-    ``pressure_func`` whose magnitude does not scale with kh, a large kh would
+    pressure law whose magnitude does not scale with kh, a large kh would
     drive that scaled magnitude below ``EPS_LARGE`` and silently disable anchor /
     normal matching, so the reduced contacts would stop reproducing the unreduced
     force. The sphere-over-edge geometry spreads the contact normals so the
@@ -2245,7 +2269,11 @@ def test_reduction_preserves_force_at_high_kh_decoupled_pressure(test, device):
     model, state, sphere_body, rest_z = _build_offset_cube_sphere_scene(device, kh=kh, x_offset=0.1)
     pdata = _DecoupledPressureData()
     pdata.coeff = 1.0e6
-    common = {"output_contact_surface": True, "pressure_func": _decoupled_pressure, "pressure_data": pdata}
+    common = {
+        "output_contact_surface": True,
+        "pressure_law_func": _decoupled_pressure,
+        "pressure_data": pdata,
+    }
     cfg_red = HydroelasticSDF.Config(
         reduce_contacts=True, anchor_contact=True, normal_matching=True, moment_matching=True, **common
     )
@@ -2270,14 +2298,14 @@ def test_reduction_preserves_force_at_high_kh_decoupled_pressure(test, device):
         )
 
 
-def test_custom_pressure_func_requires_pressure_data(test, device):
-    """Setting ``pressure_func`` without ``pressure_data`` must raise."""
+def test_custom_pressure_law_requires_pressure_data(test, device):
+    """Setting a custom pressure law without ``pressure_data`` must raise."""
     model, state, _, _ = _build_cube_cube_scene(device)
     del state
 
     cfg = HydroelasticSDF.Config(
         output_contact_surface=True,
-        pressure_func=_linear_pressure,
+        pressure_law_func=_linear_pressure,
         pressure_data=None,
     )
     with test.assertRaises(ValueError):
@@ -2285,19 +2313,36 @@ def test_custom_pressure_func_requires_pressure_data(test, device):
 
 
 def test_pressure_law_func_data_resolution(test, device):
-    """Resolve built-in law data and require data for custom rich laws."""
+    """Resolve flat callback contracts and require data for custom laws."""
     model, state, _, _ = _build_cube_cube_scene(device)
     del state
 
-    builtin = newton.geometry.hydroelastic_pressure_law_linear
-    builtin_pipeline = newton.CollisionPipeline(
-        model,
-        sdf_hydroelastic_config=HydroelasticSDF.Config(
-            reduce_contacts=False,
-            pressure_law_func=builtin,
-        ),
+    builtin_contracts = (
+        (newton.geometry.hydroelastic_pressure_law_linear, False),
+        (newton.geometry.hydroelastic_pressure_law_linear_tangent, True),
     )
-    test.assertIs(builtin_pipeline.hydroelastic_sdf.pressure_law_func, builtin)
+    for builtin, returns_tangent in builtin_contracts:
+        pipeline = newton.CollisionPipeline(
+            model,
+            sdf_hydroelastic_config=HydroelasticSDF.Config(
+                reduce_contacts=False,
+                pressure_law_func=builtin,
+            ),
+        )
+        test.assertIs(pipeline.hydroelastic_sdf.pressure_law_func, builtin)
+        test.assertEqual(pipeline.hydroelastic_sdf.pressure_law_returns_tangent, returns_tangent)
+
+    with test.assertRaisesRegex(ValueError, "hydroelastic_pressure_law_linear.*pressure-only"):
+        HydroelasticSDF.Config(
+            pressure_law_func=newton.geometry.hydroelastic_pressure_law_linear,
+            pressure_law_returns_tangent=True,
+        )
+
+    with test.assertRaisesRegex(ValueError, "hydroelastic_pressure_law_linear_tangent.*tangent"):
+        HydroelasticSDF.Config(
+            pressure_law_func=newton.geometry.hydroelastic_pressure_law_linear_tangent,
+            pressure_law_returns_tangent=False,
+        )
 
     with test.assertRaisesRegex(ValueError, "pressure_data.*pressure_law_func"):
         newton.CollisionPipeline(
@@ -2305,6 +2350,7 @@ def test_pressure_law_func_data_resolution(test, device):
             sdf_hydroelastic_config=HydroelasticSDF.Config(
                 reduce_contacts=False,
                 pressure_law_func=_linear_pressure_law,
+                pressure_law_returns_tangent=True,
             ),
         )
 
@@ -2315,6 +2361,7 @@ def test_pressure_law_func_data_resolution(test, device):
         sdf_hydroelastic_config=HydroelasticSDF.Config(
             reduce_contacts=False,
             pressure_law_func=_linear_pressure_law,
+            pressure_law_returns_tangent=True,
             pressure_data=pressure_data,
         ),
     )
@@ -2322,7 +2369,7 @@ def test_pressure_law_func_data_resolution(test, device):
 
 
 def test_pressure_law_rejects_nonpositive_projected_slope(test, device):
-    """Skip penetrating faces whose rich law has no positive tangent."""
+    """Skip penetrating faces whose law has no positive projected tangent."""
     model, state, upper_body, rest_z = _build_cube_cube_scene(device)
     pressure_data = _LinearPressureData()
     pressure_data.shape_kh = model.shape_material_kh
@@ -2332,6 +2379,7 @@ def test_pressure_law_rejects_nonpositive_projected_slope(test, device):
         sdf_hydroelastic_config=HydroelasticSDF.Config(
             reduce_contacts=False,
             pressure_law_func=_zero_slope_pressure_law,
+            pressure_law_returns_tangent=True,
             pressure_data=pressure_data,
         ),
     )
@@ -2886,23 +2934,34 @@ def test_fixed_point_extreme_exponents(test, device):
 
 class TestHydroelastic(unittest.TestCase):
     def test_pressure_law_public_api(self):
-        """Expose the rich linear hydroelastic pressure law canonically."""
+        """Expose both built-in linear pressure-law contracts canonically."""
         self.assertIn("hydroelastic_pressure_law_linear", newton.geometry.__all__)
+        self.assertIn("hydroelastic_pressure_law_linear_tangent", newton.geometry.__all__)
         self.assertTrue(callable(newton.geometry.hydroelastic_pressure_law_linear))
+        self.assertTrue(callable(newton.geometry.hydroelastic_pressure_law_linear_tangent))
 
-    def test_pressure_callbacks_are_mutually_exclusive(self):
-        """Accept one pressure callback contract and reject two."""
+    def test_pressure_func_deprecation_and_conflict(self):
+        """Migrate the deprecated pressure callback name without ambiguity."""
         pressure_data = _LinearPressureData()
-        config = HydroelasticSDF.Config(
-            pressure_law_func=_linear_pressure_law,
-            pressure_data=pressure_data,
-        )
-        self.assertIs(config.pressure_law_func, _linear_pressure_law)
+
+        with self.assertWarnsRegex(DeprecationWarning, "pressure_func.*pressure_law_func"):
+            config = HydroelasticSDF.Config(
+                pressure_func=_linear_pressure,
+                pressure_data=pressure_data,
+            )
+        self.assertIs(config.pressure_func, _linear_pressure)
 
         with self.assertRaisesRegex(ValueError, "pressure_func.*pressure_law_func"):
             HydroelasticSDF.Config(
                 pressure_func=_linear_pressure,
                 pressure_law_func=_linear_pressure_law,
+                pressure_data=pressure_data,
+            )
+
+        with self.assertRaisesRegex(TypeError, "pressure_law_returns_tangent.*bool"):
+            HydroelasticSDF.Config(
+                pressure_law_func=_linear_pressure_law,
+                pressure_law_returns_tangent="yes",
                 pressure_data=pressure_data,
             )
 
@@ -3361,24 +3420,24 @@ add_function_test(
 
 add_function_test(
     TestHydroelastic,
-    "test_custom_pressure_func_matches_default_linear",
-    test_custom_pressure_func_matches_default_linear,
+    "test_pressure_func_deprecated_alias_matches_canonical",
+    test_pressure_func_deprecated_alias_matches_canonical,
     devices=cuda_devices,
     check_output=False,
 )
 
 add_function_test(
     TestHydroelastic,
-    "test_custom_pressure_func_matches_default_linear_with_stiffness_ratio",
-    test_custom_pressure_func_matches_default_linear_with_stiffness_ratio,
+    "test_custom_pressure_law_matches_default_linear_with_stiffness_ratio",
+    test_custom_pressure_law_matches_default_linear_with_stiffness_ratio,
     devices=cuda_devices,
     check_output=False,
 )
 
 add_function_test(
     TestHydroelastic,
-    "test_custom_pressure_func_force_scales_with_pressure_law",
-    test_custom_pressure_func_force_scales_with_pressure_law,
+    "test_custom_pressure_law_force_scales_with_depth",
+    test_custom_pressure_law_force_scales_with_depth,
     devices=cuda_devices,
     check_output=False,
 )
@@ -3393,8 +3452,8 @@ add_function_test(
 
 add_function_test(
     TestHydroelastic,
-    "test_custom_pressure_func_reduced_matches_unreduced_cubic",
-    test_custom_pressure_func_reduced_matches_unreduced_cubic,
+    "test_custom_pressure_law_reduced_matches_unreduced_cubic",
+    test_custom_pressure_law_reduced_matches_unreduced_cubic,
     devices=cuda_devices,
     check_output=False,
 )
@@ -3425,8 +3484,8 @@ add_function_test(
 
 add_function_test(
     TestHydroelastic,
-    "test_custom_pressure_func_requires_pressure_data",
-    test_custom_pressure_func_requires_pressure_data,
+    "test_custom_pressure_law_requires_pressure_data",
+    test_custom_pressure_law_requires_pressure_data,
     devices=cuda_devices,
 )
 
