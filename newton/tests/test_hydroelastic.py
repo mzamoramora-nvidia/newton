@@ -3043,6 +3043,11 @@ class TestHydroelastic(unittest.TestCase):
         self.assertTrue(callable(newton.geometry.hydroelastic_pressure_law_linear))
         self.assertTrue(callable(newton.geometry.hydroelastic_pressure_law_linear_tangent))
 
+    def test_pressure_law_default_rejects_tangent_metadata(self):
+        """Reject tangent metadata that contradicts the default law."""
+        with self.assertRaisesRegex(ValueError, "pressure-only.*pressure_law_returns_tangent=True"):
+            HydroelasticSDF.Config(pressure_law_returns_tangent=True)
+
     def test_pressure_func_deprecation_and_conflict(self):
         """Migrate the deprecated pressure callback name without ambiguity."""
         pressure_data = _LinearPressureData()

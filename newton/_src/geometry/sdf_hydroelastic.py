@@ -625,9 +625,13 @@ class HydroelasticSDF:
                 self.pressure_law_returns_tangent, bool
             ):
                 raise TypeError("HydroelasticSDF.Config.pressure_law_returns_tangent must be a bool or None.")
-            if self.pressure_law_func is hydroelastic_pressure_law_linear and self.pressure_law_returns_tangent is True:
+            if self.pressure_law_returns_tangent is True and (
+                self.pressure_law_func is hydroelastic_pressure_law_linear
+                or (self.pressure_law_func is None and self.pressure_func is None)
+            ):
                 raise ValueError(
-                    "hydroelastic_pressure_law_linear is pressure-only; do not set pressure_law_returns_tangent=True."
+                    "The default hydroelastic_pressure_law_linear is pressure-only; "
+                    "do not set pressure_law_returns_tangent=True."
                 )
             if (
                 self.pressure_law_func is hydroelastic_pressure_law_linear_tangent
