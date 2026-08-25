@@ -1,6 +1,6 @@
 # Hydroelastic pressure-law and series-gradient implementation plan
 
-Status: physics, flat public interface, and self-review fixes implemented locally; full-suite verification pending
+Status: implemented and validated locally
 Issue: [newton-physics/newton#3503](https://github.com/newton-physics/newton/issues/3503)
 Rebased on Newton commit: `e5cc054bb95a6ba8889da983b0fdab3d977d32c9`
 Feature branch: `mzamoramora/hydro-series-gradient`
@@ -903,11 +903,10 @@ pinned Towncrier version specified by the repository workflow instructions.
       “legacy” or “compatibility” for the pair-separation/secant formulation.
 - [x] Focused hydroelastic tests and pre-commit pass after the flat-interface
       refactor.
-- [ ] The full repository suite passes without infrastructure errors. The
-      6,342-test run completed with 6,177 passes, 164 skips, and one CUDA
-      kernel-build/cache error in
-      `test_mujoco_hydroelastic_penetration_depth_cuda_0`; that test passed in
-      both the dedicated hydroelastic run and its isolated retry.
+- [x] The full repository suite passes: 6,344 tests in 1,573.860 seconds, with
+      164 expected skips and no failures or errors. The previously intermittent
+      `test_mujoco_hydroelastic_penetration_depth_cuda_0` test also passed in
+      this clean run.
 
 ## Follow-up verification before upstream PR
 
