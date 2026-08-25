@@ -223,6 +223,20 @@ def get_effective_stiffness(k_a: wp.float32, k_b: wp.float32) -> wp.float32:
     return (k_a * k_b) / denom
 
 
+@wp.func
+def _projected_series_gradient(
+    compression_slope_a: wp.float32,
+    compression_slope_b: wp.float32,
+    gradient_a: wp.vec3f,
+    gradient_b: wp.vec3f,
+    normal: wp.vec3f,
+) -> wp.float32:
+    """Project raw SDF gradients and combine material slopes in series."""
+    projected_a = compression_slope_a * wp.dot(gradient_a, normal)
+    projected_b = compression_slope_b * -wp.dot(gradient_b, normal)
+    return projected_a * projected_b / (projected_a + projected_b)
+
+
 @wp.struct
 class LinearPressureData:
     """Default pressure-callback state: a per-shape stiffness array.
@@ -570,6 +584,8 @@ class HydroelasticSDF:
         """
         pressure_law_returns_tangent: bool | None = None
         """Whether a custom :attr:`pressure_law_func` returns pressure and slope.
+
+        .. experimental::
 
         This is host-static callback-contract metadata, not a per-contact mode.
         ``None`` resolves the contract for Newton's built-in laws and selects
@@ -2324,7 +2340,13 @@ def get_generate_contacts_kernel(
                             or projected_sum <= EPS_SMALL
                         ):
                             continue
-                        projected_series = projected_a * projected_b / projected_sum
+                        projected_series = _projected_series_gradient(
+                            law_a[1],
+                            law_b[1],
+                            grad_a_b,
+                            grad_b_b,
+                            normal,
+                        )
                         if not wp.isfinite(projected_series) or projected_series <= EPS_SMALL:
                             continue
                         face_tangent_stiffness = force_area * projected_series

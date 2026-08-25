@@ -15,11 +15,13 @@ from newton._src.geometry.contact_reduction_hydroelastic import (
     SPECULATIVE_BIN_OFFSET,
     _fixed_mantissa_bits,
     _from_fixed,
+    _tangent_aggregate_linearization,
     _to_fixed,
 )
 from newton._src.geometry.sdf_hydroelastic import (
     _extract_mc_corner_pair,
     _mc_corner_offset,
+    _projected_series_gradient,
     classify_hydroelastic_contact,
     pack_hydro_voxel_record,
     unpack_hydro_voxel_coords,
@@ -84,6 +86,45 @@ def _test_fixed_point_extreme_exponents(
     tid = wp.tid()
     fixed_values[tid] = _to_fixed(values[tid], exponents[tid], mantissa_bits)
     roundtrip_values[tid] = _from_fixed(fixed_values[tid], exponents[tid], mantissa_bits)
+
+
+@wp.kernel
+def _test_tangent_aggregate_linearization(
+    aggregate_force: wp.array[wp.float32],
+    tangent_budget: wp.array[wp.float32],
+    total_depth: wp.array[wp.float32],
+    output_count: wp.array[wp.int32],
+    reliable: wp.array[wp.int32],
+    linearization: wp.array[wp.vec2f],
+):
+    """Resolve valid tangent aggregates and reject unreliable ones."""
+    tid = wp.tid()
+    linearization[tid] = _tangent_aggregate_linearization(
+        aggregate_force[tid],
+        tangent_budget[tid],
+        total_depth[tid],
+        output_count[tid],
+        reliable[tid] != 0,
+    )
+
+
+@wp.kernel
+def _test_projected_series_gradient(
+    slopes: wp.array[wp.vec2f],
+    gradient_a: wp.array[wp.vec3f],
+    gradient_b: wp.array[wp.vec3f],
+    normal: wp.array[wp.vec3f],
+    projected_series: wp.array[wp.float32],
+):
+    """Evaluate projected material slopes in series."""
+    tid = wp.tid()
+    projected_series[tid] = _projected_series_gradient(
+        slopes[tid][0],
+        slopes[tid][1],
+        gradient_a[tid],
+        gradient_b[tid],
+        normal[tid],
+    )
 
 
 @wp.kernel
@@ -174,6 +215,68 @@ def test_triangle_fraction_rotations(test, device):
         device=device,
     )
     np.testing.assert_allclose(fractions.numpy(), expected, rtol=1.0e-6, atol=0.0)
+
+
+def test_projected_series_gradient_algebra(test, device):
+    """Preserve raw-gradient projection and material-series algebra."""
+    slopes_np = np.array([[12.0, 30.0]], dtype=np.float32)
+    gradient_a_np = np.array([[2.0, 1.0, 0.0]], dtype=np.float32)
+    gradient_b_np = np.array([[-0.5, 3.0, 0.0]], dtype=np.float32)
+    normal_np = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
+    projected_series = wp.empty(1, dtype=wp.float32, device=device)
+
+    wp.launch(
+        _test_projected_series_gradient,
+        dim=1,
+        inputs=[
+            wp.array(slopes_np, dtype=wp.vec2f, device=device),
+            wp.array(gradient_a_np, dtype=wp.vec3f, device=device),
+            wp.array(gradient_b_np, dtype=wp.vec3f, device=device),
+            wp.array(normal_np, dtype=wp.vec3f, device=device),
+            projected_series,
+        ],
+        device=device,
+    )
+
+    projected_a = 12.0 * 2.0
+    projected_b = 30.0 * 0.5
+    expected_gradient = projected_a * projected_b / (projected_a + projected_b)
+    np.testing.assert_allclose(projected_series.numpy()[0], expected_gradient, rtol=1.0e-6)
+
+    area = 0.25
+    pressure = 18.0
+    stiffness = area * projected_series.numpy()[0]
+    solver_distance = -pressure / projected_series.numpy()[0]
+    np.testing.assert_allclose(stiffness, area * expected_gradient, rtol=1.0e-6)
+    np.testing.assert_allclose(solver_distance, -pressure / expected_gradient, rtol=1.0e-6)
+    np.testing.assert_allclose(stiffness * -solver_distance, area * pressure, rtol=1.0e-6)
+
+
+def test_tangent_aggregate_requires_reliable_force_mapping(test, device):
+    """Fall back per face when a tangent aggregate cannot preserve force."""
+    aggregate_force_np = np.array([12.0, 12.0, 0.0, 12.0], dtype=np.float32)
+    tangent_budget_np = np.array([30.0, 30.0, 30.0, 30.0], dtype=np.float32)
+    total_depth_np = np.array([2.0, 2.0, 2.0, 0.0], dtype=np.float32)
+    output_count_np = np.array([3, 3, 3, 3], dtype=np.int32)
+    reliable_np = np.array([1, 0, 1, 1], dtype=np.int32)
+    linearization = wp.empty(4, dtype=wp.vec2f, device=device)
+
+    wp.launch(
+        _test_tangent_aggregate_linearization,
+        dim=4,
+        inputs=[
+            wp.array(aggregate_force_np, dtype=wp.float32, device=device),
+            wp.array(tangent_budget_np, dtype=wp.float32, device=device),
+            wp.array(total_depth_np, dtype=wp.float32, device=device),
+            wp.array(output_count_np, dtype=wp.int32, device=device),
+            wp.array(reliable_np, dtype=wp.int32, device=device),
+            linearization,
+        ],
+        device=device,
+    )
+
+    expected = np.array([[10.0, 0.6], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], dtype=np.float32)
+    np.testing.assert_allclose(linearization.numpy(), expected, rtol=1.0e-6, atol=0.0)
 
 
 def test_hydro_voxel_record_roundtrip(test, device):
@@ -2152,14 +2255,14 @@ def test_pressure_law_projects_oblique_sdf_gradients(test, device):
         kh=1.0e9,
         x_offset=0.1,
     )
-    scalar_config = HydroelasticSDF.Config(reduce_contacts=False)
-    rich_config = HydroelasticSDF.Config(
+    pressure_only_config = HydroelasticSDF.Config(reduce_contacts=False)
+    tangent_config = HydroelasticSDF.Config(
         reduce_contacts=False,
         pressure_law_func=newton.geometry.hydroelastic_pressure_law_linear_tangent,
     )
-    (scalar_pipeline, scalar_contacts), (rich_pipeline, rich_contacts) = _make_pipelines(
+    (pressure_only_pipeline, pressure_only_contacts), (tangent_pipeline, tangent_contacts) = _make_pipelines(
         model,
-        [scalar_config, rich_config],
+        [pressure_only_config, tangent_config],
         [20000, 20000],
         deterministic=True,
     )
@@ -2169,8 +2272,8 @@ def test_pressure_law_projects_oblique_sdf_gradients(test, device):
         inputs=[state.body_q, sphere_body, rest_z - 5.0e-3],
         device=device,
     )
-    scalar_pipeline.collide(state, scalar_contacts)
-    rich_pipeline.collide(state, rich_contacts)
+    pressure_only_pipeline.collide(state, pressure_only_contacts)
+    tangent_pipeline.collide(state, tangent_contacts)
 
     def penetrating_pair_values(contacts):
         count = int(contacts.rigid_contact_count.numpy()[0])
@@ -2182,22 +2285,22 @@ def test_pressure_law_projects_oblique_sdf_gradients(test, device):
         stiffness = contacts.rigid_contact_stiffness.numpy()[:count]
         return distance[mask], stiffness[mask]
 
-    scalar_distance, scalar_stiffness = penetrating_pair_values(scalar_contacts)
-    rich_distance, rich_stiffness = penetrating_pair_values(rich_contacts)
-    test.assertGreater(len(scalar_distance), 0)
-    test.assertEqual(len(rich_distance), len(scalar_distance))
+    pressure_only_distance, pressure_only_stiffness = penetrating_pair_values(pressure_only_contacts)
+    tangent_distance, tangent_stiffness = penetrating_pair_values(tangent_contacts)
+    test.assertGreater(len(pressure_only_distance), 0)
+    test.assertEqual(len(tangent_distance), len(pressure_only_distance))
 
-    scalar_tangent = np.sum(scalar_stiffness)
-    rich_tangent = np.sum(rich_stiffness)
-    tangent_ratio = rich_tangent / scalar_tangent
+    pressure_only_tangent = np.sum(pressure_only_stiffness)
+    projected_tangent = np.sum(tangent_stiffness)
+    tangent_ratio = projected_tangent / pressure_only_tangent
     test.assertGreater(abs(tangent_ratio - 1.0), 5.0e-2)
     if tangent_ratio > 1.0:
-        test.assertLess(abs(np.sum(rich_distance)), 0.98 * abs(np.sum(scalar_distance)))
+        test.assertLess(abs(np.sum(tangent_distance)), 0.98 * abs(np.sum(pressure_only_distance)))
     else:
-        test.assertGreater(abs(np.sum(rich_distance)), 1.02 * abs(np.sum(scalar_distance)))
+        test.assertGreater(abs(np.sum(tangent_distance)), 1.02 * abs(np.sum(pressure_only_distance)))
     np.testing.assert_allclose(
-        np.sum(rich_stiffness * -rich_distance),
-        np.sum(scalar_stiffness * -scalar_distance),
+        np.sum(tangent_stiffness * -tangent_distance),
+        np.sum(pressure_only_stiffness * -pressure_only_distance),
         rtol=2.0e-2,
     )
 
@@ -2299,7 +2402,7 @@ def test_reduction_preserves_force_at_high_kh_decoupled_pressure(test, device):
 
 
 def test_custom_pressure_law_requires_pressure_data(test, device):
-    """Setting a custom pressure law without ``pressure_data`` must raise."""
+    """Reject a custom pressure law without ``pressure_data``."""
     model, state, _, _ = _build_cube_cube_scene(device)
     del state
 
@@ -3374,6 +3477,20 @@ add_function_test(
     TestHydroelastic,
     "test_mc_corner_pair_selection",
     test_mc_corner_pair_selection,
+    devices=cuda_devices,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_projected_series_gradient_algebra",
+    test_projected_series_gradient_algebra,
+    devices=cuda_devices,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_tangent_aggregate_requires_reliable_force_mapping",
+    test_tangent_aggregate_requires_reliable_force_mapping,
     devices=cuda_devices,
 )
 

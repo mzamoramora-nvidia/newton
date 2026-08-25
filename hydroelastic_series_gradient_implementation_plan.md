@@ -1,6 +1,6 @@
 # Hydroelastic pressure-law and series-gradient implementation plan
 
-Status: physics and flat public interface implemented locally; full-suite verification pending
+Status: physics, flat public interface, and self-review fixes implemented locally; full-suite verification pending
 Issue: [newton-physics/newton#3503](https://github.com/newton-physics/newton/issues/3503)
 Rebased on Newton commit: `e5cc054bb95a6ba8889da983b0fdab3d977d32c9`
 Feature branch: `mzamoramora/hydro-series-gradient`
@@ -740,8 +740,11 @@ separate future work.
 - Supplying deprecated `pressure_func` with canonical `pressure_law_func`
   raises clearly at construction.
 - A custom `pressure_law_func` without `pressure_data` raises clearly.
-- A custom tangent-returning callback without
-  `pressure_law_returns_tangent=True` fails with a callback-contract error.
+- A custom tangent-returning callback documents and supplies
+  `pressure_law_returns_tangent=True`. Without that metadata Newton selects the
+  pressure-only specialization, so an incompatible return type fails during
+  Warp callback compilation; contextual return-contract preflight remains
+  follow-up work.
 - Non-finite pressure, non-finite slope, and negative compression slope are
   rejected without emitting invalid contacts.
 - Margin and gap classification is unchanged across pressure-only and tangent
@@ -769,6 +772,8 @@ separate future work.
 - Moment matching enabled.
 - Voxel-bin duplicate paths spend the tangent budget once.
 - Missing-bin fallback uses the stored per-face tangent pair.
+- An unreliable normal-bin aggregate uses the stored per-face tangent pair
+  instead of combining shared tangent stiffness with raw pair separation.
 
 ### Determinism
 

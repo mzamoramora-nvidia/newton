@@ -139,6 +139,33 @@ def _tangent_contact_linearization(area: float, pressure: float, tangent_stiffne
     return wp.vec2(tangent_stiffness, -area * pressure / tangent_stiffness)
 
 
+@wp.func
+def _tangent_aggregate_linearization(
+    aggregate_force: float,
+    tangent_budget: float,
+    total_depth: float,
+    output_count: int,
+    reliable: wp.bool,
+) -> wp.vec2:
+    """Return shared stiffness and distance scale for a usable tangent aggregate.
+
+    A zero pair tells the exporter to use each contact's stored tangent
+    linearization. This keeps an unreliable aggregate from combining a shared
+    tangent stiffness with unscaled pair separation.
+    """
+    if (
+        reliable
+        and aggregate_force > wp.static(EPS_SMALL)
+        and tangent_budget > wp.static(EPS_SMALL)
+        and total_depth > wp.static(EPS_SMALL)
+        and output_count > 0
+    ):
+        shared_stiffness = tangent_budget / float(output_count)
+        distance_scale = aggregate_force / (shared_stiffness * total_depth)
+        return wp.vec2(shared_stiffness, distance_scale)
+    return wp.vec2(0.0, 0.0)
+
+
 def _fixed_mantissa_bits(max_terms: int) -> int:
     """Fixed-point mantissa width that cannot overflow for ``max_terms`` terms.
 
@@ -1277,10 +1304,15 @@ def create_export_hydroelastic_reduced_contacts_kernel(
             if wp.static(use_pressure_tangent) and is_normal_entry:
                 output_count = total_contact_count_reduced[entry_idx] + add_anchor
                 tangent_budget = agg_tangent_stiffness[entry_idx]
-                if output_count > 0 and tangent_budget > wp.static(EPS_SMALL):
-                    shared_stiffness = tangent_budget / float(output_count)
-                    if agg_force_mag > wp.static(EPS_SMALL) and total_depth_with_anchor > wp.static(EPS_SMALL):
-                        distance_scale = agg_force_mag / (shared_stiffness * total_depth_with_anchor)
+                aggregate_linearization = _tangent_aggregate_linearization(
+                    agg_force_mag,
+                    tangent_budget,
+                    total_depth_with_anchor,
+                    output_count,
+                    has_reliable_agg_direction,
+                )
+                shared_stiffness = aggregate_linearization[0]
+                distance_scale = aggregate_linearization[1]
 
             # Moment matching: hybrid uniform / per-contact strategy.
             moment_alpha = float(0.0)
@@ -1426,17 +1458,16 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                         if wp.static(use_pressure_tangent):
                             nbin_output_count = total_contact_count_reduced[nbin_entry_idx] + nbin_add_anchor
                             nbin_tangent_budget = agg_tangent_stiffness[nbin_entry_idx]
-                            if nbin_output_count > 0 and nbin_tangent_budget > wp.static(EPS_SMALL):
-                                c_stiffness = nbin_tangent_budget / float(nbin_output_count)
-                                if nbin_agg_mag > wp.static(EPS_SMALL) and nbin_effective_depth > wp.static(EPS_SMALL):
-                                    nbin_distance_scale = nbin_agg_mag / (c_stiffness * nbin_effective_depth)
-                                    solver_distance = nbin_distance_scale * depth
-                                else:
-                                    tangent_pair = _tangent_contact_linearization(
-                                        area_i, pressure_i, contact_tangent_stiffness[contact_id]
-                                    )
-                                    c_stiffness = tangent_pair[0]
-                                    solver_distance = tangent_pair[1]
+                            nbin_linearization = _tangent_aggregate_linearization(
+                                nbin_agg_mag,
+                                nbin_tangent_budget,
+                                nbin_effective_depth,
+                                nbin_output_count,
+                                nbin_dir_reliable,
+                            )
+                            if nbin_linearization[0] > 0.0:
+                                c_stiffness = nbin_linearization[0]
+                                solver_distance = nbin_linearization[1] * depth
                             else:
                                 tangent_pair = _tangent_contact_linearization(
                                     area_i, pressure_i, contact_tangent_stiffness[contact_id]
