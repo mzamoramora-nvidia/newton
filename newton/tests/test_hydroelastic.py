@@ -13,6 +13,7 @@ import newton.geometry
 from newton._src.geometry.contact_reduction_hydroelastic import (
     FIXED_EXP_NONE,
     SPECULATIVE_BIN_OFFSET,
+    HydroelasticContactReduction,
     _fixed_mantissa_bits,
     _from_fixed,
     _tangent_aggregate_linearization,
@@ -864,6 +865,31 @@ def test_deterministic_hydroelastic_contacts(test, device, moment_matching=False
 def test_deterministic_hydroelastic_contacts_moment_matching(test, device):
     """Keep hydroelastic contacts bit-identical when moment matching is enabled."""
     test_deterministic_hydroelastic_contacts(test, device, moment_matching=True)
+
+
+def test_deterministic_hydroelastic_scratch_allocation(test, device):
+    """Allocate tangent fixed-point scratch only for tangent-returning laws."""
+    pressure_only = HydroelasticContactReduction(
+        capacity=64,
+        device=device,
+        deterministic=True,
+        store_tangent_data=False,
+    )
+    tangent = HydroelasticContactReduction(
+        capacity=64,
+        device=device,
+        deterministic=True,
+        store_tangent_data=True,
+    )
+
+    pressure_ht_capacity = pressure_only.reducer.hashtable.capacity
+    tangent_ht_capacity = tangent.reducer.hashtable.capacity
+    test.assertEqual(pressure_ht_capacity, tangent_ht_capacity)
+
+    test.assertEqual(pressure_only._fixed_accum.shape[0], 17 * pressure_ht_capacity)
+    test.assertEqual(pressure_only._fixed_scale.shape[0], 7 * pressure_ht_capacity)
+    test.assertEqual(tangent._fixed_accum.shape[0], 18 * tangent_ht_capacity)
+    test.assertEqual(tangent._fixed_scale.shape[0], 8 * tangent_ht_capacity)
 
 
 def test_cached_shape_sdf_data_matches_fallback(test, device):
@@ -3375,6 +3401,14 @@ add_function_test(
     "test_deterministic_hydroelastic_contacts",
     test_deterministic_hydroelastic_contacts,
     devices=cuda_devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_deterministic_hydroelastic_scratch_allocation",
+    test_deterministic_hydroelastic_scratch_allocation,
+    devices=["cpu"],
     check_output=False,
 )
 

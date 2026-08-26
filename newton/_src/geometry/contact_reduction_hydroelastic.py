@@ -105,6 +105,7 @@ FIXED_MOMENT_UNREDUCED = wp.constant(14)
 FIXED_MOMENT_REDUCED = wp.constant(15)
 FIXED_MOMENT2_REDUCED = wp.constant(16)
 FIXED_TANGENT_STIFFNESS = wp.constant(17)
+NUM_FIXED_SLOTS_PRESSURE_ONLY = 17
 NUM_FIXED_SLOTS = 18
 
 # Scale families, laid out ``family * ht_capacity + entry``.  Quantities that
@@ -117,6 +118,7 @@ SCALE_MOMENT_UNREDUCED = wp.constant(4)
 SCALE_MOMENT_REDUCED = wp.constant(5)
 SCALE_MOMENT2_REDUCED = wp.constant(6)
 SCALE_TANGENT_STIFFNESS = wp.constant(7)
+NUM_SCALE_FAMILIES_PRESSURE_ONLY = 7
 NUM_SCALE_FAMILIES = 8
 
 # Accumulation phases for the two-pass (scale, then add) accumulators.
@@ -1732,8 +1734,10 @@ class HydroelasticContactReduction:
         ht_capacity = self.reducer.hashtable.capacity
         self._mantissa_bits = _fixed_mantissa_bits(max(capacity, ht_capacity * VALUES_PER_KEY))
         if deterministic:
-            self._fixed_accum = wp.zeros(NUM_FIXED_SLOTS * ht_capacity, dtype=wp.int64, device=device)
-            self._fixed_scale = wp.full(NUM_SCALE_FAMILIES * ht_capacity, FIXED_EXP_NONE, dtype=wp.int32, device=device)
+            fixed_slot_count = NUM_FIXED_SLOTS if store_tangent_data else NUM_FIXED_SLOTS_PRESSURE_ONLY
+            scale_family_count = NUM_SCALE_FAMILIES if store_tangent_data else NUM_SCALE_FAMILIES_PRESSURE_ONLY
+            self._fixed_accum = wp.zeros(fixed_slot_count * ht_capacity, dtype=wp.int64, device=device)
+            self._fixed_scale = wp.full(scale_family_count * ht_capacity, FIXED_EXP_NONE, dtype=wp.int32, device=device)
         else:
             self._fixed_accum = wp.zeros(0, dtype=wp.int64, device=device)
             self._fixed_scale = wp.zeros(0, dtype=wp.int32, device=device)
