@@ -18,6 +18,8 @@ newton.geometry
    BroadPhaseSAP
    HydroelasticSDF
    NarrowPhase
+   ParticleSurface
+   TriMeshCollisionInfo
 
 .. rubric:: Functions
 
@@ -40,6 +42,7 @@ newton.geometry
    compute_inertia_shape
    compute_offset_mesh
    create_empty_sdf_data
+   extract_particle_surface
    hydroelastic_pressure_law_linear
    hydroelastic_pressure_law_linear_tangent
    sdf_box

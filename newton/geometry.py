@@ -7,6 +7,7 @@ from ._src.geometry import (
     BroadPhaseAllPairs,
     BroadPhaseExplicit,
     BroadPhaseSAP,
+    TriMeshCollisionInfo,
     collide_box_box,
     collide_capsule_box,
     collide_capsule_capsule,
@@ -25,6 +26,7 @@ from ._src.geometry.contact_match import MATCH_NOT_FOUND as _MATCH_NOT_FOUND
 from ._src.geometry.inertia import compute_inertia_shape, transform_inertia
 from ._src.geometry.kernels import sdf_box, sdf_capsule, sdf_cone, sdf_cylinder, sdf_mesh, sdf_plane, sdf_sphere
 from ._src.geometry.narrow_phase import NarrowPhase
+from ._src.geometry.particle_surface import ParticleSurface, extract_particle_surface
 from ._src.geometry.sdf_hydroelastic import (
     HydroelasticSDF,
     hydroelastic_pressure_law_linear,
@@ -38,6 +40,8 @@ __all__ = [
     "BroadPhaseSAP",
     "HydroelasticSDF",
     "NarrowPhase",
+    "ParticleSurface",
+    "TriMeshCollisionInfo",
     "collide_box_box",
     "collide_capsule_box",
     "collide_capsule_capsule",
@@ -53,6 +57,7 @@ __all__ = [
     "compute_inertia_shape",
     "compute_offset_mesh",
     "create_empty_sdf_data",
+    "extract_particle_surface",
     "hydroelastic_pressure_law_linear",
     "hydroelastic_pressure_law_linear_tangent",
     "sdf_box",
