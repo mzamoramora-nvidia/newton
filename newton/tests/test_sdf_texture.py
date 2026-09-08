@@ -22,7 +22,10 @@ from newton._src.geometry.sdf_texture import (
     QuantizationMode,
     TextureSDFData,
     _texture_read_voxel_corners_paired,
+    _texture_read_voxel_corners_scalar,
     _texture_sample_sdf_grad_hw_impl,
+    _texture_sample_sdf_gradient_from_mc_corners,
+    _texture_voxel_corners_are_fine,
     build_sparse_sdf_from_primitive,
     compute_isomesh_from_texture_sdf,
     create_empty_texture_sdf_data,
@@ -225,6 +228,39 @@ def _sample_texture_sdf_grad_kernel(
     dist, grad = texture_sample_sdf_grad(sdf, query_points[tid])
     results[tid] = dist
     gradients[tid] = grad
+
+
+def _create_compare_cached_corner_gradient_kernel(read_voxel_corners):
+    @wp.kernel
+    def compare_cached_corner_gradient_kernel(
+        sdf: TextureSDFData,
+        voxel_coords: wp.array[wp.vec3i],
+        fractions: wp.array[wp.vec3],
+        cached_gradients: wp.array[wp.vec3],
+        sampled_gradients: wp.array[wp.vec3],
+        corners_are_fine: wp.array[wp.int32],
+    ):
+        """Compare cached-cell gradients with the software texture sampler."""
+        tid = wp.tid()
+        coord = voxel_coords[tid]
+        fraction = fractions[tid]
+        corners = wp.static(read_voxel_corners)(sdf, coord[0], coord[1], coord[2])
+        all_fine = _texture_voxel_corners_are_fine(sdf, coord[0], coord[1], coord[2])
+        query = sdf.sdf_box_lower + wp.cw_mul(wp.vec3f(coord) + fraction, sdf.voxel_size)
+        _, sampled_gradient = texture_sample_sdf_grad(sdf, query)
+        cached_gradients[tid] = _texture_sample_sdf_gradient_from_mc_corners(sdf, query, coord, corners, all_fine)
+        sampled_gradients[tid] = sampled_gradient
+        corners_are_fine[tid] = wp.int32(all_fine)
+
+    return compare_cached_corner_gradient_kernel
+
+
+_compare_cached_corner_gradient_paired_kernel = _create_compare_cached_corner_gradient_kernel(
+    _texture_read_voxel_corners_paired
+)
+_compare_cached_corner_gradient_scalar_kernel = _create_compare_cached_corner_gradient_kernel(
+    _texture_read_voxel_corners_scalar
+)
 
 
 @wp.func
@@ -584,6 +620,108 @@ def test_texture_sdf_software_sampling_honors_layout(test, device):
     )
 
     np.testing.assert_allclose(scalar_values.numpy(), paired_values.numpy(), rtol=0.0, atol=2.0e-6)
+
+
+def test_texture_cached_corner_gradient_matches_software_sampler(test, device):
+    """Match cached marching-cubes gradients to analytical texture sampling."""
+    mesh = _create_sphere_mesh()
+    wp_mesh = wp.Mesh(
+        points=wp.array(mesh.vertices, dtype=wp.vec3, device=device),
+        indices=wp.array(mesh.indices, dtype=wp.int32, device=device),
+        support_winding_number=True,
+    )
+
+    for paired_samples in (True, False):
+        tex_sdf, _coarse_texture, _subgrid_texture = create_texture_sdf_from_mesh(
+            wp_mesh,
+            margin=0.05,
+            narrow_band_range=(-0.04, 0.04),
+            max_resolution=64,
+            paired_samples=paired_samples,
+            device=device,
+        )
+        slots = tex_sdf.subgrid_start_slots.numpy()
+        fine = slots < int(SLOT_LINEAR)
+        fine_blocks = np.argwhere(fine)
+        coarse_blocks = np.argwhere(~fine)
+        test.assertGreater(len(fine_blocks), 0)
+        test.assertGreater(len(coarse_blocks), 0)
+
+        transition_block = None
+        transition_axis = None
+        fine_boundary_block = None
+        fine_boundary_axis = None
+        for axis in range(3):
+            lower_slice = [slice(None)] * 3
+            upper_slice = [slice(None)] * 3
+            lower_slice[axis] = slice(None, -1)
+            upper_slice[axis] = slice(1, None)
+            lower_fine = fine[tuple(lower_slice)]
+            upper_fine = fine[tuple(upper_slice)]
+            if transition_block is None:
+                transitions = np.argwhere(lower_fine != upper_fine)
+                if len(transitions) > 0:
+                    transition_block = transitions[len(transitions) // 2]
+                    transition_axis = axis
+            if fine_boundary_block is None:
+                fine_boundaries = np.argwhere(lower_fine & upper_fine)
+                if len(fine_boundaries) > 0:
+                    fine_boundary_block = fine_boundaries[len(fine_boundaries) // 2]
+                    fine_boundary_axis = axis
+
+        test.assertIsNotNone(transition_block, "The fixture must contain a coarse/fine block boundary")
+        test.assertIsNotNone(fine_boundary_block, "The fixture must contain a fine/fine block boundary")
+        lower = np.array(tex_sdf.sdf_box_lower, dtype=np.float32)
+        upper = np.array(tex_sdf.sdf_box_upper, dtype=np.float32)
+        voxel_size = np.array(tex_sdf.voxel_size, dtype=np.float32)
+        max_cell_coord = np.rint((upper - lower) / voxel_size).astype(np.int32) - 1
+        subgrid_size = int(tex_sdf.subgrid_size)
+        fine_interior = fine_blocks[len(fine_blocks) // 2].astype(np.int32) * subgrid_size + subgrid_size // 2
+        coarse_interior = coarse_blocks[len(coarse_blocks) // 2].astype(np.int32) * subgrid_size + subgrid_size // 2
+        transition_coord = transition_block.astype(np.int32) * subgrid_size + subgrid_size // 2
+        transition_coord[transition_axis] = (transition_block[transition_axis] + 1) * subgrid_size - 1
+        fine_boundary_coord = fine_boundary_block.astype(np.int32) * subgrid_size + subgrid_size // 2
+        fine_boundary_coord[fine_boundary_axis] = (fine_boundary_block[fine_boundary_axis] + 1) * subgrid_size - 1
+        coords_np = np.stack((fine_interior, coarse_interior, transition_coord, fine_boundary_coord))
+        coords_np = np.clip(coords_np, 0, max_cell_coord)
+        fractions_np = np.array(
+            [
+                [0.23, 0.41, 0.67],
+                [0.71, 0.37, 0.19],
+                [0.43, 0.61, 0.29],
+                [0.31, 0.53, 0.73],
+            ],
+            dtype=np.float32,
+        )
+        cached_gradients = wp.empty(len(coords_np), dtype=wp.vec3, device=device)
+        sampled_gradients = wp.empty(len(coords_np), dtype=wp.vec3, device=device)
+        corners_are_fine = wp.empty(len(coords_np), dtype=wp.int32, device=device)
+        compare_kernel = (
+            _compare_cached_corner_gradient_paired_kernel
+            if paired_samples
+            else _compare_cached_corner_gradient_scalar_kernel
+        )
+        wp.launch(
+            compare_kernel,
+            dim=len(coords_np),
+            inputs=[
+                tex_sdf,
+                wp.array(coords_np, dtype=wp.vec3i, device=device),
+                wp.array(fractions_np, dtype=wp.vec3, device=device),
+                cached_gradients,
+                sampled_gradients,
+                corners_are_fine,
+            ],
+            device=device,
+        )
+
+        np.testing.assert_array_equal(corners_are_fine.numpy(), np.array([1, 0, 0, 1], dtype=np.int32))
+        np.testing.assert_allclose(
+            cached_gradients.numpy(),
+            sampled_gradients.numpy(),
+            rtol=2.0e-5,
+            atol=2.0e-5,
+        )
 
 
 def test_texture_sdf_scalar_extract_isomesh(test, device):
@@ -1861,6 +1999,12 @@ add_function_test(
     TestTextureSDF,
     "test_texture_sdf_software_sampling_honors_layout",
     test_texture_sdf_software_sampling_honors_layout,
+    devices=devices,
+)
+add_function_test(
+    TestTextureSDF,
+    "test_texture_cached_corner_gradient_matches_software_sampler",
+    test_texture_cached_corner_gradient_matches_software_sampler,
     devices=devices,
 )
 add_function_test(

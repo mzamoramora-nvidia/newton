@@ -202,6 +202,19 @@ class TestSimulationBenchmarks(unittest.TestCase):
             self.assertIn(benchmark_name, inventory)
             self.assertFalse(any(pattern.search(benchmark_name) for pattern in patterns), benchmark_name)
 
+    def test_hydro_collision_benchmarks_cover_default_and_tangent_paths(self):
+        """Discover one comparable collision benchmark for each hydro pressure path."""
+        benchmark_names = (
+            "simulation.bench_contacts.FastExampleContactHydroCollide.time_collide",
+            "simulation.bench_contacts.FastExampleContactHydroTangentCollide.time_collide",
+        )
+        inventory = {entry["name"] for entry in self._discover_benchmarks(pr_gate=False)}
+        patterns = tuple(re.compile(selection) for selection in load_benchmark_patterns())
+
+        for benchmark_name in benchmark_names:
+            self.assertIn(benchmark_name, inventory)
+            self.assertTrue(any(pattern.search(benchmark_name) for pattern in patterns), benchmark_name)
+
     def test_fast_kitchen_g1_validates_kitchen_body_count(self):
         """Validate the configured kitchen body count at runtime."""
         benchmark = bench_mujoco.FastKitchenG1()

@@ -20,6 +20,7 @@ sys.path.append(parent_dir)
 from benchmark_config import pr_gate_repeat
 
 import newton.examples
+from newton.geometry import HydroelasticSDF, hydroelastic_pressure_law_linear_tangent
 from newton.viewer import ViewerNull
 
 ISAACGYM_ENVS_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"
@@ -336,6 +337,10 @@ class _ExampleCollideBenchmark:
     def setup_cache(self):
         _download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
 
+    def _create_pipeline(self):
+        """Return the collision pipeline to warm and capture."""
+        return self.example.collision_pipeline
+
     def setup(self):
         device = wp.get_device()
         if not device.is_cuda:
@@ -345,7 +350,7 @@ class _ExampleCollideBenchmark:
         args.world_count = self.world_count
         args.num_per_world = 1
         self.example = example_cls(ViewerNull(num_frames=1), args)
-        self.pipeline = self.example.collision_pipeline
+        self.pipeline = self._create_pipeline()
         self.state = self.example.state_0
         self.contacts = self.example.contacts
 
@@ -376,6 +381,25 @@ class FastExampleContactHydroCollide(_ExampleCollideBenchmark):
     """Collision-only benchmark of the hydroelastic nut-bolt scene at 200 worlds."""
 
     module_names: ClassVar[list[str]] = ["newton.examples.contacts.example_nut_bolt_hydro"]
+
+
+class FastExampleContactHydroTangentCollide(FastExampleContactHydroCollide):
+    """Collision-only benchmark of tangent hydroelastic nut-bolt contacts."""
+
+    def _create_pipeline(self):
+        config = HydroelasticSDF.Config(
+            pressure_law_func=hydroelastic_pressure_law_linear_tangent,
+            mc_edge_clamp_min=0.0,
+        )
+        self.example.collision_pipeline = newton.CollisionPipeline(
+            self.example.model,
+            reduce_contacts=True,
+            rigid_contact_max=self.example.rigid_contact_max,
+            broad_phase=self.example.broad_phase_mode,
+            sdf_hydroelastic_config=config,
+            deterministic=self.example.deterministic,
+        )
+        return self.example.collision_pipeline
 
 
 class FastExampleContactPyramidDefaults:
@@ -591,6 +615,7 @@ if __name__ == "__main__":
         "FastExampleContactHydroWorkingDefaults": FastExampleContactHydroWorkingDefaults,
         "FastExampleContactSdfCollide": FastExampleContactSdfCollide,
         "FastExampleContactHydroCollide": FastExampleContactHydroCollide,
+        "FastExampleContactHydroTangentCollide": FastExampleContactHydroTangentCollide,
         "FastExampleContactPyramidDefaults": FastExampleContactPyramidDefaults,
         "FastConvexCollision": FastConvexCollision,
         "BroadPhaseCollision": BroadPhaseCollision,

@@ -70,9 +70,11 @@ from .sdf_texture import (
     _texture_read_voxel_corners_scalar,
     _texture_sample_sdf_at_voxel_paired,
     _texture_sample_sdf_at_voxel_scalar,
+    _texture_sample_sdf_gradient_from_mc_corners,
     _texture_sample_sdf_paired,
     _texture_sample_sdf_scalar,
     _texture_sample_sdf_zfiltered,
+    _texture_voxel_corners_are_fine,
     texture_sample_sdf_grad,
 )
 from .utils import _scan_scratch_size, scan_with_total
@@ -223,16 +225,11 @@ def get_effective_stiffness(k_a: wp.float32, k_b: wp.float32) -> wp.float32:
 
 @wp.func
 def _projected_series_gradient(
-    compression_slope_a: wp.float32,
-    compression_slope_b: wp.float32,
-    gradient_a: wp.vec3f,
-    gradient_b: wp.vec3f,
-    normal: wp.vec3f,
+    projected_slope_a: wp.float32,
+    projected_slope_b: wp.float32,
 ) -> wp.float32:
-    """Project raw SDF gradients and combine material slopes in series."""
-    projected_a = compression_slope_a * wp.dot(gradient_a, normal)
-    projected_b = compression_slope_b * -wp.dot(gradient_b, normal)
-    return projected_a * projected_b / (projected_a + projected_b)
+    """Combine two already projected pressure-law slopes in series."""
+    return projected_slope_a * projected_slope_b / (projected_slope_a + projected_slope_b)
 
 
 @wp.struct
@@ -2217,9 +2214,14 @@ def get_generate_contacts_kernel(
             z_id = wp.int32(iso_coords.z)
 
             # Compute cube state (marching cubes lookup)
-            cube_idx, corner_vals, corner_sdf_self, corner_sdf_other, any_verts_inside, all_verts_valid = wp.static(
-                mc_iterate
-            )(
+            (
+                cube_idx,
+                corner_vals,
+                corner_sdf_self,
+                corner_sdf_other,
+                any_verts_inside,
+                all_verts_valid,
+            ) = wp.static(mc_iterate)(
                 x_id,
                 y_id,
                 z_id,
@@ -2249,6 +2251,10 @@ def get_generate_contacts_kernel(
                 continue
 
             X_ws_b = transform_b
+            if wp.static(use_pressure_tangent):
+                X_b_to_a = wp.transform_multiply(transform_inverse_a, transform_b)
+                X_a_to_b = wp.transform_multiply(transform_inverse_b, transform_a)
+                corners_b_are_fine = _texture_voxel_corners_are_fine(sdf_data_b, x_id, y_id, z_id)
 
             # Generate faces and locally compact candidates before writing to the
             # global contact buffer (reduces atomics and downstream reduction load).
@@ -2336,11 +2342,15 @@ def get_generate_contacts_kernel(
                             continue
                         face_pressure = 0.5 * (law_a[0] + law_b[0])
 
-                        X_b_to_a = wp.transform_multiply(transform_inverse_a, transform_b)
                         point_a = wp.transform_point(X_b_to_a, face_center)
                         _, grad_a_a = texture_sample_sdf_grad(sdf_data_a, point_a)
-                        _, grad_b_b = texture_sample_sdf_grad(sdf_data_b, face_center)
-                        X_a_to_b = wp.transform_multiply(transform_inverse_b, transform_a)
+                        grad_b_b = _texture_sample_sdf_gradient_from_mc_corners(
+                            sdf_data_b,
+                            face_center,
+                            wp.vec3i(x_id, y_id, z_id),
+                            corner_sdf_self,
+                            corners_b_are_fine,
+                        )
                         grad_a_b = wp.transform_vector(X_a_to_b, grad_a_a)
 
                         projected_a = law_a[1] * wp.dot(grad_a_b, normal)
@@ -2360,13 +2370,7 @@ def get_generate_contacts_kernel(
                             or projected_sum <= EPS_SMALL
                         ):
                             continue
-                        projected_series = _projected_series_gradient(
-                            law_a[1],
-                            law_b[1],
-                            grad_a_b,
-                            grad_b_b,
-                            normal,
-                        )
+                        projected_series = _projected_series_gradient(projected_a, projected_b)
                         if not wp.isfinite(projected_series) or projected_series <= EPS_SMALL:
                             continue
                         face_tangent_stiffness = force_area * projected_series

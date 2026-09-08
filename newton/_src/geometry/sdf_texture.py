@@ -947,6 +947,56 @@ def _trilinear(corners: vec8f, tx: float, ty: float, tz: float) -> float:
 
 
 @wp.func
+def _texture_gradient_from_mc_corners(
+    corners: vec8f,
+    fraction: wp.vec3,
+    inv_sdf_dx: wp.vec3,
+) -> wp.vec3:
+    """Differentiate a fine voxel's trilinear SDF from marching-cubes corners.
+
+    This derivative is kept separate from :func:`texture_sample_sdf_grad`
+    because this hot path already has corners in marching-cubes order. Sharing
+    the sampler's interpolation helper would reorder or reread those values and
+    undo the reuse this function provides.
+
+    Args:
+        corners: SDF values in marching-cubes order
+            ``[v000, v100, v110, v010, v001, v101, v111, v011]``.
+        fraction: Query coordinates relative to the voxel's lower corner.
+        inv_sdf_dx: Inverse SDF voxel spacing [1/m].
+
+    Returns:
+        Analytical SDF gradient [unitless].
+    """
+    tx = fraction[0]
+    ty = fraction[1]
+    tz = fraction[2]
+    omtx = 1.0 - tx
+    omty = 1.0 - ty
+    omtz = 1.0 - tz
+
+    gx = (
+        omty * omtz * (corners[1] - corners[0])
+        + ty * omtz * (corners[2] - corners[3])
+        + omty * tz * (corners[5] - corners[4])
+        + ty * tz * (corners[6] - corners[7])
+    )
+    gy = (
+        omtx * omtz * (corners[3] - corners[0])
+        + tx * omtz * (corners[2] - corners[1])
+        + omtx * tz * (corners[7] - corners[4])
+        + tx * tz * (corners[6] - corners[5])
+    )
+    gz = (
+        omtx * omty * (corners[4] - corners[0])
+        + tx * omty * (corners[5] - corners[1])
+        + omtx * ty * (corners[7] - corners[3])
+        + tx * ty * (corners[6] - corners[2])
+    )
+    return wp.cw_mul(wp.vec3(gx, gy, gz), inv_sdf_dx)
+
+
+@wp.func
 def _texture_sample_sdf_at_voxel_variant(
     sdf: TextureSDFData,
     ix: int,
@@ -1246,7 +1296,7 @@ def _texture_read_voxel_corners_variant(
     iz: int,
     paired_samples: bool,
 ) -> vec8f:
-    """Read the eight corner SDF values of fine voxel ``(ix, iy, iz)`` with one slot lookup.
+    """Read the eight corner SDF values of fine voxel ``(ix, iy, iz)``.
 
     Returns the corners in marching-cubes order (see ``_mc_corner_offset``):
     ``[v000, v100, v110, v010, v001, v101, v111, v011]``.
@@ -1412,6 +1462,37 @@ def _texture_read_voxel_corners_paired(sdf: TextureSDFData, ix: int, iy: int, iz
 def _texture_read_voxel_corners_scalar(sdf: TextureSDFData, ix: int, iy: int, iz: int) -> vec8f:
     """Read a fine voxel's eight corners from a scalar SDF texture."""
     return _texture_read_voxel_corners_variant(sdf, ix, iy, iz, False)
+
+
+@wp.func
+def _texture_voxel_corners_are_fine(
+    sdf: TextureSDFData,
+    ix: int,
+    iy: int,
+    iz: int,
+) -> wp.bool:
+    """Return whether all of a voxel's corners are backed by fine data."""
+    coarse_x = sdf.coarse_texture.width - 1
+    coarse_y = sdf.coarse_texture.height - 1
+    coarse_z = sdf.coarse_texture.depth - 1
+
+    x_base = wp.clamp(int(float(ix) * sdf.fine_to_coarse), 0, coarse_x - 1)
+    y_base = wp.clamp(int(float(iy) * sdf.fine_to_coarse), 0, coarse_y - 1)
+    z_base = wp.clamp(int(float(iz) * sdf.fine_to_coarse), 0, coarse_z - 1)
+    x_upper_base = wp.clamp(int(float(ix + 1) * sdf.fine_to_coarse), 0, coarse_x - 1)
+    y_upper_base = wp.clamp(int(float(iy + 1) * sdf.fine_to_coarse), 0, coarse_y - 1)
+    z_upper_base = wp.clamp(int(float(iz + 1) * sdf.fine_to_coarse), 0, coarse_z - 1)
+
+    return (
+        sdf.subgrid_start_slots[x_base, y_base, z_base] < SLOT_LINEAR
+        and sdf.subgrid_start_slots[x_upper_base, y_base, z_base] < SLOT_LINEAR
+        and sdf.subgrid_start_slots[x_base, y_upper_base, z_base] < SLOT_LINEAR
+        and sdf.subgrid_start_slots[x_upper_base, y_upper_base, z_base] < SLOT_LINEAR
+        and sdf.subgrid_start_slots[x_base, y_base, z_upper_base] < SLOT_LINEAR
+        and sdf.subgrid_start_slots[x_upper_base, y_base, z_upper_base] < SLOT_LINEAR
+        and sdf.subgrid_start_slots[x_base, y_upper_base, z_upper_base] < SLOT_LINEAR
+        and sdf.subgrid_start_slots[x_upper_base, y_upper_base, z_upper_base] < SLOT_LINEAR
+    )
 
 
 @wp.func
@@ -1778,6 +1859,38 @@ def texture_sample_sdf_grad(
         grad = diff / diff_mag
 
     return sdf_val, grad
+
+
+@wp.func
+def _texture_sample_sdf_gradient_from_mc_corners(
+    sdf: TextureSDFData,
+    local_pos: wp.vec3,
+    voxel_coord: wp.vec3i,
+    corners: vec8f,
+    corners_are_fine: wp.bool,
+) -> wp.vec3:
+    """Sample an analytical gradient while reusing fine marching-cubes corners.
+
+    Falls back to :func:`texture_sample_sdf_grad` for coarse or mixed cells so
+    callers preserve the existing background-gradient behavior.
+
+    Args:
+        sdf: Texture SDF data.
+        local_pos: Query position in local SDF space [m].
+        voxel_coord: Fine-grid coordinate of the voxel's lower corner.
+        corners: SDF values in marching-cubes order.
+        corners_are_fine: Whether all corners were read from fine subgrids.
+
+    Returns:
+        Analytical SDF gradient [unitless].
+    """
+    if not corners_are_fine:
+        _, gradient = texture_sample_sdf_grad(sdf, local_pos)
+        return gradient
+
+    fine_pos = wp.cw_mul(local_pos - sdf.sdf_box_lower, sdf.inv_sdf_dx)
+    fraction = fine_pos - wp.vec3f(voxel_coord)
+    return _texture_gradient_from_mc_corners(corners, fraction, sdf.inv_sdf_dx)
 
 
 @wp.func

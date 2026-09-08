@@ -115,21 +115,12 @@ def _test_tangent_aggregate_linearization(
 
 @wp.kernel
 def _test_projected_series_gradient(
-    slopes: wp.array[wp.vec2f],
-    gradient_a: wp.array[wp.vec3f],
-    gradient_b: wp.array[wp.vec3f],
-    normal: wp.array[wp.vec3f],
+    projected_slopes: wp.array[wp.vec2f],
     projected_series: wp.array[wp.float32],
 ):
-    """Evaluate projected material slopes in series."""
+    """Combine already projected pressure-law slopes in series."""
     tid = wp.tid()
-    projected_series[tid] = _projected_series_gradient(
-        slopes[tid][0],
-        slopes[tid][1],
-        gradient_a[tid],
-        gradient_b[tid],
-        normal[tid],
-    )
+    projected_series[tid] = _projected_series_gradient(projected_slopes[tid][0], projected_slopes[tid][1])
 
 
 @wp.kernel
@@ -224,27 +215,20 @@ def test_triangle_fraction_rotations(test, device):
 
 def test_projected_series_gradient_algebra(test, device):
     """Preserve raw-gradient projection and material-series algebra."""
-    slopes_np = np.array([[12.0, 30.0]], dtype=np.float32)
-    gradient_a_np = np.array([[2.0, 1.0, 0.0]], dtype=np.float32)
-    gradient_b_np = np.array([[-0.5, 3.0, 0.0]], dtype=np.float32)
-    normal_np = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
+    projected_a = 12.0 * 2.0
+    projected_b = 30.0 * 0.5
     projected_series = wp.empty(1, dtype=wp.float32, device=device)
 
     wp.launch(
         _test_projected_series_gradient,
         dim=1,
         inputs=[
-            wp.array(slopes_np, dtype=wp.vec2f, device=device),
-            wp.array(gradient_a_np, dtype=wp.vec3f, device=device),
-            wp.array(gradient_b_np, dtype=wp.vec3f, device=device),
-            wp.array(normal_np, dtype=wp.vec3f, device=device),
+            wp.array([[projected_a, projected_b]], dtype=wp.vec2f, device=device),
             projected_series,
         ],
         device=device,
     )
 
-    projected_a = 12.0 * 2.0
-    projected_b = 30.0 * 0.5
     expected_gradient = projected_a * projected_b / (projected_a + projected_b)
     np.testing.assert_allclose(projected_series.numpy()[0], expected_gradient, rtol=1.0e-6)
 
